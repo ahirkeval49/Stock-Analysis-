@@ -37,7 +37,7 @@ def robinhood_login():
         rh.login(
             username=st.secrets["ROBINHOOD"]["USERNAME"],
             password=st.secrets["ROBINHOOD"]["PASSWORD"],
-            mfa_code=st.secrets["ROBINHOOD"]["MFA_CODE"]
+            
         )
         return True
     except Exception as e:
