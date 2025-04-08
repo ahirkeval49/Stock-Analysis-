@@ -217,7 +217,7 @@ with st.sidebar:
     st.header("💰 Portfolio Management")
     with st.form("add_stock"):
         ticker = st.text_input("Stock Ticker").upper()
-        qty = st.number_input("Quantity", min_value=1)
+        qty = st.number_input("Quantity", min_value=0.01)
         cost = st.number_input("Purchase Price", min_value=0.01)
         if st.form_submit_button("Add to Portfolio") and (price := get_current_price(ticker)):
             new_row = [ticker, qty, cost]
