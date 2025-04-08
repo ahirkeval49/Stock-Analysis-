@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 from pypfopt import EfficientFrontier, risk_models, expected_returns
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import pyotp  # Added for generating TOTP codes
+import time
+import random
 
 # Configure OpenAI API for DeepSeek.
 openai.api_key = st.secrets["DEEPSEEK"]["API_KEY"]
@@ -36,55 +38,67 @@ SEC_API = "https://data.sec.gov/submissions/"
 
 def robinhood_login():
     try:
-        # If a TOTP secret is provided, generate a TOTP code and use that for MFA.
+        # Logout any existing session (simulate a fresh human login)
+        r.logout()
+        
+        # Decide which authentication method to use.
         if "TOTP_SECRET" in st.secrets["ROBINHOOD"]:
+            # Use the authenticator (TOTP) method.
             totp = pyotp.TOTP(st.secrets["ROBINHOOD"]["TOTP_SECRET"])
             mfa_code = totp.now()
+            st.info("Using authenticator to generate MFA code...")
             login_response = r.login(
                 username=st.secrets["ROBINHOOD"]["USERNAME"],
                 password=st.secrets["ROBINHOOD"]["PASSWORD"],
                 mfa_code=mfa_code
             )
             st.write("Login response (TOTP):", login_response)
-            if login_response and "token" in login_response:
-                st.success("Logged in successfully using authenticator (TOTP)!")
+            if login_response and ("token" in login_response or "access_token" in login_response):
+                st.success("Logged in successfully using TOTP!")
                 return True
             else:
                 st.error("Login did not return a valid token using TOTP.")
                 return False
         else:
-            # No TOTP secret provided: fallback to push notification.
+            # Fallback: use push notification.
+            st.info("Initiating push notification login...")
             login_response = r.login(
                 username=st.secrets["ROBINHOOD"]["USERNAME"],
                 password=st.secrets["ROBINHOOD"]["PASSWORD"],
             )
             st.write("Login response (Push):", login_response)
-
-            # Check if a challenge (push notification) is required.
+            
             if login_response.get('challenge_id'):
                 challenge_id = login_response.get('challenge_id')
-                st.info("Challenge required: please approve the push notification in your Robinhood app.")
-                timeout = 60  # seconds to wait for approval
-                poll_interval = 5  # seconds between checks
-                elapsed = 0
-
+                st.info("Push notification sent. Please approve in your Robinhood app.")
+                
+                # Wait a random initial delay to simulate human reaction time.
+                initial_delay = random.uniform(3, 6)
+                st.info(f"Waiting {initial_delay:.1f} seconds before checking challenge status...")
+                time.sleep(initial_delay)
+                
+                timeout = 60  # total seconds to wait for approval
+                elapsed = initial_delay
+                poll_interval = random.uniform(4, 7)  # randomize polling interval
+                
                 while elapsed < timeout:
-                    # get_challenge_status is assumed to be implemented in your robin_stocks version
                     challenge_status = r.get_challenge_status(challenge_id)
                     st.write("Challenge status:", challenge_status)
-
+                    
                     if challenge_status.get("status") == "validated":
-                        st.success("Challenge validated, logged in!")
+                        st.success("Challenge validated; logged in successfully!")
                         return True
-
+                    
+                    # Wait a randomized interval between polls.
+                    st.info(f"Waiting {poll_interval:.1f} seconds before next check...")
                     time.sleep(poll_interval)
                     elapsed += poll_interval
-
+                    poll_interval = random.uniform(4, 7)  # re-randomize for next loop
+                
                 st.error("Challenge timed out. Please try again.")
                 return False
             else:
-                # If no challenge is required, check that a valid token is returned.
-                if login_response and "token" in login_response:
+                if login_response and ("token" in login_response or "access_token" in login_response):
                     st.success("Logged in successfully!")
                     return True
                 else:
