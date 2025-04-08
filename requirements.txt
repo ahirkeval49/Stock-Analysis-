@@ -1,0 +1,15 @@
+streamlit
+robin-stocks
+yfinance
+pandas
+numpy
+requests
+openai
+beautifulsoup4
+praw
+transformers
+matplotlib
+pypfopt
+python-dotenv
+tqdm
+torch
