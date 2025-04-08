@@ -1,6 +1,7 @@
 import os
-# Set a custom cache directory for transformers to avoid caching/permission issues.
-os.environ["TRANSFORMERS_CACHE"] = "/tmp/transformers_cache"
+# Set a custom cache directory for transformers to ensure write access.
+os.environ["TRANSFORMERS_CACHE"] = "/tmp/huggingface_cache"
+
 import streamlit as st
 import robin_stocks as rh
 import yfinance as yf
@@ -14,22 +15,46 @@ from transformers import pipeline
 import matplotlib.pyplot as plt
 from pypfopt import EfficientFrontier, risk_models, expected_returns
 
-# Configuration
+# Configure OpenAI API for DeepSeek.
+openai.api_key = st.secrets["DEEPSEEK"]["API_KEY"]
+openai.api_base = "https://api.deepseek.com"
+
+# Streamlit configuration.
 st.set_page_config(page_title="AI Portfolio Optimizer", layout="wide")
 
-# Initialize components
-sentiment_analyzer = pipeline('sentiment-analysis',model="distilbert-base-uncased-finetuned-sst-2-english", cache_dir="/tmp/huggingface_cache")
-reddit = praw.Reddit(client_id=st.secrets["REDDIT"]["CLIENT_ID"],
-                     client_secret=st.secrets["REDDIT"]["CLIENT_SECRET"],
-                     user_agent='portfolio-analyzer')
+def load_sentiment_pipeline():
+    """
+    Attempt to load the sentiment-analysis model from Hugging Face Hub.
+    If connection fails, fall back to a locally stored model.
+    """
+    try:
+        # Try to load the online model with a custom cache directory.
+        return pipeline(
+            "sentiment-analysis",
+            model="distilbert-base-uncased-finetuned-sst-2-english",
+            cache_dir="/tmp/huggingface_cache"
+        )
+    except OSError as e:
+        st.error("Failed to load model from Hugging Face Hub. "
+                 "Please check your internet connectivity or ensure the model files are available locally.")
+        # Specify the local path to the pre-downloaded model.
+        local_model_path = "./models/distilbert-base-uncased-finetuned-sst-2-english"
+        return pipeline(
+            "sentiment-analysis",
+            model=local_model_path
+        )
 
-# Initialize DeepSeek client
-deepseek_client = OpenAI(
-    api_key=st.secrets["DEEPSEEK"]["API_KEY"],
-    base_url="https://api.deepseek.com"
+# Initialize sentiment analysis pipeline with a fallback option.
+sentiment_analyzer = load_sentiment_pipeline()
+
+# Initialize Reddit client.
+reddit = praw.Reddit(
+    client_id=st.secrets["REDDIT"]["CLIENT_ID"],
+    client_secret=st.secrets["REDDIT"]["CLIENT_SECRET"],
+    user_agent='portfolio-analyzer'
 )
 
-# SEC API Configuration
+# SEC API base URL.
 SEC_API = "https://data.sec.gov/submissions/"
 
 def robinhood_login():
@@ -45,7 +70,7 @@ def robinhood_login():
         return False
 
 def get_robinhood_portfolio():
-    """Fetch and format Robinhood portfolio"""
+    """Fetch and format Robinhood portfolio."""
     holdings = rh.build_holdings()
     portfolio = []
     
@@ -63,7 +88,7 @@ def get_robinhood_portfolio():
     return df
 
 def get_13f_data(company_name):
-    """Retrieve SEC 13F filings data"""
+    """Retrieve SEC 13F filings data."""
     try:
         response = requests.get(SEC_API + company_name.lower().replace(" ", "-") + ".json")
         return pd.DataFrame(response.json()['filings']['recent'])
@@ -72,7 +97,7 @@ def get_13f_data(company_name):
         return pd.DataFrame()
 
 def analyze_sentiment(ticker):
-    """Analyze Reddit sentiment for a ticker"""
+    """Analyze Reddit sentiment for a ticker."""
     try:
         posts = reddit.subreddit('stocks').search(ticker, limit=50)
         sentiments = []
@@ -85,7 +110,7 @@ def analyze_sentiment(ticker):
         return 0.0
 
 def get_financial_data(ticker):
-    """Fetch financial data from Yahoo Finance"""
+    """Fetch financial data from Yahoo Finance."""
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
@@ -101,7 +126,7 @@ def get_financial_data(ticker):
         return {}
 
 def optimize_portfolio(prices):
-    """Portfolio optimization using Modern Portfolio Theory"""
+    """Portfolio optimization using Modern Portfolio Theory."""
     try:
         mu = expected_returns.mean_historical_return(prices)
         S = risk_models.sample_cov(prices)
@@ -113,7 +138,7 @@ def optimize_portfolio(prices):
         return {}
 
 def analyze_with_deepseek(context, question):
-    """Use DeepSeek for advanced financial analysis"""
+    """Use DeepSeek for advanced financial analysis via the OpenAI API."""
     system_prompt = """You are a senior financial analyst with expertise in:
     - Portfolio optimization
     - Fundamental analysis
@@ -123,7 +148,7 @@ def analyze_with_deepseek(context, question):
     Provide detailed, professional recommendations."""
     
     try:
-        response = deepseek_client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="deepseek-reasoner",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -138,7 +163,7 @@ def analyze_with_deepseek(context, question):
         return "Analysis unavailable"
 
 def get_analysis_context(portfolio, financial_data, sentiment_scores):
-    """Prepare context for AI analysis"""
+    """Prepare context for AI analysis."""
     return f"""
     Portfolio Summary:
     - Total Value: ${portfolio['Equity'].sum():,.2f}
@@ -159,7 +184,7 @@ def get_analysis_context(portfolio, financial_data, sentiment_scores):
 # Streamlit UI
 st.title("AI Portfolio Optimizer with DeepSeek Integration")
 
-# Sidebar Connection
+# Sidebar: Robinhood connection and portfolio snapshot.
 with st.sidebar:
     st.header("Account Setup")
     if st.button("Connect Robinhood"):
@@ -187,7 +212,7 @@ if 'portfolio' in st.session_state:
         optimal_weights = optimize_portfolio(prices)
         analysis_context = get_analysis_context(portfolio, financial_data, sentiment_scores)
 
-    # Display Sections
+    # Display Sections: Financial Overview and Optimization Recommendations.
     col1, col2 = st.columns(2)
     
     with col1:
@@ -223,17 +248,23 @@ if 'portfolio' in st.session_state:
     ])
     
     if analysis_type == "Portfolio Health Check":
-        analysis = analyze_with_deepseek(analysis_context, 
-            "Analyze portfolio strengths/weaknesses and provide optimization recommendations")
+        analysis = analyze_with_deepseek(
+            analysis_context, 
+            "Analyze portfolio strengths/weaknesses and provide optimization recommendations"
+        )
         st.write(analysis)
     elif analysis_type == "Stock-Specific Recommendation":
         selected = st.selectbox("Select Stock", tickers)
-        analysis = analyze_with_deepseek(analysis_context,
-            f"Should we increase or decrease exposure to {selected}? Consider valuation and market conditions")
+        analysis = analyze_with_deepseek(
+            analysis_context,
+            f"Should we increase or decrease exposure to {selected}? Consider valuation and market conditions"
+        )
         st.write(analysis)
     else:
-        analysis = analyze_with_deepseek(analysis_context,
-            "Identify key risks and suggest mitigation strategies")
+        analysis = analyze_with_deepseek(
+            analysis_context,
+            "Identify key risks and suggest mitigation strategies"
+        )
         st.write(analysis)
 
     # SEC 13F Search
@@ -247,19 +278,19 @@ if 'portfolio' in st.session_state:
     st.subheader("Portfolio Analytics")
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     
-    # Pie Chart
+    # Pie Chart of portfolio allocation.
     ax1.pie(portfolio['Weight'], labels=portfolio['Ticker'], autopct='%1.1f%%')
     ax1.set_title('Current Allocation')
     
-    # Price Trends
+    # Normalized price performance for the top 3 tickers.
     for ticker in tickers[:3]:
-        ax2.plot(prices[ticker]/prices[ticker].iloc[0], label=ticker)
+        ax2.plot(prices[ticker] / prices[ticker].iloc[0], label=ticker)
     ax2.set_title('Normalized Price Performance (1Y)')
     ax2.legend()
     
     st.pyplot(fig)
 
-# Security Notes
+# Security Notes in Sidebar
 st.sidebar.warning("""
 **Security Best Practices:**
 1. Enable 2FA on all accounts
