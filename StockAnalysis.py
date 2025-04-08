@@ -16,7 +16,7 @@ from pypfopt import EfficientFrontier, risk_models, expected_returns
 st.set_page_config(page_title="AI Portfolio Optimizer", layout="wide")
 
 # Initialize components
-sentiment_analyzer = pipeline('sentiment-analysis')
+sentiment_analyzer = pipeline('sentiment-analysis',model="distilbert-base-uncased-finetuned-sst-2-english")
 reddit = praw.Reddit(client_id=st.secrets["REDDIT"]["CLIENT_ID"],
                      client_secret=st.secrets["REDDIT"]["CLIENT_SECRET"],
                      user_agent='portfolio-analyzer')
