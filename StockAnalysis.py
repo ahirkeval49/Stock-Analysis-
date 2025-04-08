@@ -1,7 +1,4 @@
 import os
-# Set a custom cache directory for transformers to ensure write access.
-os.environ["TRANSFORMERS_CACHE"] = "/tmp/huggingface_cache"
-
 import streamlit as st
 import robin_stocks as rh
 import yfinance as yf
@@ -11,9 +8,9 @@ import requests
 import openai
 from bs4 import BeautifulSoup
 import praw
-from transformers import pipeline
 import matplotlib.pyplot as plt
 from pypfopt import EfficientFrontier, risk_models, expected_returns
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # Configure OpenAI API for DeepSeek.
 openai.api_key = st.secrets["DEEPSEEK"]["API_KEY"]
@@ -22,36 +19,14 @@ openai.api_base = "https://api.deepseek.com"
 # Streamlit configuration.
 st.set_page_config(page_title="AI Portfolio Optimizer", layout="wide")
 
-def load_sentiment_pipeline():
-    """
-    Attempt to load the sentiment-analysis model from Hugging Face Hub.
-    If connection fails, fall back to a locally stored model.
-    """
-    try:
-        # Try to load the online model with a custom cache directory.
-        return pipeline(
-            "sentiment-analysis",
-            model="distilbert-base-uncased-finetuned-sst-2-english",
-            cache_dir="/tmp/huggingface_cache"
-        )
-    except OSError as e:
-        st.error("Failed to load model from Hugging Face Hub. "
-                 "Please check your internet connectivity or ensure the model files are available locally.")
-        # Specify the local path to the pre-downloaded model.
-        local_model_path = "./models/distilbert-base-uncased-finetuned-sst-2-english"
-        return pipeline(
-            "sentiment-analysis",
-            model=local_model_path
-        )
-
-# Initialize sentiment analysis pipeline with a fallback option.
-sentiment_analyzer = load_sentiment_pipeline()
+# Initialize VADER sentiment analyzer.
+vader_analyzer = SentimentIntensityAnalyzer()
 
 # Initialize Reddit client.
 reddit = praw.Reddit(
     client_id=st.secrets["REDDIT"]["CLIENT_ID"],
     client_secret=st.secrets["REDDIT"]["CLIENT_SECRET"],
-    user_agent='portfolio-analyzer'
+    user_agent='Stock Analysis'
 )
 
 # SEC API base URL.
@@ -97,14 +72,14 @@ def get_13f_data(company_name):
         return pd.DataFrame()
 
 def analyze_sentiment(ticker):
-    """Analyze Reddit sentiment for a ticker."""
+    """Analyze Reddit sentiment for a ticker using VADER."""
     try:
         posts = reddit.subreddit('stocks').search(ticker, limit=50)
-        sentiments = []
+        scores = []
         for post in posts:
-            sentiment = sentiment_analyzer(post.title)[0]
-            sentiments.append(sentiment['score'] if sentiment['label'] == 'POSITIVE' else -sentiment['score'])
-        return np.mean(sentiments)
+            sentiment = vader_analyzer.polarity_scores(post.title)
+            scores.append(sentiment["compound"])
+        return np.mean(scores)
     except Exception as e:
         st.error(f"Sentiment analysis failed: {str(e)}")
         return 0.0
@@ -184,7 +159,6 @@ def get_analysis_context(portfolio, financial_data, sentiment_scores):
 # Streamlit UI
 st.title("AI Portfolio Optimizer with DeepSeek Integration")
 
-# Sidebar: Robinhood connection and portfolio snapshot.
 with st.sidebar:
     st.header("Account Setup")
     if st.button("Connect Robinhood"):
@@ -199,12 +173,10 @@ with st.sidebar:
         st.write(f"Total Value: ${st.session_state.portfolio['Equity'].sum():,.2f}")
         st.write(f"Number of Holdings: {len(st.session_state.portfolio)}")
 
-# Main Analysis
 if 'portfolio' in st.session_state:
     portfolio = st.session_state.portfolio
     tickers = portfolio['Ticker'].tolist()
     
-    # Data Collection
     with st.spinner("Analyzing portfolio..."):
         financial_data = {t: get_financial_data(t) for t in tickers}
         sentiment_scores = {t: analyze_sentiment(t) for t in tickers}
@@ -212,7 +184,6 @@ if 'portfolio' in st.session_state:
         optimal_weights = optimize_portfolio(prices)
         analysis_context = get_analysis_context(portfolio, financial_data, sentiment_scores)
 
-    # Display Sections: Financial Overview and Optimization Recommendations.
     col1, col2 = st.columns(2)
     
     with col1:
@@ -233,13 +204,10 @@ if 'portfolio' in st.session_state:
             delta = weight - current
             
             st.markdown(f"**{ticker}**")
-            st.metric("Recommended Allocation", 
-                     f"{weight*100:.2f}%", 
-                     f"{delta*100:.2f}% {'↑' if delta > 0 else '↓'}")
+            st.metric("Recommended Allocation", f"{weight*100:.2f}%", f"{delta*100:.2f}% {'↑' if delta > 0 else '↓'}")
             st.progress(weight)
             st.markdown("---")
 
-    # DeepSeek Analysis
     st.subheader("AI-Powered Insights")
     analysis_type = st.selectbox("Analysis Type", [
         "Portfolio Health Check",
@@ -248,41 +216,31 @@ if 'portfolio' in st.session_state:
     ])
     
     if analysis_type == "Portfolio Health Check":
-        analysis = analyze_with_deepseek(
-            analysis_context, 
-            "Analyze portfolio strengths/weaknesses and provide optimization recommendations"
-        )
+        analysis = analyze_with_deepseek(analysis_context, 
+            "Analyze portfolio strengths/weaknesses and provide optimization recommendations")
         st.write(analysis)
     elif analysis_type == "Stock-Specific Recommendation":
         selected = st.selectbox("Select Stock", tickers)
-        analysis = analyze_with_deepseek(
-            analysis_context,
-            f"Should we increase or decrease exposure to {selected}? Consider valuation and market conditions"
-        )
+        analysis = analyze_with_deepseek(analysis_context,
+            f"Should we increase or decrease exposure to {selected}? Consider valuation and market conditions")
         st.write(analysis)
     else:
-        analysis = analyze_with_deepseek(
-            analysis_context,
-            "Identify key risks and suggest mitigation strategies"
-        )
+        analysis = analyze_with_deepseek(analysis_context,
+            "Identify key risks and suggest mitigation strategies")
         st.write(analysis)
 
-    # SEC 13F Search
     st.subheader("Institutional Holdings Research")
     company = st.text_input("Enter company name for 13F filings:")
     if company:
         filings = get_13f_data(company)
         st.dataframe(filings)
 
-    # Visualizations
     st.subheader("Portfolio Analytics")
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     
-    # Pie Chart of portfolio allocation.
     ax1.pie(portfolio['Weight'], labels=portfolio['Ticker'], autopct='%1.1f%%')
     ax1.set_title('Current Allocation')
     
-    # Normalized price performance for the top 3 tickers.
     for ticker in tickers[:3]:
         ax2.plot(prices[ticker] / prices[ticker].iloc[0], label=ticker)
     ax2.set_title('Normalized Price Performance (1Y)')
@@ -290,7 +248,6 @@ if 'portfolio' in st.session_state:
     
     st.pyplot(fig)
 
-# Security Notes in Sidebar
 st.sidebar.warning("""
 **Security Best Practices:**
 1. Enable 2FA on all accounts
