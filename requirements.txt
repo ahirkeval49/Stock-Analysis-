@@ -1,15 +1,21 @@
-streamlit
-robin-stocks
-yfinance
-pandas
-numpy
-requests
-openai
-beautifulsoup4
-praw
-transformers
-matplotlib
-pypfopt
-python-dotenv
-tqdm
-torch
+streamlit==1.44.1
+robin-stocks==3.3.1
+yfinance==0.2.55
+pandas==2.2.3
+numpy==1.26.4
+requests==2.31.1
+openai==1.17.1
+beautifulsoup4==4.12.3
+praw==7.7.0
+transformers==4.38.2
+matplotlib==3.8.3
+pypfopt==1.6.0
+python-dotenv==1.0.1
+torch==2.2.1
+tqdm==4.66.2
+markdown-it-py==3.0.0
+mdurl==0.1.2
+Pygments==2.17.2
+rich==13.7.1
+scipy==1.12.0  # Required for pypfopt
+cvxpy==1.4.1    # Required for pypfopt
