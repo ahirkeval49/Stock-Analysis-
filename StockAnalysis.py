@@ -1,318 +1,262 @@
-import os
-import time
 import streamlit as st
-from robin_stocks import robinhood as r
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
 import openai
-from bs4 import BeautifulSoup
-import praw
 import matplotlib.pyplot as plt
 from pypfopt import EfficientFrontier, risk_models, expected_returns
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-import pyotp  # Added for generating TOTP codes
-import time
-import random
+from datetime import datetime
 
-# Configure OpenAI API for DeepSeek.
+# Configure OpenAI API for DeepSeek
 openai.api_key = st.secrets["DEEPSEEK"]["API_KEY"]
 openai.api_base = "https://api.deepseek.com"
 
-# Streamlit configuration.
-st.set_page_config(page_title="AI Portfolio Optimizer", layout="wide")
+# Initialize Sentiment Analyzer
+vader = SentimentIntensityAnalyzer()
 
-# Initialize VADER sentiment analyzer.
-vader_analyzer = SentimentIntensityAnalyzer()
+# Streamlit Configuration
+st.set_page_config(page_title="AI Stock Analyst", layout="wide")
+st.title("📈 AI-Powered Stock Analysis & Portfolio Optimizer")
 
-# Initialize Reddit client.
-reddit = praw.Reddit(
-    client_id=st.secrets["REDDIT"]["CLIENT_ID"],
-    client_secret=st.secrets["REDDIT"]["CLIENT_SECRET"],
-    user_agent='Stock Analysis'
-)
+# Initialize Session State
+if 'portfolio' not in st.session_state:
+    st.session_state.portfolio = pd.DataFrame(columns=['Ticker', 'Quantity', 'Purchase Price', 'Current Price', 'Value'])
 
-# SEC API base URL.
-SEC_API = "https://data.sec.gov/submissions/"
-
-def robinhood_login():
+# Utility Functions
+def get_current_price(ticker):
     try:
-        # Attempt to logout; if not logged in, catch the error and continue.
-        try:
-            r.logout()
-        except Exception as ex:
-            st.info("No active session to logout from; proceeding with login.")
-
-        # Use TOTP if TOTP_SECRET is provided.
-        if "TOTP_SECRET" in st.secrets["ROBINHOOD"]:
-            totp = pyotp.TOTP(st.secrets["ROBINHOOD"]["TOTP_SECRET"])
-            mfa_code = totp.now()
-            st.info("Using TOTP authenticator for MFA.")
-            login_response = r.login(
-                username=st.secrets["ROBINHOOD"]["USERNAME"],
-                password=st.secrets["ROBINHOOD"]["PASSWORD"],
-                mfa_code=mfa_code
-            )
-            st.write("Login response (TOTP):", login_response)
-            if login_response and ("token" in login_response or "access_token" in login_response):
-                st.success("Logged in successfully using TOTP!")
-                return True
-            else:
-                st.error("Login did not return a valid token using TOTP.")
-                return False
-        else:
-            # Fallback: use push notification method.
-            st.info("Initiating push notification login...")
-            login_response = r.login(
-                username=st.secrets["ROBINHOOD"]["USERNAME"],
-                password=st.secrets["ROBINHOOD"]["PASSWORD"],
-            )
-            st.write("Login response (Push):", login_response)
-            if login_response.get('challenge_id'):
-                challenge_id = login_response.get('challenge_id')
-                st.info("Push notification sent. Please approve in your Robinhood app.")
-                # Wait a random initial delay to simulate human reaction time.
-                initial_delay = random.uniform(3, 6)
-                st.info(f"Waiting {initial_delay:.1f} seconds before checking challenge status...")
-                time.sleep(initial_delay)
-                timeout = 60  # seconds to wait for approval.
-                elapsed = initial_delay
-                poll_interval = random.uniform(4, 7)  # randomized polling interval.
-                while elapsed < timeout:
-                    challenge_status = r.get_challenge_status(challenge_id)
-                    st.write("Challenge status:", challenge_status)
-                    if challenge_status.get("status") == "validated":
-                        st.success("Challenge validated; logged in successfully!")
-                        return True
-                    st.info(f"Waiting {poll_interval:.1f} seconds before next check...")
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
-                    poll_interval = random.uniform(4, 7)  # re-randomize polling interval.
-                st.error("Challenge timed out. Please try again.")
-                return False
-            else:
-                if login_response and ("token" in login_response or "access_token" in login_response):
-                    st.success("Logged in successfully!")
-                    return True
-                else:
-                    st.error("Login did not return a valid token.")
-                    return False
-    except Exception as e:
-        st.error(f"Login failed: {str(e)}")
-        return False
-
-
-# The rest of your code remains unchanged.
-def get_robinhood_portfolio():
-    """Fetch and format Robinhood portfolio."""
-    holdings = r.build_holdings()
-    portfolio = []
-    
-    for symbol, data in holdings.items():
-        portfolio.append({
-            'Ticker': symbol,
-            'Quantity': float(data['quantity']),
-            'Avg Cost': float(data['average_buy_price']),
-            'Price': float(data['price']),
-            'Equity': float(data['equity'])
-        })
-    
-    df = pd.DataFrame(portfolio)
-    df['Weight'] = df['Equity'] / df['Equity'].sum()
-    return df
-
-def get_13f_data(company_name):
-    """Retrieve SEC 13F filings data."""
-    try:
-        response = requests.get(SEC_API + company_name.lower().replace(" ", "-") + ".json")
-        return pd.DataFrame(response.json()['filings']['recent'])
-    except Exception as e:
-        st.error(f"Failed to fetch 13F data: {str(e)}")
-        return pd.DataFrame()
+        data = yf.Ticker(ticker).history(period='1d')
+        return data['Close'].iloc[-1]
+    except:
+        return None
 
 def analyze_sentiment(ticker):
-    """Analyze Reddit sentiment for a ticker using VADER."""
     try:
-        posts = reddit.subreddit('stocks').search(ticker, limit=50)
-        scores = []
-        for post in posts:
-            sentiment = vader_analyzer.polarity_scores(post.title)
-            scores.append(sentiment["compound"])
+        url = f"https://www.reddit.com/r/stocks/search.json?q={ticker}&restrict_sr=1"
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+        posts = [item['data']['title'] for item in response.json()['data']['children'][:10]]
+        scores = [vader.polarity_scores(post)['compound'] for post in posts]
         return np.mean(scores)
-    except Exception as e:
-        st.error(f"Sentiment analysis failed: {str(e)}")
-        return 0.0
+    except:
+        return 0
 
-def get_financial_data(ticker):
-    """Fetch financial data from Yahoo Finance."""
+def get_institutional_activity():
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        hist = stock.history(period="1y")
-        return {
-            'price': hist['Close'][-1],
-            'fair_value': info.get('fairValue', None),
-            'pe_ratio': info.get('trailingPE', None),
-            'market_cap': info.get('marketCap', None)
-        }
-    except Exception as e:
-        st.error(f"Failed to get data for {ticker}: {str(e)}")
-        return {}
+        url = "https://www.dataroma.com/m/home.php"
+        response = requests.get(url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        stocks = []
+        for row in soup.select('#recentDealsTable tr')[1:6]:
+            cells = row.find_all('td')
+            stocks.append({
+                'Ticker': cells[1].text,
+                'Company': cells[2].text,
+                'Manager': cells[3].text,
+                'Action': cells[4].text
+            })
+        return pd.DataFrame(stocks)
+    except:
+        return pd.DataFrame()
 
-def optimize_portfolio(prices):
-    """Portfolio optimization using Modern Portfolio Theory."""
+def optimize_portfolio(prices, budget):
     try:
         mu = expected_returns.mean_historical_return(prices)
         S = risk_models.sample_cov(prices)
         ef = EfficientFrontier(mu, S)
         weights = ef.max_sharpe()
-        return ef.clean_weights()
+        cleaned_weights = ef.clean_weights()
+        
+        # Calculate allocation in dollars
+        allocation = {k: v * budget for k, v in cleaned_weights.items()}
+        return allocation
     except Exception as e:
-        st.error(f"Optimization failed: {str(e)}")
+        st.error(f"Optimization error: {str(e)}")
         return {}
 
-def analyze_with_deepseek(context, question):
-    """Use DeepSeek for advanced financial analysis via the OpenAI API."""
-    system_prompt = """You are a senior financial analyst with expertise in:
-    - Portfolio optimization
-    - Fundamental analysis
-    - Technical analysis
-    - Market sentiment evaluation
-    - Risk management
-    Provide detailed, professional recommendations."""
+def get_ai_analysis(prompt, context=""):
+    system_msg = """You are a senior financial analyst with expertise in equity markets. 
+    Provide detailed, professional recommendations considering fundamental analysis, 
+    technical indicators, market sentiment, and portfolio optimization principles."""
     
     try:
         response = openai.ChatCompletion.create(
             model="deepseek-reasoner",
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": f"{context}\n{prompt}"}
             ],
             temperature=0.3,
             max_tokens=500
         )
         return response.choices[0].message.content
-    except Exception as e:
-        st.error(f"DeepSeek analysis failed: {str(e)}")
-        return "Analysis unavailable"
+    except:
+        return "AI analysis temporarily unavailable"
 
-def get_analysis_context(portfolio, financial_data, sentiment_scores):
-    """Prepare context for AI analysis."""
-    return f"""
-    Portfolio Summary:
-    - Total Value: ${portfolio['Equity'].sum():,.2f}
-    - Holdings: {len(portfolio)} stocks
-    - Top Holdings: {portfolio.nlargest(3, 'Weight').to_dict()}
-
-    Fundamental Analysis:
-    {pd.DataFrame(financial_data).T.to_markdown()}
-
-    Market Sentiment:
-    {pd.Series(sentiment_scores).to_markdown()}
-
-    Risk Metrics:
-    - Volatility: {portfolio['Equity'].std():.2f}
-    - Concentration Risk: {portfolio['Weight'].max()*100:.1f}% in top holding
-    """
-
-# Streamlit UI
-st.title("AI Portfolio Optimizer with DeepSeek Integration")
-
+# Sidebar - Portfolio Management
 with st.sidebar:
-    st.header("Account Setup")
-    if st.button("Connect Robinhood"):
-        if robinhood_login():
-            st.session_state.portfolio = get_robinhood_portfolio()
-            st.success("Portfolio loaded!")
-        else:
-            st.error("Connection failed")
+    st.header("💰 Portfolio Management")
+    with st.form("add_stock"):
+        ticker = st.text_input("Stock Ticker").upper()
+        qty = st.number_input("Quantity", min_value=1)
+        cost = st.number_input("Purchase Price", min_value=0.01)
+        if st.form_submit_button("Add to Portfolio"):
+            current_price = get_current_price(ticker)
+            if current_price:
+                new_entry = pd.DataFrame([[ticker, qty, cost, current_price, qty*current_price]],
+                                        columns=st.session_state.portfolio.columns)
+                st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_entry])
+                st.success(f"{ticker} added to portfolio!")
+            else:
+                st.error("Invalid ticker or price data unavailable")
 
-    if 'portfolio' in st.session_state:
-        st.subheader("Current Snapshot")
-        st.write(f"Total Value: ${st.session_state.portfolio['Equity'].sum():,.2f}")
-        st.write(f"Number of Holdings: {len(st.session_state.portfolio)}")
+    if not st.session_state.portfolio.empty:
+        if st.button("Clear Portfolio"):
+            st.session_state.portfolio = pd.DataFrame()
+            st.experimental_rerun()
 
-if 'portfolio' in st.session_state:
-    portfolio = st.session_state.portfolio
-    tickers = portfolio['Ticker'].tolist()
-    
-    with st.spinner("Analyzing portfolio..."):
-        financial_data = {t: get_financial_data(t) for t in tickers}
-        sentiment_scores = {t: analyze_sentiment(t) for t in tickers}
-        prices = pd.DataFrame({t: yf.download(t, period="1y")['Close'] for t in tickers})
-        optimal_weights = optimize_portfolio(prices)
-        analysis_context = get_analysis_context(portfolio, financial_data, sentiment_scores)
+# Main Interface
+tab1, tab2, tab3, tab4 = st.tabs(["Portfolio Overview", "Stock Analysis", "Recommendations", "Market Insights"])
 
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Financial Overview")
-        for ticker in tickers:
-            data = financial_data[ticker]
-            with st.expander(f"{ticker} Analysis"):
-                st.metric("Current Price", f"${data['price']:.2f}")
-                st.metric("Fair Value", f"${data['fair_value']:.2f}" if data['fair_value'] else "N/A")
-                st.write(f"P/E Ratio: {data['pe_ratio']:.2f}" if data['pe_ratio'] else "P/E: N/A")
-                st.write(f"Market Cap: ${data['market_cap']/1e9:.2f}B" if data['market_cap'] else "")
-                st.write(f"Sentiment Score: {sentiment_scores[ticker]:.2f}")
-
-    with col2:
-        st.subheader("Optimization Recommendations")
-        for ticker, weight in optimal_weights.items():
-            current = portfolio[portfolio['Ticker'] == ticker]['Weight'].values[0]
-            delta = weight - current
+with tab1:
+    if not st.session_state.portfolio.empty:
+        # Update prices
+        st.session_state.portfolio['Current Price'] = st.session_state.portfolio['Ticker'].apply(get_current_price)
+        st.session_state.portfolio['Value'] = st.session_state.portfolio['Quantity'] * st.session_state.portfolio['Current Price']
+        
+        # Display portfolio
+        total_value = st.session_state.portfolio['Value'].sum()
+        st.subheader(f"Portfolio Value: ${total_value:,.2f}")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.dataframe(st.session_state.portfolio.style.format({
+                'Current Price': '${:.2f}',
+                'Purchase Price': '${:.2f}',
+                'Value': '${:,.2f}'
+            }))
+        
+        with col2:
+            fig, ax = plt.subplots()
+            st.session_state.portfolio.groupby('Ticker')['Value'].sum().plot.pie(
+                ax=ax, autopct='%1.1f%%', startangle=90
+            )
+            st.pyplot(fig)
+        
+        # Portfolio Optimization
+        st.subheader("Portfolio Optimization")
+        budget = st.number_input("Available Investment Budget ($)", min_value=100, value=1000)
+        if st.button("Optimize Portfolio"):
+            tickers = st.session_state.portfolio['Ticker'].tolist()
+            prices = yf.download(tickers, period="1y")['Close']
+            allocation = optimize_portfolio(prices, budget)
             
-            st.markdown(f"**{ticker}**")
-            st.metric("Recommended Allocation", f"{weight*100:.2f}%", f"{delta*100:.2f}% {'↑' if delta > 0 else '↓'}")
-            st.progress(weight)
-            st.markdown("---")
-
-    st.subheader("AI-Powered Insights")
-    analysis_type = st.selectbox("Analysis Type", [
-        "Portfolio Health Check",
-        "Stock-Specific Recommendation",
-        "Risk Assessment"
-    ])
-    
-    if analysis_type == "Portfolio Health Check":
-        analysis = analyze_with_deepseek(analysis_context, 
-            "Analyze portfolio strengths/weaknesses and provide optimization recommendations")
-        st.write(analysis)
-    elif analysis_type == "Stock-Specific Recommendation":
-        selected = st.selectbox("Select Stock", tickers)
-        analysis = analyze_with_deepseek(analysis_context,
-            f"Should we increase or decrease exposure to {selected}? Consider valuation and market conditions")
-        st.write(analysis)
+            if allocation:
+                st.write("Recommended Allocation:")
+                for ticker, amount in allocation.items():
+                    st.write(f"{ticker}: ${amount:,.2f} ({amount/budget*100:.1f}%)")
+                
+                analysis = get_ai_analysis(
+                    f"Portfolio optimization recommendation for ${budget} investment. Current holdings: {st.session_state.portfolio}",
+                    "Provide detailed reasoning for the allocation recommendations."
+                )
+                st.write(analysis)
     else:
-        analysis = analyze_with_deepseek(analysis_context,
-            "Identify key risks and suggest mitigation strategies")
-        st.write(analysis)
+        st.info("Add stocks to your portfolio using the sidebar")
 
-    st.subheader("Institutional Holdings Research")
-    company = st.text_input("Enter company name for 13F filings:")
-    if company:
-        filings = get_13f_data(company)
-        st.dataframe(filings)
+with tab2:
+    st.subheader("Stock Analysis")
+    analysis_ticker = st.text_input("Enter ticker for analysis:").upper()
+    
+    if analysis_ticker:
+        with st.spinner("Gathering data..."):
+            try:
+                stock = yf.Ticker(analysis_ticker)
+                info = stock.info
+                hist = stock.history(period="1y")
+                sentiment = analyze_sentiment(analysis_ticker)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.subheader("Fundamental Analysis")
+                    st.metric("Current Price", f"${info.get('currentPrice', hist['Close'][-1]):.2f}")
+                    st.write(f"PE Ratio: {info.get('trailingPE', 'N/A')}")
+                    st.write(f"Market Cap: ${info.get('marketCap', 'N/A'):,}")
+                    st.write(f"52W Range: {info.get('fiftyTwoWeekLow', 'N/A')} - {info.get('fiftyTwoWeekHigh', 'N/A')}")
+                
+                with col2:
+                    st.subheader("Technical Analysis")
+                    fig, ax = plt.subplots()
+                    hist['Close'].plot(ax=ax)
+                    st.pyplot(fig)
+                    st.write(f"Sentiment Score: {sentiment:.2f}/1.0")
+                
+                st.subheader("AI Analysis")
+                analysis = get_ai_analysis(
+                    f"Should I buy {analysis_ticker}? Current price: {hist['Close'][-1]:.2f}",
+                    f"Company info: {info}"
+                )
+                st.write(analysis)
 
-    st.subheader("Portfolio Analytics")
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-    
-    ax1.pie(portfolio['Weight'], labels=portfolio['Ticker'], autopct='%1.1f%%')
-    ax1.set_title('Current Allocation')
-    
-    for ticker in tickers[:3]:
-        ax2.plot(prices[ticker] / prices[ticker].iloc[0], label=ticker)
-    ax2.set_title('Normalized Price Performance (1Y)')
-    ax2.legend()
-    
-    st.pyplot(fig)
+            except:
+                st.error("Could not retrieve data for this ticker")
 
-st.sidebar.warning("""
-**Security Best Practices:**
-1. Enable 2FA on all accounts
-2. Never share API credentials
-3. Use dedicated API keys
-4. Monitor account activity
-5. Revoke access if compromised
+with tab3:
+    st.subheader("Investment Recommendations")
+    budget = st.number_input("Daily Investment Budget ($)", min_value=100, value=1000, key="rec_budget")
+    
+    if st.button("Generate Recommendations"):
+        with st.spinner("Analyzing market opportunities..."):
+            # Get institutional activity
+            institutional = get_institutional_activity()
+            
+            # Analyze trending stocks
+            trending = pd.DataFrame({
+                'Ticker': ['AAPL', 'TSLA', 'NVDA', 'AMZN', 'GOOG'],
+                'Sentiment': [analyze_sentiment(t) for t in ['AAPL', 'TSLA', 'NVDA', 'AMZN', 'GOOG']]
+            })
+            
+            # Combine data sources
+            recommendations = pd.concat([institutional, trending]).drop_duplicates()
+            
+            # Get price data
+            prices = yf.download(recommendations['Ticker'].tolist(), period="1d")['Close'].T.reset_index()
+            prices.columns = ['Ticker', 'Price']
+            
+            recommendations = recommendations.merge(prices, on='Ticker')
+            recommendations['Allocation'] = recommendations['Sentiment'].rank(pct=True) * budget
+            
+            st.subheader("Top Recommendations")
+            st.dataframe(recommendations.style.format({
+                'Price': '${:.2f}',
+                'Allocation': '${:,.2f}'
+            }))
+
+with tab4:
+    st.subheader("Market Insights")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Institutional Activity")
+        st.dataframe(get_institutional_activity())
+    
+    with col2:
+        st.subheader("Market Sentiment Heatmap")
+        heatmap_data = pd.DataFrame({
+            'Sector': ['Tech', 'Finance', 'Healthcare', 'Energy', 'Consumer'],
+            'Sentiment': [0.7, 0.4, 0.6, 0.3, 0.5]
+        })
+        st.bar_chart(heatmap_data.set_index('Sector'))
+
+st.sidebar.markdown("---")
+st.sidebar.info("""
+**Features:**
+- Manual portfolio tracking
+- Real-time price updates
+- Fundamental & technical analysis
+- Institutional activity monitoring
+- AI-powered recommendations
+- Portfolio optimization
+- Market sentiment analysis
 """)
