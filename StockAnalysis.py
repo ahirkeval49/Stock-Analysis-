@@ -1,6 +1,6 @@
 import os
 import streamlit as st
-import robin_stocks as rh
+from robin_stocks import robinhood as r
 import yfinance as yf
 import pandas as pd
 import numpy as np
