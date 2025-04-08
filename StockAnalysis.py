@@ -31,7 +31,7 @@ vader = SentimentIntensityAnalyzer()
 def get_current_price(ticker):
     try:
         return yf.Ticker(ticker).history(period='1d')['Close'].iloc[-1]
-    except:
+    except Exception as e:
         return None
 
 def get_reddit_sentiment(ticker):
@@ -46,7 +46,7 @@ def get_reddit_sentiment(ticker):
                 'score': post.score,
                 'comments': post.num_comments
             } for post in submissions])
-        except:
+        except Exception as e:
             continue
     
     if not posts:
@@ -68,32 +68,34 @@ def get_news_sentiment(ticker):
         articles = requests.get(url).json().get('articles', [])[:10]
         sentiments = [vader.polarity_scores(art['title'])['compound'] for art in articles]
         return np.mean(sentiments) if sentiments else 0
-    except:
+    except Exception as e:
         return 0
 
 def get_institutional_activity():
     try:
         response = requests.get("https://www.sec.gov/cgi-bin/current?q1=4&q2=0&q3=4")
         soup = BeautifulSoup(response.content, 'html.parser')
-        return pd.DataFrame([{
+        data = [{
             'Ticker': cols[1].text.strip(),
             'Company': cols[2].text.strip(),
             'Filing': cols[3].text.strip(),
             'Date': cols[4].text.strip()
-        } for row in soup.select('table.tableFile2 tr')[1:6] if (cols := row.find_all('td'))])
-    except:
+        } for row in soup.select('table.tableFile2 tr')[1:6] if (cols := row.find_all('td'))]
+        return pd.DataFrame(data)
+    except Exception as e:
         return pd.DataFrame()
 
 def get_insider_trades():
     try:
         soup = BeautifulSoup(requests.get("http://openinsider.com/latest-cluster-buys").text, 'html.parser')
-        return pd.DataFrame([{
+        data = [{
             'Ticker': cols[2].text.strip(),
             'Company': cols[3].text.strip(),
             'Position': cols[5].text.strip(),
             'Trade Value': cols[9].text.strip()
-        } for row in soup.select('table.tinytable tr')[1:6] if (cols := row.find_all('td'))])
-    except:
+        } for row in soup.select('table.tinytable tr')[1:6] if (cols := row.find_all('td'))]
+        return pd.DataFrame(data)
+    except Exception as e:
         return pd.DataFrame()
 
 def calculate_rsi(prices, window=14):
@@ -106,13 +108,18 @@ def calculate_rsi(prices, window=14):
     return 100 - (100 / (1 + rs)).iloc[-1]
 
 def generate_recommendations(budget):
-    tickers = list(set(get_institutional_activity()['Ticker'].tolist() + get_insider_trades()['Ticker'].tolist()))
+    # Safely get tickers from institutional and insider data
+    inst_activity = get_institutional_activity()
+    insider_trades = get_insider_trades()
+    inst_tickers = inst_activity['Ticker'].tolist() if 'Ticker' in inst_activity.columns else []
+    insider_tickers = insider_trades['Ticker'].tolist() if 'Ticker' in insider_trades.columns else []
+    tickers = list(set(inst_tickers + insider_tickers))
+    
     recommendations = []
     
     for ticker in tickers[:15]:  # Analyze top 15
         try:
             stock = yf.Ticker(ticker)
-            info = stock.info
             hist = stock.history(period="1mo")
             
             reddit_sent = get_reddit_sentiment(ticker)
@@ -125,14 +132,14 @@ def generate_recommendations(budget):
                 'RSI': rsi,
                 'Reddit Sentiment': reddit_sent,
                 'News Sentiment': news_sent,
-                'Institutional Activity': 1 if ticker in get_institutional_activity()['Ticker'].values else 0,
-                'Insider Activity': 1 if ticker in get_insider_trades()['Ticker'].values else 0,
-                'Score': (reddit_sent*0.4 + news_sent*0.3 + 
-                         (0.15 if ticker in get_institutional_activity()['Ticker'].values else 0) +
-                         (0.15 if ticker in get_insider_trades()['Ticker'].values else 0) -
-                         abs(rsi-50)*0.01)
+                'Institutional Activity': 1 if ticker in inst_tickers else 0,
+                'Insider Activity': 1 if ticker in insider_tickers else 0,
+                'Score': (reddit_sent * 0.4 + news_sent * 0.3 + 
+                          (0.15 if ticker in inst_tickers else 0) +
+                          (0.15 if ticker in insider_tickers else 0) -
+                          abs(rsi - 50) * 0.01)
             })
-        except:
+        except Exception as e:
             continue
 
     df = pd.DataFrame(recommendations)
@@ -164,15 +171,15 @@ with st.sidebar:
     st.header("💰 Portfolio Management")
     with st.form("add_stock"):
         ticker = st.text_input("Stock Ticker").upper()
-        qty = st.number_input("Quantity", min_value=0.01)
+        qty = st.number_input("Quantity", min_value=1)
         cost = st.number_input("Purchase Price", min_value=0.01)
-        # Using st.form_submit_button returns True if submitted
         if st.form_submit_button("Add to Portfolio") and (price := get_current_price(ticker)):
-            # Directly append a new row to the portfolio DataFrame to ensure correct schema
+            # Append new row ensuring the schema matches
             new_row = [ticker, qty, cost]
             st.session_state.portfolio.loc[len(st.session_state.portfolio)] = new_row
             st.success(f"{ticker} added!")
     
+    # Clear Portfolio button
     if not st.session_state.portfolio.empty and st.button("Clear Portfolio"):
         st.session_state.portfolio = pd.DataFrame(columns=['Ticker', 'Quantity', 'Purchase Price'])
         st.experimental_rerun()
@@ -230,13 +237,13 @@ with tab2:
                 ax1.plot(data['MA200'], label='200-day MA')
                 ax1.legend()
                 
-                ax2.plot(data.index, [rsi]*len(data), label='RSI')
+                ax2.plot(data.index, [rsi] * len(data), label='RSI')
                 ax2.axhline(70, color='r', linestyle='--')
                 ax2.axhline(30, color='g', linestyle='--')
                 ax2.legend()
                 
                 st.pyplot(fig)
-            except:
+            except Exception as e:
                 st.error("Error loading technical data")
 
 with tab3:
