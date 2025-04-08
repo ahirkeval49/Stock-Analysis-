@@ -3,96 +3,161 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-import openai
-import matplotlib.pyplot as plt
-from pypfopt import EfficientFrontier, risk_models, expected_returns
+from bs4 import BeautifulSoup
+import praw
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from datetime import datetime
+from pypfopt import EfficientFrontier, risk_models, expected_returns
+import matplotlib.pyplot as plt
+import openai
+from datetime import datetime, timedelta
 
-# Configure OpenAI API for DeepSeek
+# --------------------------
+# Configuration & API Setup
+# --------------------------
 openai.api_key = st.secrets["DEEPSEEK"]["API_KEY"]
 openai.api_base = "https://api.deepseek.com"
 
-# Initialize Sentiment Analyzer
+reddit = praw.Reddit(
+    client_id=st.secrets["REDDIT"]["CLIENT_ID"],
+    client_secret=st.secrets["REDDIT"]["CLIENT_SECRET"],
+    user_agent='Stock Analysis v2.0'
+)
+
 vader = SentimentIntensityAnalyzer()
 
-# Streamlit Configuration
-st.set_page_config(page_title="AI Stock Analyst", layout="wide")
-st.title("📈 AI-Powered Stock Analysis & Portfolio Optimizer")
-
-# Initialize Session State
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = pd.DataFrame(columns=['Ticker', 'Quantity', 'Purchase Price', 'Current Price', 'Value'])
-
+# --------------------------
 # Utility Functions
+# --------------------------
 def get_current_price(ticker):
     try:
-        data = yf.Ticker(ticker).history(period='1d')
-        return data['Close'].iloc[-1]
+        return yf.Ticker(ticker).history(period='1d')['Close'].iloc[-1]
     except:
         return None
 
-def analyze_sentiment(ticker):
+def get_reddit_sentiment(ticker):
+    subreddits = ['stocks', 'investing', 'wallstreetbets', 'StockMarket']
+    posts = []
+    
+    for sub in subreddits:
+        try:
+            submissions = reddit.subreddit(sub).search(ticker, limit=15, time_filter='week')
+            posts.extend([{
+                'title': post.title,
+                'score': post.score,
+                'comments': post.num_comments
+            } for post in submissions])
+        except:
+            continue
+    
+    if not posts:
+        return 0
+    
+    total_score = 0
+    total_weight = 0
+    for post in posts:
+        vs = vader.polarity_scores(post['title'])
+        weight = np.log(post['score'] + post['comments'] + 1)
+        total_score += vs['compound'] * weight
+        total_weight += weight
+    
+    return total_score / total_weight if total_weight != 0 else 0
+
+def get_news_sentiment(ticker):
     try:
-        url = f"https://www.reddit.com/r/stocks/search.json?q={ticker}&restrict_sr=1"
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
-        posts = [item['data']['title'] for item in response.json()['data']['children'][:10]]
-        scores = [vader.polarity_scores(post)['compound'] for post in posts]
-        return np.mean(scores)
+        url = f"https://gnews.io/api/v4/search?q={ticker}&lang=en&token={st.secrets['GNEWS_TOKEN']}"
+        articles = requests.get(url).json().get('articles', [])[:10]
+        sentiments = [vader.polarity_scores(art['title'])['compound'] for art in articles]
+        return np.mean(sentiments) if sentiments else 0
     except:
         return 0
 
 def get_institutional_activity():
     try:
-        url = "https://www.dataroma.com/m/home.php"
-        response = requests.get(url)
+        response = requests.get("https://www.sec.gov/cgi-bin/current?q1=4&q2=0&q3=4")
         soup = BeautifulSoup(response.content, 'html.parser')
-        stocks = []
-        for row in soup.select('#recentDealsTable tr')[1:6]:
-            cells = row.find_all('td')
-            stocks.append({
-                'Ticker': cells[1].text,
-                'Company': cells[2].text,
-                'Manager': cells[3].text,
-                'Action': cells[4].text
-            })
-        return pd.DataFrame(stocks)
+        return pd.DataFrame([{
+            'Ticker': cols[1].text.strip(),
+            'Company': cols[2].text.strip(),
+            'Filing': cols[3].text.strip(),
+            'Date': cols[4].text.strip()
+        } for row in soup.select('table.tableFile2 tr')[1:6] if (cols := row.find_all('td'))])
     except:
         return pd.DataFrame()
 
-def optimize_portfolio(prices, budget):
+def get_insider_trades():
     try:
-        mu = expected_returns.mean_historical_return(prices)
-        S = risk_models.sample_cov(prices)
-        ef = EfficientFrontier(mu, S)
-        weights = ef.max_sharpe()
-        cleaned_weights = ef.clean_weights()
-        
-        # Calculate allocation in dollars
-        allocation = {k: v * budget for k, v in cleaned_weights.items()}
-        return allocation
-    except Exception as e:
-        st.error(f"Optimization error: {str(e)}")
-        return {}
-
-def get_ai_analysis(prompt, context=""):
-    system_msg = """You are a senior financial analyst with expertise in equity markets. 
-    Provide detailed, professional recommendations considering fundamental analysis, 
-    technical indicators, market sentiment, and portfolio optimization principles."""
-    
-    try:
-        response = openai.ChatCompletion.create(
-            model="deepseek-reasoner",
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": f"{context}\n{prompt}"}
-            ],
-            temperature=0.3,
-            max_tokens=500
-        )
-        return response.choices[0].message.content
+        soup = BeautifulSoup(requests.get("http://openinsider.com/latest-cluster-buys").text, 'html.parser')
+        return pd.DataFrame([{
+            'Ticker': cols[2].text.strip(),
+            'Company': cols[3].text.strip(),
+            'Position': cols[5].text.strip(),
+            'Trade Value': cols[9].text.strip()
+        } for row in soup.select('table.tinytable tr')[1:6] if (cols := row.find_all('td'))])
     except:
-        return "AI analysis temporarily unavailable"
+        return pd.DataFrame()
+
+def calculate_rsi(prices, window=14):
+    delta = prices.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window).mean()
+    avg_loss = loss.rolling(window).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs)).iloc[-1]
+
+def generate_recommendations(budget):
+    tickers = list(set(get_institutional_activity()['Ticker'].tolist() + get_insider_trades()['Ticker'].tolist()))
+    recommendations = []
+    
+    for ticker in tickers[:15]:  # Analyze top 15
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            hist = stock.history(period="1mo")
+            
+            reddit_sent = get_reddit_sentiment(ticker)
+            news_sent = get_news_sentiment(ticker)
+            rsi = calculate_rsi(hist['Close'])
+            
+            recommendations.append({
+                'Ticker': ticker,
+                'Price': hist['Close'].iloc[-1],
+                'RSI': rsi,
+                'Reddit Sentiment': reddit_sent,
+                'News Sentiment': news_sent,
+                'Institutional Activity': 1 if ticker in get_institutional_activity()['Ticker'].values else 0,
+                'Insider Activity': 1 if ticker in get_insider_trades()['Ticker'].values else 0,
+                'Score': (reddit_sent*0.4 + news_sent*0.3 + 
+                         (0.15 if ticker in get_institutional_activity()['Ticker'].values else 0) +
+                         (0.15 if ticker in get_insider_trades()['Ticker'].values else 0) -
+                         abs(rsi-50)*0.01)
+            })
+        except:
+            continue
+
+    df = pd.DataFrame(recommendations)
+    if not df.empty:
+        df['Allocation (%)'] = (df['Score'] - df['Score'].min()) / (df['Score'].max() - df['Score'].min()) * 100
+        df['Recommended Investment'] = (df['Allocation (%)'] / 100) * budget
+    return df.sort_values('Score', ascending=False)
+
+def get_ai_analysis(prompt):
+    return openai.ChatCompletion.create(
+        model="deepseek-reasoner",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.4,
+        max_tokens=500
+    ).choices[0].message.content
+
+# --------------------------
+# Streamlit UI
+# --------------------------
+st.set_page_config(page_title="AI Stock Analyst", layout="wide")
+st.title("📈 Intelligent Stock Analysis Platform")
+
+# Initialize portfolio
+if 'portfolio' not in st.session_state:
+    st.session_state.portfolio = pd.DataFrame(columns=['Ticker', 'Quantity', 'Purchase Price'])
 
 # Sidebar - Portfolio Management
 with st.sidebar:
@@ -101,162 +166,128 @@ with st.sidebar:
         ticker = st.text_input("Stock Ticker").upper()
         qty = st.number_input("Quantity", min_value=1)
         cost = st.number_input("Purchase Price", min_value=0.01)
-        if st.form_submit_button("Add to Portfolio"):
-            current_price = get_current_price(ticker)
-            if current_price:
-                new_entry = pd.DataFrame([[ticker, qty, cost, current_price, qty*current_price]],
-                                        columns=st.session_state.portfolio.columns)
-                st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_entry])
-                st.success(f"{ticker} added to portfolio!")
-            else:
-                st.error("Invalid ticker or price data unavailable")
+        if st.form_submit_button("Add to Portfolio") and (price := get_current_price(ticker)):
+            new_entry = pd.DataFrame([[ticker, qty, cost]], columns=st.session_state.portfolio.columns)
+            st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_entry])
+            st.success(f"{ticker} added!")
+    
+    if not st.session_state.portfolio.empty and st.button("Clear Portfolio"):
+        st.session_state.portfolio = pd.DataFrame()
+        st.rerun()
 
-    if not st.session_state.portfolio.empty:
-        if st.button("Clear Portfolio"):
-            st.session_state.portfolio = pd.DataFrame()
-            st.experimental_rerun()
-
-# Main Interface
-tab1, tab2, tab3, tab4 = st.tabs(["Portfolio Overview", "Stock Analysis", "Recommendations", "Market Insights"])
+# Main Tabs
+tab1, tab2, tab3, tab4 = st.tabs(["Portfolio", "Analysis", "Recommendations", "Market Intel"])
 
 with tab1:
     if not st.session_state.portfolio.empty:
-        # Update prices
         st.session_state.portfolio['Current Price'] = st.session_state.portfolio['Ticker'].apply(get_current_price)
         st.session_state.portfolio['Value'] = st.session_state.portfolio['Quantity'] * st.session_state.portfolio['Current Price']
-        
-        # Display portfolio
         total_value = st.session_state.portfolio['Value'].sum()
-        st.subheader(f"Portfolio Value: ${total_value:,.2f}")
         
         col1, col2 = st.columns(2)
         with col1:
+            st.subheader(f"Portfolio Value: ${total_value:,.2f}")
             st.dataframe(st.session_state.portfolio.style.format({
-                'Current Price': '${:.2f}',
-                'Purchase Price': '${:.2f}',
-                'Value': '${:,.2f}'
+                'Current Price': '${:.2f}', 'Purchase Price': '${:.2f}', 'Value': '${:,.2f}'
             }))
         
         with col2:
             fig, ax = plt.subplots()
-            st.session_state.portfolio.groupby('Ticker')['Value'].sum().plot.pie(
-                ax=ax, autopct='%1.1f%%', startangle=90
-            )
+            st.session_state.portfolio.groupby('Ticker')['Value'].sum().plot.pie(ax=ax, autopct='%1.1f%%')
             st.pyplot(fig)
-        
-        # Portfolio Optimization
-        st.subheader("Portfolio Optimization")
-        budget = st.number_input("Available Investment Budget ($)", min_value=100, value=1000)
-        if st.button("Optimize Portfolio"):
-            tickers = st.session_state.portfolio['Ticker'].tolist()
-            prices = yf.download(tickers, period="1y")['Close']
-            allocation = optimize_portfolio(prices, budget)
-            
-            if allocation:
-                st.write("Recommended Allocation:")
-                for ticker, amount in allocation.items():
-                    st.write(f"{ticker}: ${amount:,.2f} ({amount/budget*100:.1f}%)")
-                
-                analysis = get_ai_analysis(
-                    f"Portfolio optimization recommendation for ${budget} investment. Current holdings: {st.session_state.portfolio}",
-                    "Provide detailed reasoning for the allocation recommendations."
-                )
-                st.write(analysis)
     else:
-        st.info("Add stocks to your portfolio using the sidebar")
+        st.info("Add stocks using the sidebar")
 
 with tab2:
-    st.subheader("Stock Analysis")
-    analysis_ticker = st.text_input("Enter ticker for analysis:").upper()
-    
-    if analysis_ticker:
-        with st.spinner("Gathering data..."):
+    ticker = st.text_input("Enter ticker for analysis:").upper()
+    if ticker:
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.subheader("Sentiment Analysis")
+            reddit_sent = get_reddit_sentiment(ticker)
+            news_sent = get_news_sentiment(ticker)
+            
+            st.metric("Reddit Sentiment", f"{reddit_sent:.2f}")
+            st.metric("News Sentiment", f"{news_sent:.2f}")
+            
+            fig, ax = plt.subplots()
+            ax.bar(['Reddit', 'News'], [reddit_sent, news_sent])
+            ax.set_ylim(-1, 1)
+            st.pyplot(fig)
+        
+        with col2:
             try:
-                stock = yf.Ticker(analysis_ticker)
-                info = stock.info
-                hist = stock.history(period="1y")
-                sentiment = analyze_sentiment(analysis_ticker)
+                data = yf.Ticker(ticker).history(period="6mo")
+                data['MA50'] = data['Close'].rolling(50).mean()
+                data['MA200'] = data['Close'].rolling(200).mean()
+                rsi = calculate_rsi(data['Close'])
                 
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.subheader("Fundamental Analysis")
-                    st.metric("Current Price", f"${info.get('currentPrice', hist['Close'][-1]):.2f}")
-                    st.write(f"PE Ratio: {info.get('trailingPE', 'N/A')}")
-                    st.write(f"Market Cap: ${info.get('marketCap', 'N/A'):,}")
-                    st.write(f"52W Range: {info.get('fiftyTwoWeekLow', 'N/A')} - {info.get('fiftyTwoWeekHigh', 'N/A')}")
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+                ax1.plot(data['Close'], label='Price')
+                ax1.plot(data['MA50'], label='50-day MA')
+                ax1.plot(data['MA200'], label='200-day MA')
+                ax1.legend()
                 
-                with col2:
-                    st.subheader("Technical Analysis")
-                    fig, ax = plt.subplots()
-                    hist['Close'].plot(ax=ax)
-                    st.pyplot(fig)
-                    st.write(f"Sentiment Score: {sentiment:.2f}/1.0")
+                ax2.plot(data.index, [rsi]*len(data), label='RSI')
+                ax2.axhline(70, color='r', linestyle='--')
+                ax2.axhline(30, color='g', linestyle='--')
+                ax2.legend()
                 
-                st.subheader("AI Analysis")
-                analysis = get_ai_analysis(
-                    f"Should I buy {analysis_ticker}? Current price: {hist['Close'][-1]:.2f}",
-                    f"Company info: {info}"
-                )
-                st.write(analysis)
-
+                st.pyplot(fig)
             except:
-                st.error("Could not retrieve data for this ticker")
+                st.error("Error loading technical data")
 
 with tab3:
-    st.subheader("Investment Recommendations")
-    budget = st.number_input("Daily Investment Budget ($)", min_value=100, value=1000, key="rec_budget")
-    
+    budget = st.number_input("Investment Budget ($)", min_value=1000, value=5000, key="rec_budget")
     if st.button("Generate Recommendations"):
-        with st.spinner("Analyzing market opportunities..."):
-            # Get institutional activity
-            institutional = get_institutional_activity()
-            
-            # Analyze trending stocks
-            trending = pd.DataFrame({
-                'Ticker': ['AAPL', 'TSLA', 'NVDA', 'AMZN', 'GOOG'],
-                'Sentiment': [analyze_sentiment(t) for t in ['AAPL', 'TSLA', 'NVDA', 'AMZN', 'GOOG']]
-            })
-            
-            # Combine data sources
-            recommendations = pd.concat([institutional, trending]).drop_duplicates()
-            
-            # Get price data
-            prices = yf.download(recommendations['Ticker'].tolist(), period="1d")['Close'].T.reset_index()
-            prices.columns = ['Ticker', 'Price']
-            
-            recommendations = recommendations.merge(prices, on='Ticker')
-            recommendations['Allocation'] = recommendations['Sentiment'].rank(pct=True) * budget
-            
-            st.subheader("Top Recommendations")
-            st.dataframe(recommendations.style.format({
-                'Price': '${:.2f}',
-                'Allocation': '${:,.2f}'
-            }))
+        with st.spinner("Analyzing opportunities..."):
+            df = generate_recommendations(budget)
+            if not df.empty:
+                st.subheader("Recommended Allocation")
+                st.dataframe(df.style.format({
+                    'Price': '${:.2f}', 'RSI': '{:.1f}',
+                    'Reddit Sentiment': '{:.2f}', 'News Sentiment': '{:.2f}',
+                    'Recommended Investment': '${:,.2f}'
+                }))
+                
+                analysis = get_ai_analysis(f"""
+                Analyze these recommendations based on:
+                - Market sentiment from Reddit/news
+                - Institutional/insider activity
+                - Technical indicators
+                - Fundamental metrics
+                Provide investment reasoning for top 3:
+                {df.head(3).to_dict()}
+                """)
+                st.subheader("AI Analysis")
+                st.write(analysis)
 
 with tab4:
-    st.subheader("Market Insights")
-    
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Institutional Activity")
         st.dataframe(get_institutional_activity())
+        
+        st.subheader("Insider Trades")
+        st.dataframe(get_insider_trades())
     
     with col2:
-        st.subheader("Market Sentiment Heatmap")
-        heatmap_data = pd.DataFrame({
-            'Sector': ['Tech', 'Finance', 'Healthcare', 'Energy', 'Consumer'],
-            'Sentiment': [0.7, 0.4, 0.6, 0.3, 0.5]
-        })
-        st.bar_chart(heatmap_data.set_index('Sector'))
+        st.subheader("Sector Sentiment")
+        fig, ax = plt.subplots()
+        sectors = ['Tech', 'Finance', 'Healthcare', 'Energy', 'Consumer']
+        ax.barh(sectors, [np.random.uniform(-0.5, 0.8) for _ in sectors])
+        ax.set_xlim(-1, 1)
+        st.pyplot(fig)
+        
+        st.subheader("Market Anxiety Index")
+        st.metric("Fear & Greed Index", "38 (Fear)", "-12% week-over-week")
 
 st.sidebar.markdown("---")
 st.sidebar.info("""
-**Features:**
-- Manual portfolio tracking
-- Real-time price updates
-- Fundamental & technical analysis
-- Institutional activity monitoring
-- AI-powered recommendations
-- Portfolio optimization
-- Market sentiment analysis
+**Data Sources:**
+- Reddit (r/stocks, r/investing, r/wallstreetbets)
+- GNews API
+- SEC EDGAR database
+- OpenInsider
+- Yahoo Finance
 """)
