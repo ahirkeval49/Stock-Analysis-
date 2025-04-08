@@ -9,5 +9,4 @@ beautifulsoup4==4.13.3
 praw==7.8.1
 transformers==4.51.1
 matplotlib==3.10.1
-PyPortfolioOpt==1.5.0
 git+https://github.com/robertmartin8/PyPortfolioOpt.git#egg=PyPortfolioOpt
