@@ -38,13 +38,13 @@ SEC_API = "https://data.sec.gov/submissions/"
 
 def robinhood_login():
     try:
-        # Attempt to logout, but ignore errors if not logged in.
+        # Attempt to logout; if not logged in, catch the error and continue.
         try:
             r.logout()
         except Exception as ex:
             st.info("No active session to logout from; proceeding with login.")
 
-        # If a TOTP secret is provided, generate a TOTP code and use that for MFA.
+        # Use TOTP if TOTP_SECRET is provided.
         if "TOTP_SECRET" in st.secrets["ROBINHOOD"]:
             totp = pyotp.TOTP(st.secrets["ROBINHOOD"]["TOTP_SECRET"])
             mfa_code = totp.now()
@@ -72,37 +72,23 @@ def robinhood_login():
             if login_response.get('challenge_id'):
                 challenge_id = login_response.get('challenge_id')
                 st.info("Push notification sent. Please approve in your Robinhood app.")
-                timeout = 60  # seconds
-                poll_interval = random.uniform(4, 7)  # randomized polling interval
-                elapsed = 0
+                # Wait a random initial delay to simulate human reaction time.
+                initial_delay = random.uniform(3, 6)
+                st.info(f"Waiting {initial_delay:.1f} seconds before checking challenge status...")
+                time.sleep(initial_delay)
+                timeout = 60  # seconds to wait for approval.
+                elapsed = initial_delay
+                poll_interval = random.uniform(4, 7)  # randomized polling interval.
                 while elapsed < timeout:
                     challenge_status = r.get_challenge_status(challenge_id)
                     st.write("Challenge status:", challenge_status)
                     if challenge_status.get("status") == "validated":
                         st.success("Challenge validated; logged in successfully!")
                         return True
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
-                st.error("Challenge timed out. Please try again.")
-                return False
-            else:
-                if login_response and ("token" in login_response or "access_token" in login_response):
-                    st.success("Logged in successfully!")
-                    return True
-                else:
-                    st.error("Login did not return a valid token.")
-                    return False
-
-    except Exception as e:
-        st.error(f"Login failed: {str(e)}")
-        return False
-                    
-                    # Wait a randomized interval between polls.
                     st.info(f"Waiting {poll_interval:.1f} seconds before next check...")
                     time.sleep(poll_interval)
                     elapsed += poll_interval
-                    poll_interval = random.uniform(4, 7)  # re-randomize for next loop
-                
+                    poll_interval = random.uniform(4, 7)  # re-randomize polling interval.
                 st.error("Challenge timed out. Please try again.")
                 return False
             else:
@@ -115,6 +101,7 @@ def robinhood_login():
     except Exception as e:
         st.error(f"Login failed: {str(e)}")
         return False
+
 
 # The rest of your code remains unchanged.
 def get_robinhood_portfolio():
