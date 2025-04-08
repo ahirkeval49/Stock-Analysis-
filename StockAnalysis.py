@@ -34,10 +34,9 @@ SEC_API = "https://data.sec.gov/submissions/"
 
 def robinhood_login():
     try:
-        rh.login(
+        r.login(
             username=st.secrets["ROBINHOOD"]["USERNAME"],
             password=st.secrets["ROBINHOOD"]["PASSWORD"],
-            
         )
         return True
     except Exception as e:
@@ -46,7 +45,7 @@ def robinhood_login():
 
 def get_robinhood_portfolio():
     """Fetch and format Robinhood portfolio."""
-    holdings = rh.build_holdings()
+    holdings = r.build_holdings()
     portfolio = []
     
     for symbol, data in holdings.items():
