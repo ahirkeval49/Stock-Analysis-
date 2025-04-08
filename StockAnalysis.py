@@ -72,82 +72,122 @@ def get_news_sentiment(ticker):
         return 0
 
 def get_institutional_activity():
+    """Get institutional trades with validation"""
     try:
-        response = requests.get("https://www.sec.gov/cgi-bin/current?q1=4&q2=0&q3=4")
+        response = requests.get("https://www.sec.gov/cgi-bin/current?q1=4&q2=0&q3=4", timeout=10)
+        response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-        return pd.DataFrame([{
-            'Ticker': cols[1].text.strip(),
-            'Company': cols[2].text.strip(),
-            'Filing': cols[3].text.strip(),
-            'Date': cols[4].text.strip()
-        } for row in soup.select('table.tableFile2 tr')[1:6] if (cols := row.find_all('td'))])
-    except:
+        
+        filings = []
+        for row in soup.select('table.tableFile2 tr')[1:6]:
+            cols = row.find_all('td')
+            if len(cols) >= 5:
+                filings.append({
+                    'Ticker': cols[1].text.strip() if len(cols) > 1 else 'N/A',
+                    'Company': cols[2].text.strip() if len(cols) > 2 else 'N/A',
+                    'Filing': cols[3].text.strip() if len(cols) > 3 else 'N/A',
+                    'Date': cols[4].text.strip() if len(cols) > 4 else 'N/A'
+                })
+        
+        df = pd.DataFrame(filings)
+        if not df.empty and 'Ticker' not in df.columns:
+            df['Ticker'] = 'N/A'
+        return df
+    
+    except Exception as e:
+        st.error(f"Error fetching institutional data: {str(e)}")
         return pd.DataFrame()
 
 def get_insider_trades():
+    """Get insider trades with validation"""
     try:
-        soup = BeautifulSoup(requests.get("http://openinsider.com/latest-cluster-buys").text, 'html.parser')
-        return pd.DataFrame([{
-            'Ticker': cols[2].text.strip(),
-            'Company': cols[3].text.strip(),
-            'Position': cols[5].text.strip(),
-            'Trade Value': cols[9].text.strip()
-        } for row in soup.select('table.tinytable tr')[1:6] if (cols := row.find_all('td'))])
-    except:
+        response = requests.get("http://openinsider.com/latest-cluster-buys", timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        trades = []
+        for row in soup.select('table.tinytable tr')[1:6]:
+            cols = row.find_all('td')
+            if len(cols) >= 10:
+                trades.append({
+                    'Ticker': cols[2].text.strip() if len(cols) > 2 else 'N/A',
+                    'Company': cols[3].text.strip() if len(cols) > 3 else 'N/A',
+                    'Position': cols[5].text.strip() if len(cols) > 5 else 'N/A',
+                    'Trade Value': cols[9].text.strip() if len(cols) > 9 else 'N/A'
+                })
+        
+        df = pd.DataFrame(trades)
+        if not df.empty and 'Ticker' not in df.columns:
+            df['Ticker'] = 'N/A'
+        return df
+    
+    except Exception as e:
+        st.error(f"Error fetching insider data: {str(e)}")
         return pd.DataFrame()
 
-def calculate_rsi(prices, window=14):
-    delta = prices.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window).mean()
-    avg_loss = loss.rolling(window).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs)).iloc[-1]
-
 def generate_recommendations(budget):
-    tickers = list(set(get_institutional_activity()['Ticker'].tolist() + get_insider_trades()['Ticker'].tolist()))
-    recommendations = []
+    """Generate recommendations with safe data handling"""
+    try:
+        # Safely get institutional and insider data
+        institutional = get_institutional_activity()
+        insider = get_insider_trades()
+        
+        # Get tickers with validation
+        institutional_tickers = institutional['Ticker'].tolist() if not institutional.empty and 'Ticker' in institutional.columns else []
+        insider_tickers = insider['Ticker'].tolist() if not insider.empty and 'Ticker' in insider.columns else []
+        
+        # Combine and filter valid tickers
+        tickers = list(set([t for t in institutional_tickers + insider_tickers if t != 'N/A']))
+        recommendations = []
+        
+        for ticker in tickers[:15]:  # Analyze top 15 valid tickers
+            try:
+                stock = yf.Ticker(ticker)
+                info = stock.info
+                hist = stock.history(period="1mo")
+                
+                if hist.empty:
+                    continue
+                
+                # Get institutional/insider flags safely
+                in_institutional = ticker in institutional_tickers
+                in_insider = ticker in insider_tickers
+                
+                recommendations.append({
+                    'Ticker': ticker,
+                    'Price': hist['Close'].iloc[-1],
+                    'RSI': calculate_rsi(hist['Close']),
+                    'Reddit Sentiment': get_reddit_sentiment(ticker),
+                    'News Sentiment': get_news_sentiment(ticker),
+                    'Institutional Activity': 1 if in_institutional else 0,
+                    'Insider Activity': 1 if in_insider else 0,
+                    'Score': (reddit_sent*0.4 + news_sent*0.3 + 
+                             (0.15 if in_institutional else 0) +
+                             (0.15 if in_insider else 0) -
+                             abs(rsi-50)*0.01)
+                })
+            except Exception as e:
+                st.error(f"Error processing {ticker}: {str(e)}")
+                continue
+
+        df = pd.DataFrame(recommendations)
+        if not df.empty:
+            # Normalize scores safely
+            min_score = df['Score'].min()
+            max_score = df['Score'].max()
+            if max_score - min_score > 0:
+                df['Allocation (%)'] = (df['Score'] - min_score) / (max_score - min_score) * 100
+            else:
+                df['Allocation (%)'] = 100 / len(df)
+            
+            df['Recommended Investment'] = (df['Allocation (%)'] / 100) * budget
+            return df.sort_values('Score', ascending=False)
+        
+        return pd.DataFrame()
     
-    for ticker in tickers[:15]:  # Analyze top 15
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            hist = stock.history(period="1mo")
-            
-            reddit_sent = get_reddit_sentiment(ticker)
-            news_sent = get_news_sentiment(ticker)
-            rsi = calculate_rsi(hist['Close'])
-            
-            recommendations.append({
-                'Ticker': ticker,
-                'Price': hist['Close'].iloc[-1],
-                'RSI': rsi,
-                'Reddit Sentiment': reddit_sent,
-                'News Sentiment': news_sent,
-                'Institutional Activity': 1 if ticker in get_institutional_activity()['Ticker'].values else 0,
-                'Insider Activity': 1 if ticker in get_insider_trades()['Ticker'].values else 0,
-                'Score': (reddit_sent*0.4 + news_sent*0.3 + 
-                         (0.15 if ticker in get_institutional_activity()['Ticker'].values else 0) +
-                         (0.15 if ticker in get_insider_trades()['Ticker'].values else 0) -
-                         abs(rsi-50)*0.01)
-            })
-        except:
-            continue
-
-    df = pd.DataFrame(recommendations)
-    if not df.empty:
-        df['Allocation (%)'] = (df['Score'] - df['Score'].min()) / (df['Score'].max() - df['Score'].min()) * 100
-        df['Recommended Investment'] = (df['Allocation (%)'] / 100) * budget
-    return df.sort_values('Score', ascending=False)
-
-def get_ai_analysis(prompt):
-    return openai.ChatCompletion.create(
-        model="deepseek-reasoner",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.4,
-        max_tokens=500
-    ).choices[0].message.content
+    except Exception as e:
+        st.error(f"Recommendation generation failed: {str(e)}")
+        return pd.DataFrame()
 
 # --------------------------
 # Streamlit UI
