@@ -1,4 +1,5 @@
 import os
+import time
 import streamlit as st
 from robin_stocks import robinhood as r
 import yfinance as yf
@@ -11,6 +12,7 @@ import praw
 import matplotlib.pyplot as plt
 from pypfopt import EfficientFrontier, risk_models, expected_returns
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import pyotp  # Added for generating TOTP codes
 
 # Configure OpenAI API for DeepSeek.
 openai.api_key = st.secrets["DEEPSEEK"]["API_KEY"]
@@ -34,15 +36,65 @@ SEC_API = "https://data.sec.gov/submissions/"
 
 def robinhood_login():
     try:
-        r.login(
-            username=st.secrets["ROBINHOOD"]["USERNAME"],
-            password=st.secrets["ROBINHOOD"]["PASSWORD"],
-        )
-        return True
+        # If a TOTP secret is provided, generate a TOTP code and use that for MFA.
+        if "TOTP_SECRET" in st.secrets["ROBINHOOD"]:
+            totp = pyotp.TOTP(st.secrets["ROBINHOOD"]["TOTP_SECRET"])
+            mfa_code = totp.now()
+            login_response = r.login(
+                username=st.secrets["ROBINHOOD"]["USERNAME"],
+                password=st.secrets["ROBINHOOD"]["PASSWORD"],
+                mfa_code=mfa_code
+            )
+            st.write("Login response (TOTP):", login_response)
+            if login_response and "token" in login_response:
+                st.success("Logged in successfully using authenticator (TOTP)!")
+                return True
+            else:
+                st.error("Login did not return a valid token using TOTP.")
+                return False
+        else:
+            # No TOTP secret provided: fallback to push notification.
+            login_response = r.login(
+                username=st.secrets["ROBINHOOD"]["USERNAME"],
+                password=st.secrets["ROBINHOOD"]["PASSWORD"],
+            )
+            st.write("Login response (Push):", login_response)
+
+            # Check if a challenge (push notification) is required.
+            if login_response.get('challenge_id'):
+                challenge_id = login_response.get('challenge_id')
+                st.info("Challenge required: please approve the push notification in your Robinhood app.")
+                timeout = 60  # seconds to wait for approval
+                poll_interval = 5  # seconds between checks
+                elapsed = 0
+
+                while elapsed < timeout:
+                    # get_challenge_status is assumed to be implemented in your robin_stocks version
+                    challenge_status = r.get_challenge_status(challenge_id)
+                    st.write("Challenge status:", challenge_status)
+
+                    if challenge_status.get("status") == "validated":
+                        st.success("Challenge validated, logged in!")
+                        return True
+
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+
+                st.error("Challenge timed out. Please try again.")
+                return False
+            else:
+                # If no challenge is required, check that a valid token is returned.
+                if login_response and "token" in login_response:
+                    st.success("Logged in successfully!")
+                    return True
+                else:
+                    st.error("Login did not return a valid token.")
+                    return False
     except Exception as e:
         st.error(f"Login failed: {str(e)}")
         return False
 
+# The rest of your code remains unchanged.
 def get_robinhood_portfolio():
     """Fetch and format Robinhood portfolio."""
     holdings = r.build_holdings()
