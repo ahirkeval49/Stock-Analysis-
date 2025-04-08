@@ -1,11 +1,11 @@
-# app.py
+
 import streamlit as st
 import robin_stocks as rh
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-from openai import OpenAI
+import openai
 from bs4 import BeautifulSoup
 import praw
 from transformers import pipeline
