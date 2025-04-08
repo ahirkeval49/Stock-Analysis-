@@ -134,7 +134,7 @@ def generate_recommendations(budget):
                 'News Sentiment': news_sent,
                 'Institutional Activity': 1 if ticker in inst_tickers else 0,
                 'Insider Activity': 1 if ticker in insider_tickers else 0,
-                'Score': (reddit_sent * 0.4 + news_sent * 0.3 + 
+                'Score': (reddit_sent * 0.4 + news_sent * 0.3 +
                           (0.15 if ticker in inst_tickers else 0) +
                           (0.15 if ticker in insider_tickers else 0) -
                           abs(rsi - 50) * 0.01)
@@ -143,10 +143,13 @@ def generate_recommendations(budget):
             continue
 
     df = pd.DataFrame(recommendations)
-    if not df.empty:
+    # Only sort if df isn't empty and has a "Score" column
+    if not df.empty and 'Score' in df.columns:
         df['Allocation (%)'] = (df['Score'] - df['Score'].min()) / (df['Score'].max() - df['Score'].min()) * 100
         df['Recommended Investment'] = (df['Allocation (%)'] / 100) * budget
-    return df.sort_values('Score', ascending=False)
+        return df.sort_values('Score', ascending=False)
+    else:
+        return df
 
 def get_ai_analysis(prompt):
     return openai.ChatCompletion.create(
@@ -270,6 +273,8 @@ with tab3:
                 """)
                 st.subheader("AI Analysis")
                 st.write(analysis)
+            else:
+                st.info("No recommendations available at this time.")
 
 with tab4:
     col1, col2 = st.columns(2)
