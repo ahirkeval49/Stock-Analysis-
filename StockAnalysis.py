@@ -1,4 +1,6 @@
-
+import os
+# Set a custom cache directory for transformers to avoid caching/permission issues.
+os.environ["TRANSFORMERS_CACHE"] = "/tmp/transformers_cache"
 import streamlit as st
 import robin_stocks as rh
 import yfinance as yf
