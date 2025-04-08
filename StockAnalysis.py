@@ -38,15 +38,17 @@ SEC_API = "https://data.sec.gov/submissions/"
 
 def robinhood_login():
     try:
-        # Logout any existing session (simulate a fresh human login)
-        r.logout()
-        
-        # Decide which authentication method to use.
+        # Attempt to logout, but ignore errors if not logged in.
+        try:
+            r.logout()
+        except Exception as ex:
+            st.info("No active session to logout from; proceeding with login.")
+
+        # If a TOTP secret is provided, generate a TOTP code and use that for MFA.
         if "TOTP_SECRET" in st.secrets["ROBINHOOD"]:
-            # Use the authenticator (TOTP) method.
             totp = pyotp.TOTP(st.secrets["ROBINHOOD"]["TOTP_SECRET"])
             mfa_code = totp.now()
-            st.info("Using authenticator to generate MFA code...")
+            st.info("Using TOTP authenticator for MFA.")
             login_response = r.login(
                 username=st.secrets["ROBINHOOD"]["USERNAME"],
                 password=st.secrets["ROBINHOOD"]["PASSWORD"],
@@ -60,34 +62,40 @@ def robinhood_login():
                 st.error("Login did not return a valid token using TOTP.")
                 return False
         else:
-            # Fallback: use push notification.
+            # Fallback: use push notification method.
             st.info("Initiating push notification login...")
             login_response = r.login(
                 username=st.secrets["ROBINHOOD"]["USERNAME"],
                 password=st.secrets["ROBINHOOD"]["PASSWORD"],
             )
             st.write("Login response (Push):", login_response)
-            
             if login_response.get('challenge_id'):
                 challenge_id = login_response.get('challenge_id')
                 st.info("Push notification sent. Please approve in your Robinhood app.")
-                
-                # Wait a random initial delay to simulate human reaction time.
-                initial_delay = random.uniform(3, 6)
-                st.info(f"Waiting {initial_delay:.1f} seconds before checking challenge status...")
-                time.sleep(initial_delay)
-                
-                timeout = 60  # total seconds to wait for approval
-                elapsed = initial_delay
-                poll_interval = random.uniform(4, 7)  # randomize polling interval
-                
+                timeout = 60  # seconds
+                poll_interval = random.uniform(4, 7)  # randomized polling interval
+                elapsed = 0
                 while elapsed < timeout:
                     challenge_status = r.get_challenge_status(challenge_id)
                     st.write("Challenge status:", challenge_status)
-                    
                     if challenge_status.get("status") == "validated":
                         st.success("Challenge validated; logged in successfully!")
                         return True
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+                st.error("Challenge timed out. Please try again.")
+                return False
+            else:
+                if login_response and ("token" in login_response or "access_token" in login_response):
+                    st.success("Logged in successfully!")
+                    return True
+                else:
+                    st.error("Login did not return a valid token.")
+                    return False
+
+    except Exception as e:
+        st.error(f"Login failed: {str(e)}")
+        return False
                     
                     # Wait a randomized interval between polls.
                     st.info(f"Waiting {poll_interval:.1f} seconds before next check...")
