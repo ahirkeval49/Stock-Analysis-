@@ -28,7 +28,6 @@ vader = SentimentIntensityAnalyzer()
 # --------------------------
 # Caching Helpers
 # --------------------------
-# Use st.cache_data with a TTL for external API calls
 @st.cache_data(ttl=60)
 def get_current_price(ticker):
     try:
@@ -73,7 +72,6 @@ def get_insider_trades():
 def get_reddit_sentiment(ticker):
     subreddits = ['stocks', 'investing', 'wallstreetbets', 'StockMarket']
     posts = []
-    
     for sub in subreddits:
         try:
             submissions = reddit.subreddit(sub).search(ticker, limit=15, time_filter='week')
@@ -84,10 +82,8 @@ def get_reddit_sentiment(ticker):
             } for post in submissions])
         except Exception as e:
             continue
-    
     if not posts:
         return 0
-    
     total_score = 0
     total_weight = 0
     for post in posts:
@@ -95,7 +91,6 @@ def get_reddit_sentiment(ticker):
         weight = np.log(post['score'] + post['comments'] + 1)
         total_score += vs['compound'] * weight
         total_weight += weight
-    
     return total_score / total_weight if total_weight != 0 else 0
 
 def get_news_sentiment(ticker):
@@ -128,23 +123,19 @@ def generate_recommendations(budget):
     tickers = list(set(inst_tickers + insider_tickers))
     
     recommendations = []
-    
-    for ticker in tickers[:15]:  # Analyze a subset for performance
+    for ticker in tickers[:15]:  # analyze a subset for performance
         try:
             stock = yf.Ticker(ticker)
             hist = stock.history(period="1mo")
             if hist.empty:
                 continue
-            
             reddit_sent = get_reddit_sentiment(ticker)
             news_sent = get_news_sentiment(ticker)
             rsi = calculate_rsi(hist['Close'])
-            
             score = (reddit_sent * 0.4 + news_sent * 0.3 +
                      (0.15 if ticker in inst_tickers else 0) +
                      (0.15 if ticker in insider_tickers else 0) -
                      abs(rsi - 50) * 0.01)
-            
             recommendations.append({
                 'Ticker': ticker,
                 'Price': hist['Close'].iloc[-1],
@@ -185,7 +176,6 @@ def get_fundamentals(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        # Filter key metrics for display (modify as needed)
         fundamentals = {
             "Company Name": info.get("longName"),
             "Market Cap": info.get("marketCap"),
@@ -207,6 +197,7 @@ st.title("📈 Intelligent Stock Analysis Platform")
 # --------------------------
 # Initialize Portfolio in Session State
 # --------------------------
+# Maintain only the base columns in session state
 if 'portfolio' not in st.session_state or st.session_state.portfolio.empty:
     st.session_state.portfolio = pd.DataFrame(columns=['Ticker', 'Quantity', 'Purchase Price'])
 
@@ -220,8 +211,10 @@ with st.sidebar:
         qty = st.number_input("Quantity", min_value=0.01)
         cost = st.number_input("Purchase Price", min_value=0.01)
         if st.form_submit_button("Add to Portfolio") and (price := get_current_price(ticker)):
-            new_row = [ticker, qty, cost]
-            st.session_state.portfolio.loc[len(st.session_state.portfolio)] = new_row
+            # Always work with the base columns only.
+            base_portfolio = st.session_state.portfolio[['Ticker', 'Quantity', 'Purchase Price']]
+            new_entry = pd.DataFrame([[ticker, qty, cost]], columns=base_portfolio.columns)
+            st.session_state.portfolio = pd.concat([base_portfolio, new_entry], ignore_index=True)
             st.success(f"{ticker} added!")
     
     if not st.session_state.portfolio.empty and st.button("Clear Portfolio"):
@@ -250,20 +243,21 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
 # Tab 1: Portfolio Overview
 with tab1:
     if not st.session_state.portfolio.empty:
-        # Update portfolio with current prices and calculate value
-        st.session_state.portfolio['Current Price'] = st.session_state.portfolio['Ticker'].apply(get_current_price)
-        st.session_state.portfolio['Value'] = st.session_state.portfolio['Quantity'] * st.session_state.portfolio['Current Price']
-        total_value = st.session_state.portfolio['Value'].sum()
+        # Create a local copy for display and add computed columns for display only.
+        portfolio_df = st.session_state.portfolio.copy()
+        portfolio_df['Current Price'] = portfolio_df['Ticker'].apply(get_current_price)
+        portfolio_df['Value'] = portfolio_df['Quantity'] * portfolio_df['Current Price']
+        total_value = portfolio_df['Value'].sum()
         
         col1, col2 = st.columns(2)
         with col1:
             st.subheader(f"Portfolio Value: ${total_value:,.2f}")
-            st.dataframe(st.session_state.portfolio.style.format({
+            st.dataframe(portfolio_df.style.format({
                 'Current Price': '${:.2f}', 'Purchase Price': '${:.2f}', 'Value': '${:,.2f}'
             }))
         with col2:
             fig, ax = plt.subplots()
-            st.session_state.portfolio.groupby('Ticker')['Value'].sum().plot.pie(ax=ax, autopct='%1.1f%%')
+            portfolio_df.groupby('Ticker')['Value'].sum().plot.pie(ax=ax, autopct='%1.1f%%')
             ax.set_ylabel('')
             st.pyplot(fig)
     else:
@@ -271,13 +265,13 @@ with tab1:
 
 # Tab 2: Technical & Sentiment Analysis for a Stock
 with tab2:
-    ticker = st.text_input("Enter ticker for analysis:").upper()
-    if ticker:
+    ticker_input = st.text_input("Enter ticker for analysis:").upper()
+    if ticker_input:
         col1, col2 = st.columns([1, 2])
         with col1:
             st.subheader("Sentiment Analysis")
-            reddit_sent = get_reddit_sentiment(ticker)
-            news_sent = get_news_sentiment(ticker)
+            reddit_sent = get_reddit_sentiment(ticker_input)
+            news_sent = get_news_sentiment(ticker_input)
             st.metric("Reddit Sentiment", f"{reddit_sent:.2f}")
             st.metric("News Sentiment", f"{news_sent:.2f}")
             fig, ax = plt.subplots()
@@ -286,7 +280,7 @@ with tab2:
             st.pyplot(fig)
         with col2:
             try:
-                data = yf.Ticker(ticker).history(period="6mo")
+                data = yf.Ticker(ticker_input).history(period="6mo")
                 data['MA50'] = data['Close'].rolling(50).mean()
                 data['MA200'] = data['Close'].rolling(200).mean()
                 rsi = calculate_rsi(data['Close'])
@@ -294,9 +288,9 @@ with tab2:
                 ax1.plot(data['Close'], label='Price')
                 ax1.plot(data['MA50'], label='50-day MA')
                 ax1.plot(data['MA200'], label='200-day MA')
-                ax1.set_title(f"{ticker} Price & Moving Averages")
+                ax1.set_title(f"{ticker_input} Price & MAs")
                 ax1.legend()
-                ax2.plot(data.index, [rsi]*len(data), label='RSI')
+                ax2.plot(data.index, [rsi] * len(data), label='RSI')
                 ax2.axhline(70, color='r', linestyle='--')
                 ax2.axhline(30, color='g', linestyle='--')
                 ax2.set_title("RSI")
@@ -310,10 +304,10 @@ with tab3:
     budget = st.number_input("Investment Budget ($)", min_value=1000, value=5000, key="rec_budget")
     if st.button("Generate Recommendations"):
         with st.spinner("Analyzing opportunities..."):
-            df = generate_recommendations(budget)
-            if not df.empty:
+            rec_df = generate_recommendations(budget)
+            if not rec_df.empty:
                 st.subheader("Recommended Allocation")
-                st.dataframe(df.style.format({
+                st.dataframe(rec_df.style.format({
                     'Price': '${:.2f}', 'RSI': '{:.1f}',
                     'Reddit Sentiment': '{:.2f}', 'News Sentiment': '{:.2f}',
                     'Recommended Investment': '${:,.2f}'
@@ -325,7 +319,7 @@ with tab3:
                     - Technical indicators
                     - Fundamental metrics
                     Provide investment reasoning for top 3:
-                    {df.head(3).to_dict()}
+                    {rec_df.head(3).to_dict()}
                     """)
                 st.subheader("AI Analysis")
                 st.write(analysis)
@@ -385,7 +379,7 @@ with tab6:
                 st.write(f"Expected Annual Return: {exp_return*100:.2f}%")
                 st.write(f"Annual Volatility: {volatility*100:.2f}%")
                 st.write(f"Sharpe Ratio: {sharpe:.2f}")
-                # Display a pie chart of the weights
+                # Display pie chart of weights
                 fig, ax = plt.subplots()
                 ax.pie(list(cleaned_weights.values()), labels=list(cleaned_weights.keys()), autopct='%1.1f%%')
                 st.pyplot(fig)
@@ -395,4 +389,3 @@ with tab6:
             st.info("Insufficient price history for optimization.")
     else:
         st.info("Add stocks to your portfolio to optimize.")
-
