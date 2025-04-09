@@ -378,7 +378,7 @@ with tab2:
 # 14. Tab 3: Recommendations & AI Analysis
 # -----------------------------------
 with tab3:
-    budget = st.number_input("Investment Budget ($)", min_value=1000, value=5000, key="rec_budget")
+    budget = st.number_input("Investment Budget ($)", min_value=0, value=1000000000, key="rec_budget")
     if st.button("Generate Recommendations"):
         with st.spinner("Analyzing opportunities..."):
             rec_df = generate_recommendations(budget)
