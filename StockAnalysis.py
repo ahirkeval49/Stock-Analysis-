@@ -61,13 +61,8 @@ def get_current_price(ticker):
 
 @st.cache_data(ttl=3600)
 def get_cik(query):
-    """
-    Given a company ticker or name, search the SEC EDGAR website for the company
-    and extract its CIK. Uses regex on the response text.
-    Caches the result for one hour.
-    """
     url = f"https://www.sec.gov/cgi-bin/browse-edgar?company={query}&owner=exclude&action=getcompany"
-    headers = {'User-Agent': 'Keval Ahir your-keval.ahir2019@gmail.com'}  # Update with your details.
+    headers = {'User-Agent': 'YourName your-email@example.com'}  # Update with your details.
     try:
         response = requests.get(url, headers=headers)
         if response.status_code != 200:
@@ -76,11 +71,10 @@ def get_cik(query):
             return None
         soup = BeautifulSoup(response.content, 'html.parser')
         text = soup.get_text()
-        # Use regex to find pattern "CIK#: <number>"
         match = re.search(r"CIK#:\s*([0-9]+)", text)
         if match:
             cik = match.group(1).strip()
-            return cik.zfill(10)  # pad to 10 digits if necessary
+            return cik.zfill(10)
         else:
             log_error("CIK not found for the provided company.")
             st.error("CIK not found for the provided company.")
@@ -90,25 +84,17 @@ def get_cik(query):
         st.error("Error searching for CIK.")
         return None
 
-# -----------------------------------
+# ------------------------------
 # 3. SEC Filings Function
-# Retrieves filings using the EDGAR JSON endpoint based on the company's CIK.
-# Filters for filings in the last 6 months.
-# -----------------------------------
+# ------------------------------
 @st.cache_data(ttl=300)
 def get_sec_filings(query):
-    """
-    Retrieve SEC filings for the given company (by ticker or name).
-    First, obtain the CIK, then request the JSON submissions file.
-    Returns a DataFrame of filings from the last 6 months.
-    """
     cik = get_cik(query)
     if cik is None:
         st.error("Cannot retrieve CIK for the company. Please check your query.")
         return pd.DataFrame()
-    
     url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-    headers = {'User-Agent': 'Keval Ahir your-keval.ahir2019@gmail.com'}  # Update as necessary.
+    headers = {'User-Agent': 'Keval Ahir your-keval.ahir2019@gmail.com'}
     try:
         response = requests.get(url, headers=headers)
         if response.status_code != 200:
@@ -136,21 +122,14 @@ def get_sec_filings(query):
         st.error("Error processing SEC filings data.")
         return pd.DataFrame()
 
-# -----------------------------------
-# 4. OpenInsider Filings Function (Scraping)
-# Retrieves insider-related filings from OpenInsider for the given ticker.
-# Filters for filings in the last 6 months.
-# -----------------------------------
+# ------------------------------
+# 4. OpenInsider Filings Function
+# ------------------------------
 @st.cache_data(ttl=300)
 def get_openinsider_filings(query):
-    """
-    Scrape OpenInsider for filings related to the provided ticker (or company name).
-    Filters results to only those filings in the last 6 months.
-    """
     ticker = query.upper()
     six_months_ago = (pd.Timestamp.today() - relativedelta(months=6)).strftime('%Y-%m-%d')
     today = pd.Timestamp.today().strftime('%Y-%m-%d')
-    # Construct URL with date filtering; note that parameters may change over time.
     url = f"http://openinsider.com/screener?s={ticker}&fd={six_months_ago}&td={today}&f=html"
     try:
         response = requests.get(url)
