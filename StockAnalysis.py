@@ -62,7 +62,7 @@ def get_current_price(ticker):
 @st.cache_data(ttl=3600)
 def get_cik(query):
     url = f"https://www.sec.gov/cgi-bin/browse-edgar?company={query}&owner=exclude&action=getcompany"
-    headers = {'User-Agent': 'YourName your-email@example.com'}  # Update with your details.
+    headers = {'User-Agent': 'YKeval ahir keval.ahir2019@gmail.com'}  # Update with your details.
     try:
         response = requests.get(url, headers=headers)
         if response.status_code != 200:
