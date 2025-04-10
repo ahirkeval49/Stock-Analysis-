@@ -67,7 +67,7 @@ def get_cik(query):
     Caches the result for one hour.
     """
     url = f"https://www.sec.gov/cgi-bin/browse-edgar?company={query}&owner=exclude&action=getcompany"
-    headers = {'User-Agent': 'YourName your-email@example.com'}  # Update with your details.
+    headers = {'User-Agent': 'Keval Ahir your-keval.ahir2019@gmail.com'}  # Update with your details.
     try:
         response = requests.get(url, headers=headers)
         if response.status_code != 200:
