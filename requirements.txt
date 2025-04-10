@@ -11,3 +11,4 @@ transformers==4.51.1
 matplotlib==3.10.1
 git+https://github.com/robertmartin8/PyPortfolioOpt.git#egg=PyPortfolioOpt
 vaderSentiment==3.3.2
+python-dateutil>=2.9.0
