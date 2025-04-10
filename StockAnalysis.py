@@ -32,7 +32,7 @@ openai.api_base = "https://api.deepseek.com"
 reddit = praw.Reddit(
     client_id=st.secrets["REDDIT"]["CLIENT_ID"],
     client_secret=st.secrets["REDDIT"]["CLIENT_SECRET"],
-    user_agent='Stock Analysis v2.0'
+    user_agent='Stock Analysis'
 )
 
 vader = SentimentIntensityAnalyzer()
