@@ -5,16 +5,30 @@ import numpy as np
 import requests
 from bs4 import BeautifulSoup
 import praw
+import re
+import logging
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from pypfopt import EfficientFrontier, risk_models, expected_returns
 import matplotlib.pyplot as plt
 import openai
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+
+# -----------------------------------
+# Set up logging (logs errors to file "app_errors.log")
+# -----------------------------------
+logging.basicConfig(level=logging.ERROR, filename="app_errors.log", 
+                    format='%(asctime)s %(levelname)s:%(message)s')
+
+def log_error(msg):
+    """Log an error message and optionally display a user-friendly message."""
+    logging.error(msg)
+    # You may display less technical error info to the user if needed:
+    # st.error(msg)  # Uncomment this line to show errors in the UI
 
 # -----------------------------------
 # 1. Configuration & API Setup
 # -----------------------------------
-# Set up API keys and endpoints.
 openai.api_key = st.secrets["DEEPSEEK"]["API_KEY"]
 openai.api_base = "https://api.deepseek.com"
 
@@ -24,7 +38,7 @@ reddit = praw.Reddit(
     user_agent='Stock Analysis v2.0'
 )
 
-# Initialize VADER for sentiment analysis.
+# Initialize VADER sentiment analyzer.
 vader = SentimentIntensityAnalyzer()
 
 # -----------------------------------
@@ -34,52 +48,58 @@ vader = SentimentIntensityAnalyzer()
 @st.cache_data(ttl=60)
 def get_current_price(ticker):
     """
-    Retrieve the latest closing price for a given ticker.
+    Retrieve the latest closing price for a given ticker using yfinance.
+    Caches the result for 60 seconds.
     """
     try:
         data = yf.Ticker(ticker).history(period='1d')
         return data['Close'].iloc[-1]
     except Exception as e:
-        st.error(f"Error fetching price for {ticker}: {e}")
+        log_error(f"Error fetching price for {ticker}: {e}")
+        st.error(f"Error fetching price for {ticker}.")
         return None
 
 @st.cache_data(ttl=3600)
 def get_cik(query):
     """
     Given a company ticker or name, search the SEC EDGAR website for the company
-    and extract its CIK. This enables searching for any company.
+    and extract its CIK. Uses regex on the response text.
+    Caches the result for one hour.
     """
     url = f"https://www.sec.gov/cgi-bin/browse-edgar?company={query}&owner=exclude&action=getcompany"
-    headers = {'User-Agent': 'YourName your-email@example.com'}  # Replace with your info
+    headers = {'User-Agent': 'YourName your-email@example.com'}  # Update with your details.
     try:
         response = requests.get(url, headers=headers)
         if response.status_code != 200:
             log_error("Error fetching company data from SEC website.")
+            st.error("Error fetching company data from SEC website.")
             return None
         soup = BeautifulSoup(response.content, 'html.parser')
         text = soup.get_text()
-        # Look for the pattern "CIK#: <number>" using a regex
+        # Use regex to find pattern "CIK#: <number>"
         match = re.search(r"CIK#:\s*([0-9]+)", text)
         if match:
             cik = match.group(1).strip()
-            return cik.zfill(10)  # pad with zeros to 10 digits if necessary
+            return cik.zfill(10)  # pad to 10 digits if necessary
         else:
             log_error("CIK not found for the provided company.")
+            st.error("CIK not found for the provided company.")
             return None
     except Exception as e:
         log_error(f"Error searching for CIK: {e}")
+        st.error("Error searching for CIK.")
         return None
 
 # -----------------------------------
-# SEC Filings Function
+# 3. SEC Filings Function
 # Retrieves filings using the EDGAR JSON endpoint based on the company's CIK.
 # Filters for filings in the last 6 months.
 # -----------------------------------
 @st.cache_data(ttl=300)
 def get_sec_filings(query):
     """
-    Search for SEC filings for the given company (by ticker or name).
-    First, obtain the CIK then request the JSON submissions file.
+    Retrieve SEC filings for the given company (by ticker or name).
+    First, obtain the CIK, then request the JSON submissions file.
     Returns a DataFrame of filings from the last 6 months.
     """
     cik = get_cik(query)
@@ -87,72 +107,69 @@ def get_sec_filings(query):
         st.error("Cannot retrieve CIK for the company. Please check your query.")
         return pd.DataFrame()
     
-    # Build the URL for the JSON submissions file
     url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-    headers = {'User-Agent': 'Keval Ahir your-keval.ahir2019@gmail.com'}  # update as necessary
+    headers = {'User-Agent': 'Keval Ahir your-keval.ahir2019@gmail.com'}  # Update as necessary.
     try:
         response = requests.get(url, headers=headers)
         if response.status_code != 200:
             log_error("Error fetching SEC filings data from the SEC website.")
+            st.error("Error fetching SEC filings data.")
             return pd.DataFrame()
         data = response.json()
         recent = data.get("filings", {}).get("recent", {})
         if not recent:
             log_error("No recent filings found.")
+            st.info("No recent SEC filings found for this company.")
             return pd.DataFrame()
-        # Create a DataFrame from the recent filings
         df = pd.DataFrame({
             'accessionNumber': recent.get('accessionNumber', []),
             'filingDate': recent.get('filingDate', []),
             'form': recent.get('form', []),
             'reportDate': recent.get('reportDate', [])
         })
-        # Convert filingDate to datetime
         df['filingDate'] = pd.to_datetime(df['filingDate'], errors='coerce')
-        # Filter filings from the last six months.
         six_months_ago = pd.Timestamp.today() - relativedelta(months=6)
         df = df[df['filingDate'] >= six_months_ago]
         return df.sort_values('filingDate', ascending=False)
     except Exception as e:
         log_error(f"Error processing SEC filings: {e}")
+        st.error("Error processing SEC filings data.")
         return pd.DataFrame()
 
 # -----------------------------------
-# OpenInsider Filings Function (Scraping)
+# 4. OpenInsider Filings Function (Scraping)
 # Retrieves insider-related filings from OpenInsider for the given ticker.
 # Filters for filings in the last 6 months.
 # -----------------------------------
 @st.cache_data(ttl=300)
 def get_openinsider_filings(query):
     """
-    Scrape OpenInsider for filings related to the provided ticker.
-    It expects a ticker string, so if the query is a company name, try using it directly.
-    Filters results to the last six months.
+    Scrape OpenInsider for filings related to the provided ticker (or company name).
+    Filters results to only those filings in the last 6 months.
     """
     ticker = query.upper()
     six_months_ago = (pd.Timestamp.today() - relativedelta(months=6)).strftime('%Y-%m-%d')
     today = pd.Timestamp.today().strftime('%Y-%m-%d')
-    # Construct a URL that tries to filter for filings by this ticker and date range.
-    # (Note: OpenInsider URL parameters may change over time.)
+    # Construct URL with date filtering; note that parameters may change over time.
     url = f"http://openinsider.com/screener?s={ticker}&fd={six_months_ago}&td={today}&f=html"
     try:
         response = requests.get(url)
         if response.status_code != 200:
             log_error("Error fetching OpenInsider data.")
+            st.error("Error fetching OpenInsider filings.")
             return pd.DataFrame()
         soup = BeautifulSoup(response.text, 'html.parser')
         table = soup.find("table", class_="tinytable")
         if table is None:
             log_error("No OpenInsider data found for this ticker.")
+            st.info("No OpenInsider filings found for this ticker.")
             return pd.DataFrame()
         rows = table.find_all("tr")
         data = []
-        # Skip header row; iterate through remaining rows
         for row in rows[1:]:
             cols = row.find_all("td")
-            if len(cols) < 10:  # Make sure there are enough columns
+            if len(cols) < 10:
                 continue
-            # Example: Use col indices based on known table layout
             filing_date_text = cols[4].text.strip()
             try:
                 filing_date = pd.to_datetime(filing_date_text)
@@ -166,52 +183,21 @@ def get_openinsider_filings(query):
                 'Trade Value': cols[9].text.strip()
             })
         df = pd.DataFrame(data)
-        # Drop rows with missing filing dates and filter to last six months.
         df = df.dropna(subset=['Filing Date'])
         six_months_ago_date = pd.Timestamp.today() - relativedelta(months=6)
         df = df[df['Filing Date'] >= six_months_ago_date]
         return df.sort_values('Filing Date', ascending=False)
     except Exception as e:
         log_error(f"Error processing OpenInsider data: {e}")
+        st.error("Error processing OpenInsider data.")
         return pd.DataFrame()
 
 # -----------------------------------
-# Main App: UI for Searching and Displaying Filings
-# -----------------------------------
-st.set_page_config(page_title="Company Filings", layout="wide")
-st.title("SEC and OpenInsider Filings (Last 6 Months)")
-
-st.markdown("""
-This app lets you search for any company (by name or ticker) and displays:
-- **SEC Filings:** Pulled from SEC EDGAR using the company's CIK.
-- **OpenInsider Filings:** Insider trades and related filings.
-""")
-
-# Let user enter a company name or ticker.
-user_query = st.text_input("Enter a company name or ticker (e.g., AAPL, Microsoft, Tesla):").strip()
-
-if user_query:
-    st.header(f"SEC Filings for {user_query}")
-    sec_df = get_sec_filings(user_query)
-    if not sec_df.empty:
-        st.dataframe(sec_df)
-    else:
-        st.info("No SEC filings found in the last 6 months for this company.")
-
-    st.header(f"OpenInsider Filings for {user_query}")
-    insider_df = get_openinsider_filings(user_query)
-    if not insider_df.empty:
-        st.dataframe(insider_df)
-    else:
-        st.info("No OpenInsider filings found in the last 6 months for this company.")
-# -----------------------------------
-# 3. Sentiment & Technical Analysis Functions
-# -----------------------------------
-# Updated Function: Reddit Sentiment
+# 5. Sentiment & Technical Analysis Functions
 # -----------------------------------
 def get_reddit_sentiment(query):
     """
-    Searches various subreddits for posts mentioning the query (which may be a ticker or company name)
+    Searches various subreddits for posts mentioning the query (ticker or company name)
     and calculates a weighted sentiment score using VADER.
     """
     subreddits = ['stocks', 'investing', 'wallstreetbets', 'StockMarket']
@@ -238,13 +224,10 @@ def get_reddit_sentiment(query):
         total_weight += weight
     return total_score / total_weight if total_weight != 0 else 0
 
-# -----------------------------------
-# Updated Function: News Sentiment
-# -----------------------------------
 def get_news_sentiment(query):
     """
-    Uses the GNews API to fetch news articles for the query (ticker or company name) and calculates
-    a combined sentiment score using both the title and the description.
+    Uses the GNews API to fetch news articles for the query (ticker or company name)
+    and calculates a combined sentiment score using both title and description.
     """
     try:
         url = f"https://gnews.io/api/v4/search?q={query}&lang=en&token={st.secrets['GNEWS_TOKEN']}"
@@ -255,7 +238,6 @@ def get_news_sentiment(query):
             title = art.get('title', '')
             description = art.get('description', '')
             title_sent = vader.polarity_scores(title)['compound']
-            # Use description sentiment if available.
             description_sent = vader.polarity_scores(description)['compound'] if description else 0
             combined_sent = (title_sent + description_sent) / 2
             sentiments.append(combined_sent)
@@ -264,13 +246,10 @@ def get_news_sentiment(query):
         st.warning(f"Error fetching news data: {e}")
         return 0
 
-# -----------------------------------
-# Market Scenario Sentiment (for broader market conditions)
-# -----------------------------------
 def get_market_scenario():
     """
     Retrieves current general market sentiment using a generic query ("stock market")
-    with the GNews API. Provides an overall sentiment score for broader market conditions.
+    via the GNews API. This returns an overall sentiment score for broader market conditions.
     """
     try:
         query = "stock market"
@@ -290,13 +269,10 @@ def get_market_scenario():
         st.warning(f"Error fetching market scenario data: {e}")
         return 0
 
-# -----------------------------------
-# RSI Calculation (unchanged, with robustness improvements)
-# -----------------------------------
 def calculate_rsi(prices, window=14):
     """
     Calculate the Relative Strength Index (RSI) from a series of prices.
-    Uses rolling means with a minimum period and safeguards against division by zero.
+    Uses rolling means with minimum periods and safeguards against division errors.
     """
     delta = prices.diff()
     gain = delta.where(delta > 0, 0)
@@ -308,41 +284,13 @@ def calculate_rsi(prices, window=14):
     return rsi.iloc[-1] if not rsi.empty else np.nan
 
 # -----------------------------------
-# Example Usage in a Streamlit App
-# -----------------------------------
-st.title("Enhanced Sentiment Analysis")
-
-# Let the user enter a ticker or company name for sentiment analysis.
-user_query = st.text_input("Enter a ticker or company name (e.g., AAPL or Apple):").strip()
-
-if user_query:
-    # Get sentiment from Reddit and News for the user query.
-    reddit_sent = get_reddit_sentiment(user_query)
-    news_sent = get_news_sentiment(user_query)
-    market_sent = get_market_scenario()
-    
-    st.markdown(f"**Reddit Sentiment for '{user_query}':** {reddit_sent:.2f}")
-    st.markdown(f"**News Sentiment for '{user_query}':** {news_sent:.2f}")
-    st.markdown(f"**Overall Market Sentiment:** {market_sent:.2f}")
-    
-    # Optionally, if you wish to calculate RSI as well:
-    try:
-        import yfinance as yf
-        price_data = yf.Ticker(user_query).history(period="6mo")
-        if not price_data.empty:
-            rsi_value = calculate_rsi(price_data['Close'])
-            st.markdown(f"**RSI for '{user_query}':** {rsi_value:.2f}")
-        else:
-            st.warning("No price data available for RSI calculation.")
-    except Exception as ex:
-        st.error(f"Error calculating RSI: {ex}")
-# -----------------------------------
-# 4. Recommendation Engine
+# 6. Recommendation Engine
 # -----------------------------------
 def generate_recommendations(budget):
     """
-    Generate stock recommendations by integrating sentiment, 
+    Generate stock recommendations by integrating sentiment,
     institutional/insider data, and technical indicators (RSI).
+    Returns a DataFrame with allocation percentages and recommended investment.
     """
     inst_activity = get_institutional_activity()
     insider_trades = get_insider_trades()
@@ -351,7 +299,7 @@ def generate_recommendations(budget):
     tickers = list(set(inst_tickers + insider_tickers))
     
     recommendations = []
-    for ticker in tickers[:15]:  # Limit analysis for performance
+    for ticker in tickers[:15]:  # Limit to first 15 tickers for performance
         try:
             stock = yf.Ticker(ticker)
             hist = stock.history(period="1mo")
@@ -379,18 +327,17 @@ def generate_recommendations(budget):
 
     df = pd.DataFrame(recommendations)
     if not df.empty and 'Score' in df.columns:
-        # Normalize the score to allocate investment proportions
         df['Allocation (%)'] = (df['Score'] - df['Score'].min()) / (df['Score'].max() - df['Score'].min()) * 100
         df['Recommended Investment'] = (df['Allocation (%)'] / 100) * budget
         df = df.sort_values('Score', ascending=False)
     return df
 
 # -----------------------------------
-# 5. AI Analysis Function
+# 7. AI Analysis Function
 # -----------------------------------
 def get_ai_analysis(prompt):
     """
-    Uses OpenAI API to generate a market analysis based on a prompt.
+    Uses the OpenAI API to generate market analysis based on the provided prompt.
     """
     try:
         response = openai.ChatCompletion.create(
@@ -404,12 +351,12 @@ def get_ai_analysis(prompt):
         return "AI analysis is currently unavailable."
 
 # -----------------------------------
-# 6. Fundamental Analysis Function
+# 8. Fundamental Analysis Function
 # -----------------------------------
 @st.cache_data(ttl=300)
 def get_fundamentals(ticker):
     """
-    Retrieve extensive fundamental data from Yahoo Finance.
+    Retrieve extensive fundamental data for the given ticker from Yahoo Finance.
     """
     try:
         stock = yf.Ticker(ticker)
@@ -430,12 +377,11 @@ def get_fundamentals(ticker):
         return {}
 
 # -----------------------------------
-# 7. Trending Stocks Function (Placeholder)
+# 9. Trending Stocks Function (Placeholder)
 # -----------------------------------
 def get_trending_stocks():
     """
-    Placeholder: In the future, scrape real-time trending stock data from free sources.
-    Currently returns a sample DataFrame.
+    Placeholder: Returns a sample DataFrame simulating trending stocks data.
     """
     trending = pd.DataFrame({
         'Ticker': ['AAPL', 'TSLA', 'MSFT', 'AMZN', 'NVDA'],
@@ -444,37 +390,36 @@ def get_trending_stocks():
     return trending
 
 # -----------------------------------
-# 8. Streamlit UI Setup & Page Configuration
+# 10. Streamlit UI Setup & Page Configuration
 # -----------------------------------
 st.set_page_config(page_title="AI Stock Analyst", layout="wide")
 st.title("📈 Intelligent Stock Analysis Platform")
 
 # -----------------------------------
-# 9. Initialize Portfolio in Session State
-# Use only the base columns: 'Ticker', 'Quantity', and 'Purchase Price'.
+# 11. Initialize Portfolio in Session State
+# Use base columns: 'Ticker', 'Quantity', 'Purchase Price'
 # -----------------------------------
 if 'portfolio' not in st.session_state or st.session_state.portfolio.empty:
     st.session_state.portfolio = pd.DataFrame(columns=['Ticker', 'Quantity', 'Purchase Price'])
 
 # -----------------------------------
-# 10. Sidebar: Portfolio Management (Add/Delete/Edit)
+# 12. Sidebar: Portfolio Management (Add/Delete/Edit)
 # -----------------------------------
 with st.sidebar:
     st.header("💰 Portfolio Management")
     
-    # Form to add a new stock (allows decimal quantities)
+    # Form to add a new stock (with decimal quantities)
     with st.form("add_stock"):
-        ticker = st.text_input("Stock Ticker").upper()
+        ticker_input_sidebar = st.text_input("Stock Ticker").upper()
         qty = st.number_input("Quantity", min_value=0.01, value=1.0, step=0.01)
         cost = st.number_input("Purchase Price", min_value=0.01, value=1.0, step=0.01)
-        if st.form_submit_button("Add to Portfolio") and (price := get_current_price(ticker)):
-            # Append the new entry to the base portfolio
+        if st.form_submit_button("Add to Portfolio") and (price := get_current_price(ticker_input_sidebar)):
             base_portfolio = st.session_state.portfolio[['Ticker', 'Quantity', 'Purchase Price']]
-            new_entry = pd.DataFrame([[ticker, qty, cost]], columns=base_portfolio.columns)
+            new_entry = pd.DataFrame([[ticker_input_sidebar, qty, cost]], columns=base_portfolio.columns)
             st.session_state.portfolio = pd.concat([base_portfolio, new_entry], ignore_index=True)
-            st.success(f"{ticker} added!")
+            st.success(f"{ticker_input_sidebar} added!")
     
-    # Option to delete individual stocks from portfolio
+    # Option to delete individual stocks
     if not st.session_state.portfolio.empty:
         tickers_in_portfolio = st.session_state.portfolio['Ticker'].unique().tolist()
         stock_to_remove = st.multiselect("Select stocks to remove", tickers_in_portfolio)
@@ -482,7 +427,7 @@ with st.sidebar:
             st.session_state.portfolio = st.session_state.portfolio[~st.session_state.portfolio['Ticker'].isin(stock_to_remove)]
             st.success("Selected stocks removed!")
     
-    # Option to clear the entire portfolio
+    # Clear entire portfolio option
     if not st.session_state.portfolio.empty and st.button("Clear Portfolio"):
         st.session_state.portfolio = pd.DataFrame(columns=['Ticker', 'Quantity', 'Purchase Price'])
         st.experimental_rerun()
@@ -500,7 +445,7 @@ with st.sidebar:
     )
 
 # -----------------------------------
-# 11. Main Tabs Layout
+# 13. Main Tabs Layout
 # Tabs: Portfolio | Analysis | Recommendations | Market Intel | Fundamentals | Optimizer | Trending
 # -----------------------------------
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
@@ -508,11 +453,10 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
 )
 
 # -----------------------------------
-# 12. Tab 1: Portfolio Overview (with Profit/Loss Column)
+# 14. Tab 1: Portfolio Overview (Profit/Loss Column)
 # -----------------------------------
 with tab1:
     if not st.session_state.portfolio.empty:
-        # Create a copy and compute additional columns for display only
         portfolio_df = st.session_state.portfolio.copy()
         portfolio_df['Current Price'] = portfolio_df['Ticker'].apply(get_current_price)
         portfolio_df['Value'] = portfolio_df['Quantity'] * portfolio_df['Current Price']
@@ -537,16 +481,16 @@ with tab1:
         st.info("Add stocks using the sidebar.")
 
 # -----------------------------------
-# 13. Tab 2: Technical & Sentiment Analysis for a Stock
+# 15. Tab 2: Technical & Sentiment Analysis for a Stock
 # -----------------------------------
 with tab2:
-    ticker_input = st.text_input("Enter ticker for analysis:").upper()
-    if ticker_input:
+    ticker_analysis = st.text_input("Enter ticker for analysis:").upper()
+    if ticker_analysis:
         col1, col2 = st.columns([1, 2])
         with col1:
             st.subheader("Sentiment Analysis")
-            reddit_sent = get_reddit_sentiment(ticker_input)
-            news_sent = get_news_sentiment(ticker_input)
+            reddit_sent = get_reddit_sentiment(ticker_analysis)
+            news_sent = get_news_sentiment(ticker_analysis)
             st.metric("Reddit Sentiment", f"{reddit_sent:.2f}")
             st.metric("News Sentiment", f"{news_sent:.2f}")
             fig, ax = plt.subplots()
@@ -555,7 +499,7 @@ with tab2:
             st.pyplot(fig)
         with col2:
             try:
-                data = yf.Ticker(ticker_input).history(period="6mo")
+                data = yf.Ticker(ticker_analysis).history(period="6mo")
                 data['MA50'] = data['Close'].rolling(50).mean()
                 data['MA200'] = data['Close'].rolling(200).mean()
                 rsi = calculate_rsi(data['Close'])
@@ -563,7 +507,7 @@ with tab2:
                 ax1.plot(data['Close'], label='Price')
                 ax1.plot(data['MA50'], label='50-day MA')
                 ax1.plot(data['MA200'], label='200-day MA')
-                ax1.set_title(f"{ticker_input} Price & Moving Averages")
+                ax1.set_title(f"{ticker_analysis} Price & MAs")
                 ax1.legend()
                 ax2.plot(data.index, [rsi] * len(data), label='RSI')
                 ax2.axhline(70, color='r', linestyle='--')
@@ -575,7 +519,7 @@ with tab2:
                 st.error("Error loading technical data.")
 
 # -----------------------------------
-# 14. Tab 3: Recommendations & AI Analysis
+# 16. Tab 3: Recommendations & AI Analysis
 # -----------------------------------
 with tab3:
     budget = st.number_input("Investment Budget ($)", min_value=0, value=1000000000, key="rec_budget")
@@ -604,7 +548,7 @@ with tab3:
                 st.info("No recommendations available at this time.")
 
 # -----------------------------------
-# 15. Tab 4: Market Intelligence
+# 17. Tab 4: Market Intelligence
 # -----------------------------------
 with tab4:
     col1, col2 = st.columns(2)
@@ -624,7 +568,7 @@ with tab4:
         st.metric("Fear & Greed Index", "38 (Fear)", "-12% week-over-week")
 
 # -----------------------------------
-# 16. Tab 5: Fundamental Analysis
+# 18. Tab 5: Fundamental Analysis
 # -----------------------------------
 with tab5:
     ticker_fund = st.text_input("Enter ticker for fundamentals:", key="fund_ticker").upper()
@@ -638,7 +582,7 @@ with tab5:
             st.info("No fundamental data available.")
 
 # -----------------------------------
-# 17. Tab 6: Portfolio Optimizer using Efficient Frontier
+# 19. Tab 6: Portfolio Optimizer using Efficient Frontier
 # -----------------------------------
 with tab6:
     st.subheader("Portfolio Optimization using Efficient Frontier")
@@ -674,7 +618,7 @@ with tab6:
         st.info("Add stocks to your portfolio to optimize.")
 
 # -----------------------------------
-# 18. Tab 7: Trending & Emerging Stocks
+# 20. Tab 7: Trending & Emerging Stocks (Placeholder)
 # -----------------------------------
 with tab7:
     st.subheader("Trending & Emerging Stocks")
