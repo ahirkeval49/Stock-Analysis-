@@ -14,21 +14,18 @@ import openai
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
-# -----------------------------------
-# Set up logging (logs errors to file "app_errors.log")
-# -----------------------------------
+# ------------------------------
+# Logging Setup
+# ------------------------------
 logging.basicConfig(level=logging.ERROR, filename="app_errors.log", 
                     format='%(asctime)s %(levelname)s:%(message)s')
-
 def log_error(msg):
-    """Log an error message and optionally display a user-friendly message."""
     logging.error(msg)
-    # You may display less technical error info to the user if needed:
-    # st.error(msg)  # Uncomment this line to show errors in the UI
+    # Optionally: st.error(msg)
 
-# -----------------------------------
+# ------------------------------
 # 1. Configuration & API Setup
-# -----------------------------------
+# ------------------------------
 openai.api_key = st.secrets["DEEPSEEK"]["API_KEY"]
 openai.api_base = "https://api.deepseek.com"
 
@@ -38,19 +35,13 @@ reddit = praw.Reddit(
     user_agent='Stock Analysis v2.0'
 )
 
-# Initialize VADER sentiment analyzer.
 vader = SentimentIntensityAnalyzer()
 
-# -----------------------------------
-# 2. Caching Helpers for Performance
-# These functions cache API responses to reduce external calls.
-# -----------------------------------
+# ------------------------------
+# 2. Caching Helpers
+# ------------------------------
 @st.cache_data(ttl=60)
 def get_current_price(ticker):
-    """
-    Retrieve the latest closing price for a given ticker using yfinance.
-    Caches the result for 60 seconds.
-    """
     try:
         data = yf.Ticker(ticker).history(period='1d')
         return data['Close'].iloc[-1]
@@ -61,8 +52,9 @@ def get_current_price(ticker):
 
 @st.cache_data(ttl=3600)
 def get_cik(query):
+    query = query.strip().replace(" ", "+")
     url = f"https://www.sec.gov/cgi-bin/browse-edgar?company={query}&owner=exclude&action=getcompany"
-    headers = {'User-Agent': 'Keval Ahir (keval.ahir2019@gmail.com)'}  # Update with your details.
+    headers = {'User-Agent': 'Keval Ahir (keval.ahir2019@gmail.com)'}
     try:
         response = requests.get(url, headers=headers)
         if response.status_code != 200:
@@ -94,7 +86,7 @@ def get_sec_filings(query):
         st.error("Cannot retrieve CIK for the company. Please check your query.")
         return pd.DataFrame()
     url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-    headers = {'User-Agent': 'Keval Ahir your-keval.ahir2019@gmail.com'}
+    headers = {'User-Agent': 'Keval Ahir (keval.ahir2019@gmail.com)'}
     try:
         response = requests.get(url, headers=headers)
         if response.status_code != 200:
@@ -171,24 +163,17 @@ def get_openinsider_filings(query):
         st.error("Error processing OpenInsider data.")
         return pd.DataFrame()
 
-# -----------------------------------
+# ------------------------------
 # 5. Sentiment & Technical Analysis Functions
-# -----------------------------------
+# ------------------------------
 def get_reddit_sentiment(query):
-    """
-    Searches various subreddits for posts mentioning the query (ticker or company name)
-    and calculates a weighted sentiment score using VADER.
-    """
     subreddits = ['stocks', 'investing', 'wallstreetbets', 'StockMarket']
     posts = []
     for sub in subreddits:
         try:
             submissions = reddit.subreddit(sub).search(query, limit=15, time_filter='week')
-            posts.extend([{
-                'title': post.title,
-                'score': post.score,
-                'comments': post.num_comments
-            } for post in submissions])
+            posts.extend([{'title': post.title, 'score': post.score, 'comments': post.num_comments}
+                          for post in submissions])
         except Exception as e:
             st.warning(f"Error fetching data from r/{sub}: {e}")
             continue
@@ -204,10 +189,6 @@ def get_reddit_sentiment(query):
     return total_score / total_weight if total_weight != 0 else 0
 
 def get_news_sentiment(query):
-    """
-    Uses the GNews API to fetch news articles for the query (ticker or company name)
-    and calculates a combined sentiment score using both title and description.
-    """
     try:
         url = f"https://gnews.io/api/v4/search?q={query}&lang=en&token={st.secrets['GNEWS_TOKEN']}"
         response = requests.get(url)
@@ -226,10 +207,6 @@ def get_news_sentiment(query):
         return 0
 
 def get_market_scenario():
-    """
-    Retrieves current general market sentiment using a generic query ("stock market")
-    via the GNews API. This returns an overall sentiment score for broader market conditions.
-    """
     try:
         query = "stock market"
         url = f"https://gnews.io/api/v4/search?q={query}&lang=en&token={st.secrets['GNEWS_TOKEN']}"
@@ -249,10 +226,6 @@ def get_market_scenario():
         return 0
 
 def calculate_rsi(prices, window=14):
-    """
-    Calculate the Relative Strength Index (RSI) from a series of prices.
-    Uses rolling means with minimum periods and safeguards against division errors.
-    """
     delta = prices.diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -262,23 +235,19 @@ def calculate_rsi(prices, window=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1] if not rsi.empty else np.nan
 
-# -----------------------------------
+# ------------------------------
 # 6. Recommendation Engine
-# -----------------------------------
+# ------------------------------
 def generate_recommendations(budget):
-    """
-    Generate stock recommendations by integrating sentiment,
-    institutional/insider data, and technical indicators (RSI).
-    Returns a DataFrame with allocation percentages and recommended investment.
-    """
-    inst_activity = get_institutional_activity()
-    insider_trades = get_insider_trades()
-    inst_tickers = inst_activity['Ticker'].tolist() if 'Ticker' in inst_activity.columns else []
-    insider_tickers = insider_trades['Ticker'].tolist() if 'Ticker' in insider_trades.columns else []
+    # Here for demonstration, we're using fixed queries.
+    inst_df = get_sec_filings("Apple")  # Replace with your preferred method.
+    insider_df = get_openinsider_filings("AAPL")
+    inst_tickers = inst_df['accessionNumber'].tolist() if 'accessionNumber' in inst_df.columns else []
+    insider_tickers = insider_df['Ticker'].tolist() if 'Ticker' in insider_df.columns else []
     tickers = list(set(inst_tickers + insider_tickers))
     
     recommendations = []
-    for ticker in tickers[:15]:  # Limit to first 15 tickers for performance
+    for ticker in tickers[:15]:
         try:
             stock = yf.Ticker(ticker)
             hist = stock.history(period="1mo")
@@ -303,7 +272,6 @@ def generate_recommendations(budget):
             })
         except Exception:
             continue
-
     df = pd.DataFrame(recommendations)
     if not df.empty and 'Score' in df.columns:
         df['Allocation (%)'] = (df['Score'] - df['Score'].min()) / (df['Score'].max() - df['Score'].min()) * 100
@@ -311,13 +279,10 @@ def generate_recommendations(budget):
         df = df.sort_values('Score', ascending=False)
     return df
 
-# -----------------------------------
+# ------------------------------
 # 7. AI Analysis Function
-# -----------------------------------
+# ------------------------------
 def get_ai_analysis(prompt):
-    """
-    Uses the OpenAI API to generate market analysis based on the provided prompt.
-    """
     try:
         response = openai.ChatCompletion.create(
             model="deepseek-reasoner",
@@ -329,14 +294,11 @@ def get_ai_analysis(prompt):
     except Exception:
         return "AI analysis is currently unavailable."
 
-# -----------------------------------
+# ------------------------------
 # 8. Fundamental Analysis Function
-# -----------------------------------
+# ------------------------------
 @st.cache_data(ttl=300)
 def get_fundamentals(ticker):
-    """
-    Retrieve extensive fundamental data for the given ticker from Yahoo Finance.
-    """
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
@@ -355,39 +317,33 @@ def get_fundamentals(ticker):
     except Exception:
         return {}
 
-# -----------------------------------
+# ------------------------------
 # 9. Trending Stocks Function (Placeholder)
-# -----------------------------------
+# ------------------------------
 def get_trending_stocks():
-    """
-    Placeholder: Returns a sample DataFrame simulating trending stocks data.
-    """
     trending = pd.DataFrame({
         'Ticker': ['AAPL', 'TSLA', 'MSFT', 'AMZN', 'NVDA'],
         'Change (%)': np.random.uniform(0, 5, 5)
     })
     return trending
 
-# -----------------------------------
+# ------------------------------
 # 10. Streamlit UI Setup & Page Configuration
-# -----------------------------------
+# ------------------------------
 st.set_page_config(page_title="AI Stock Analyst", layout="wide")
 st.title("📈 Intelligent Stock Analysis Platform")
 
-# -----------------------------------
+# ------------------------------
 # 11. Initialize Portfolio in Session State
-# Use base columns: 'Ticker', 'Quantity', 'Purchase Price'
-# -----------------------------------
+# ------------------------------
 if 'portfolio' not in st.session_state or st.session_state.portfolio.empty:
     st.session_state.portfolio = pd.DataFrame(columns=['Ticker', 'Quantity', 'Purchase Price'])
 
-# -----------------------------------
+# ------------------------------
 # 12. Sidebar: Portfolio Management (Add/Delete/Edit)
-# -----------------------------------
+# ------------------------------
 with st.sidebar:
     st.header("💰 Portfolio Management")
-    
-    # Form to add a new stock (with decimal quantities)
     with st.form("add_stock"):
         ticker_input_sidebar = st.text_input("Stock Ticker").upper()
         qty = st.number_input("Quantity", min_value=0.01, value=1.0, step=0.01)
@@ -397,20 +353,15 @@ with st.sidebar:
             new_entry = pd.DataFrame([[ticker_input_sidebar, qty, cost]], columns=base_portfolio.columns)
             st.session_state.portfolio = pd.concat([base_portfolio, new_entry], ignore_index=True)
             st.success(f"{ticker_input_sidebar} added!")
-    
-    # Option to delete individual stocks
     if not st.session_state.portfolio.empty:
         tickers_in_portfolio = st.session_state.portfolio['Ticker'].unique().tolist()
         stock_to_remove = st.multiselect("Select stocks to remove", tickers_in_portfolio)
         if st.button("Remove Selected Stocks"):
             st.session_state.portfolio = st.session_state.portfolio[~st.session_state.portfolio['Ticker'].isin(stock_to_remove)]
             st.success("Selected stocks removed!")
-    
-    # Clear entire portfolio option
     if not st.session_state.portfolio.empty and st.button("Clear Portfolio"):
         st.session_state.portfolio = pd.DataFrame(columns=['Ticker', 'Quantity', 'Purchase Price'])
         st.experimental_rerun()
-    
     st.markdown("---")
     st.info(
         """
@@ -423,17 +374,16 @@ with st.sidebar:
         """
     )
 
-# -----------------------------------
+# ------------------------------
 # 13. Main Tabs Layout
-# Tabs: Portfolio | Analysis | Recommendations | Market Intel | Fundamentals | Optimizer | Trending
-# -----------------------------------
+# ------------------------------
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
     ["Portfolio", "Analysis", "Recommendations", "Market Intel", "Fundamentals", "Optimizer", "Trending"]
 )
 
-# -----------------------------------
+# ------------------------------
 # 14. Tab 1: Portfolio Overview (Profit/Loss Column)
-# -----------------------------------
+# ------------------------------
 with tab1:
     if not st.session_state.portfolio.empty:
         portfolio_df = st.session_state.portfolio.copy()
@@ -441,7 +391,6 @@ with tab1:
         portfolio_df['Value'] = portfolio_df['Quantity'] * portfolio_df['Current Price']
         portfolio_df['Profit/Loss'] = (portfolio_df['Current Price'] - portfolio_df['Purchase Price']) * portfolio_df['Quantity']
         total_value = portfolio_df['Value'].sum()
-
         col1, col2 = st.columns(2)
         with col1:
             st.subheader(f"Portfolio Value: ${total_value:,.2f}")
@@ -459,9 +408,9 @@ with tab1:
     else:
         st.info("Add stocks using the sidebar.")
 
-# -----------------------------------
+# ------------------------------
 # 15. Tab 2: Technical & Sentiment Analysis for a Stock
-# -----------------------------------
+# ------------------------------
 with tab2:
     ticker_analysis = st.text_input("Enter ticker for analysis:").upper()
     if ticker_analysis:
@@ -486,7 +435,7 @@ with tab2:
                 ax1.plot(data['Close'], label='Price')
                 ax1.plot(data['MA50'], label='50-day MA')
                 ax1.plot(data['MA200'], label='200-day MA')
-                ax1.set_title(f"{ticker_analysis} Price & MAs")
+                ax1.set_title(f"{ticker_analysis} Price & Moving Averages")
                 ax1.legend()
                 ax2.plot(data.index, [rsi] * len(data), label='RSI')
                 ax2.axhline(70, color='r', linestyle='--')
@@ -497,9 +446,9 @@ with tab2:
             except Exception:
                 st.error("Error loading technical data.")
 
-# -----------------------------------
+# ------------------------------
 # 16. Tab 3: Recommendations & AI Analysis
-# -----------------------------------
+# ------------------------------
 with tab3:
     budget = st.number_input("Investment Budget ($)", min_value=0, value=1000000000, key="rec_budget")
     if st.button("Generate Recommendations"):
@@ -526,16 +475,33 @@ with tab3:
             else:
                 st.info("No recommendations available at this time.")
 
-# -----------------------------------
+# ------------------------------
 # 17. Tab 4: Market Intelligence
-# -----------------------------------
+# ------------------------------
 with tab4:
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Institutional Activity")
-        st.dataframe(get_institutional_activity())
-        st.subheader("Insider Trades")
-        st.dataframe(get_insider_trades())
+        query_inst = st.text_input("Enter company name for SEC Filings (Institutional Activity):", key="inst_query")
+        if query_inst:
+            st.subheader("SEC Filings (Institutional Activity)")
+            inst_df = get_sec_filings(query_inst)
+            if not inst_df.empty:
+                st.dataframe(inst_df)
+            else:
+                st.info("No SEC filings found in the last 6 months for this company.")
+        else:
+            st.info("Enter a company name to see institutional activity.")
+            
+        query_insider = st.text_input("Enter ticker for OpenInsider Filings (Insider Trades):", key="insider_query")
+        if query_insider:
+            st.subheader("OpenInsider Filings (Insider Trades)")
+            insider_df = get_openinsider_filings(query_insider)
+            if not insider_df.empty:
+                st.dataframe(insider_df)
+            else:
+                st.info("No OpenInsider filings found in the last 6 months for this ticker.")
+        else:
+            st.info("Enter a ticker to see insider trades.")
     with col2:
         st.subheader("Sector Sentiment")
         fig, ax = plt.subplots()
@@ -546,9 +512,9 @@ with tab4:
         st.subheader("Market Anxiety Index")
         st.metric("Fear & Greed Index", "38 (Fear)", "-12% week-over-week")
 
-# -----------------------------------
+# ------------------------------
 # 18. Tab 5: Fundamental Analysis
-# -----------------------------------
+# ------------------------------
 with tab5:
     ticker_fund = st.text_input("Enter ticker for fundamentals:", key="fund_ticker").upper()
     if ticker_fund:
@@ -560,9 +526,9 @@ with tab5:
         else:
             st.info("No fundamental data available.")
 
-# -----------------------------------
+# ------------------------------
 # 19. Tab 6: Portfolio Optimizer using Efficient Frontier
-# -----------------------------------
+# ------------------------------
 with tab6:
     st.subheader("Portfolio Optimization using Efficient Frontier")
     if not st.session_state.portfolio.empty:
@@ -585,7 +551,6 @@ with tab6:
                 st.write(f"Expected Annual Return: {exp_return*100:.2f}%")
                 st.write(f"Annual Volatility: {volatility*100:.2f}%")
                 st.write(f"Sharpe Ratio: {sharpe:.2f}")
-                # Display a pie chart of the optimized weights
                 fig, ax = plt.subplots()
                 ax.pie(list(cleaned_weights.values()), labels=list(cleaned_weights.keys()), autopct='%1.1f%%')
                 st.pyplot(fig)
@@ -596,9 +561,9 @@ with tab6:
     else:
         st.info("Add stocks to your portfolio to optimize.")
 
-# -----------------------------------
+# ------------------------------
 # 20. Tab 7: Trending & Emerging Stocks (Placeholder)
-# -----------------------------------
+# ------------------------------
 with tab7:
     st.subheader("Trending & Emerging Stocks")
     trending_df = get_trending_stocks()
@@ -607,10 +572,10 @@ with tab7:
     else:
         st.info("Trending stocks data not available.")
 
-# -----------------------------------
+# ------------------------------
 # Final Suggestions for Further Improvement:
 # - Modularize the code (split functions into separate modules for data fetching, analysis, and UI).
-# - Integrate interactive charting libraries (e.g. Plotly) for more dynamic visualizations.
+# - Integrate interactive charting libraries (e.g., Plotly) for more dynamic visualizations.
 # - Implement advanced error logging and monitoring.
-# - Allow user customizations (e.g. upload CSV portfolios, adjust scoring weights).
-# -----------------------------------
+# - Allow user customizations (e.g., upload CSV portfolios, adjust scoring weights).
+# ------------------------------
