@@ -43,44 +43,167 @@ def get_current_price(ticker):
         st.error(f"Error fetching price for {ticker}: {e}")
         return None
 
-@st.cache_data(ttl=300)
-def get_institutional_activity():
+@st.cache_data(ttl=3600)
+def get_cik(query):
     """
-    Scrape the SEC website for recent institutional filings.
+    Given a company ticker or name, search the SEC EDGAR website for the company
+    and extract its CIK. This enables searching for any company.
     """
+    url = f"https://www.sec.gov/cgi-bin/browse-edgar?company={query}&owner=exclude&action=getcompany"
+    headers = {'User-Agent': 'YourName your-email@example.com'}  # Replace with your info
     try:
-        response = requests.get("https://www.sec.gov/cgi-bin/current?q1=4&q2=0&q3=4")
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            log_error("Error fetching company data from SEC website.")
+            return None
         soup = BeautifulSoup(response.content, 'html.parser')
-        data = [{
-            'Ticker': cols[1].text.strip(),
-            'Company': cols[2].text.strip(),
-            'Filing': cols[3].text.strip(),
-            'Date': cols[4].text.strip()
-        } for row in soup.select('table.tableFile2 tr')[1:6] if (cols := row.find_all('td'))]
-        return pd.DataFrame(data)
+        text = soup.get_text()
+        # Look for the pattern "CIK#: <number>" using a regex
+        match = re.search(r"CIK#:\s*([0-9]+)", text)
+        if match:
+            cik = match.group(1).strip()
+            return cik.zfill(10)  # pad with zeros to 10 digits if necessary
+        else:
+            log_error("CIK not found for the provided company.")
+            return None
     except Exception as e:
-        st.error("Error fetching institutional activity.")
-        return pd.DataFrame()
+        log_error(f"Error searching for CIK: {e}")
+        return None
 
+# -----------------------------------
+# SEC Filings Function
+# Retrieves filings using the EDGAR JSON endpoint based on the company's CIK.
+# Filters for filings in the last 6 months.
+# -----------------------------------
 @st.cache_data(ttl=300)
-def get_insider_trades():
+def get_sec_filings(query):
     """
-    Scrape OpenInsider for recent insider trade data.
+    Search for SEC filings for the given company (by ticker or name).
+    First, obtain the CIK then request the JSON submissions file.
+    Returns a DataFrame of filings from the last 6 months.
     """
+    cik = get_cik(query)
+    if cik is None:
+        st.error("Cannot retrieve CIK for the company. Please check your query.")
+        return pd.DataFrame()
+    
+    # Build the URL for the JSON submissions file
+    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    headers = {'User-Agent': 'Keval Ahir your-keval.ahir2019@gmail.com'}  # update as necessary
     try:
-        response = requests.get("http://openinsider.com/latest-cluster-buys")
-        soup = BeautifulSoup(response.text, 'html.parser')
-        data = [{
-            'Ticker': cols[2].text.strip(),
-            'Company': cols[3].text.strip(),
-            'Position': cols[5].text.strip(),
-            'Trade Value': cols[9].text.strip()
-        } for row in soup.select('table.tinytable tr')[1:6] if (cols := row.find_all('td'))]
-        return pd.DataFrame(data)
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            log_error("Error fetching SEC filings data from the SEC website.")
+            return pd.DataFrame()
+        data = response.json()
+        recent = data.get("filings", {}).get("recent", {})
+        if not recent:
+            log_error("No recent filings found.")
+            return pd.DataFrame()
+        # Create a DataFrame from the recent filings
+        df = pd.DataFrame({
+            'accessionNumber': recent.get('accessionNumber', []),
+            'filingDate': recent.get('filingDate', []),
+            'form': recent.get('form', []),
+            'reportDate': recent.get('reportDate', [])
+        })
+        # Convert filingDate to datetime
+        df['filingDate'] = pd.to_datetime(df['filingDate'], errors='coerce')
+        # Filter filings from the last six months.
+        six_months_ago = pd.Timestamp.today() - relativedelta(months=6)
+        df = df[df['filingDate'] >= six_months_ago]
+        return df.sort_values('filingDate', ascending=False)
     except Exception as e:
-        st.error("Error fetching insider trades.")
+        log_error(f"Error processing SEC filings: {e}")
         return pd.DataFrame()
 
+# -----------------------------------
+# OpenInsider Filings Function (Scraping)
+# Retrieves insider-related filings from OpenInsider for the given ticker.
+# Filters for filings in the last 6 months.
+# -----------------------------------
+@st.cache_data(ttl=300)
+def get_openinsider_filings(query):
+    """
+    Scrape OpenInsider for filings related to the provided ticker.
+    It expects a ticker string, so if the query is a company name, try using it directly.
+    Filters results to the last six months.
+    """
+    ticker = query.upper()
+    six_months_ago = (pd.Timestamp.today() - relativedelta(months=6)).strftime('%Y-%m-%d')
+    today = pd.Timestamp.today().strftime('%Y-%m-%d')
+    # Construct a URL that tries to filter for filings by this ticker and date range.
+    # (Note: OpenInsider URL parameters may change over time.)
+    url = f"http://openinsider.com/screener?s={ticker}&fd={six_months_ago}&td={today}&f=html"
+    try:
+        response = requests.get(url)
+        if response.status_code != 200:
+            log_error("Error fetching OpenInsider data.")
+            return pd.DataFrame()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find("table", class_="tinytable")
+        if table is None:
+            log_error("No OpenInsider data found for this ticker.")
+            return pd.DataFrame()
+        rows = table.find_all("tr")
+        data = []
+        # Skip header row; iterate through remaining rows
+        for row in rows[1:]:
+            cols = row.find_all("td")
+            if len(cols) < 10:  # Make sure there are enough columns
+                continue
+            # Example: Use col indices based on known table layout
+            filing_date_text = cols[4].text.strip()
+            try:
+                filing_date = pd.to_datetime(filing_date_text)
+            except Exception:
+                filing_date = None
+            data.append({
+                'Ticker': cols[2].text.strip(),
+                'Company': cols[3].text.strip(),
+                'Filing Date': filing_date,
+                'Position': cols[5].text.strip(),
+                'Trade Value': cols[9].text.strip()
+            })
+        df = pd.DataFrame(data)
+        # Drop rows with missing filing dates and filter to last six months.
+        df = df.dropna(subset=['Filing Date'])
+        six_months_ago_date = pd.Timestamp.today() - relativedelta(months=6)
+        df = df[df['Filing Date'] >= six_months_ago_date]
+        return df.sort_values('Filing Date', ascending=False)
+    except Exception as e:
+        log_error(f"Error processing OpenInsider data: {e}")
+        return pd.DataFrame()
+
+# -----------------------------------
+# Main App: UI for Searching and Displaying Filings
+# -----------------------------------
+st.set_page_config(page_title="Company Filings", layout="wide")
+st.title("SEC and OpenInsider Filings (Last 6 Months)")
+
+st.markdown("""
+This app lets you search for any company (by name or ticker) and displays:
+- **SEC Filings:** Pulled from SEC EDGAR using the company's CIK.
+- **OpenInsider Filings:** Insider trades and related filings.
+""")
+
+# Let user enter a company name or ticker.
+user_query = st.text_input("Enter a company name or ticker (e.g., AAPL, Microsoft, Tesla):").strip()
+
+if user_query:
+    st.header(f"SEC Filings for {user_query}")
+    sec_df = get_sec_filings(user_query)
+    if not sec_df.empty:
+        st.dataframe(sec_df)
+    else:
+        st.info("No SEC filings found in the last 6 months for this company.")
+
+    st.header(f"OpenInsider Filings for {user_query}")
+    insider_df = get_openinsider_filings(user_query)
+    if not insider_df.empty:
+        st.dataframe(insider_df)
+    else:
+        st.info("No OpenInsider filings found in the last 6 months for this company.")
 # -----------------------------------
 # 3. Sentiment & Technical Analysis Functions
 # -----------------------------------
