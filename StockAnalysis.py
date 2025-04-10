@@ -207,22 +207,25 @@ if user_query:
 # -----------------------------------
 # 3. Sentiment & Technical Analysis Functions
 # -----------------------------------
-def get_reddit_sentiment(ticker):
+# Updated Function: Reddit Sentiment
+# -----------------------------------
+def get_reddit_sentiment(query):
     """
-    Searches various subreddits for posts mentioning the ticker 
+    Searches various subreddits for posts mentioning the query (which may be a ticker or company name)
     and calculates a weighted sentiment score using VADER.
     """
     subreddits = ['stocks', 'investing', 'wallstreetbets', 'StockMarket']
     posts = []
     for sub in subreddits:
         try:
-            submissions = reddit.subreddit(sub).search(ticker, limit=15, time_filter='week')
+            submissions = reddit.subreddit(sub).search(query, limit=15, time_filter='week')
             posts.extend([{
                 'title': post.title,
                 'score': post.score,
                 'comments': post.num_comments
             } for post in submissions])
-        except Exception:
+        except Exception as e:
+            st.warning(f"Error fetching data from r/{sub}: {e}")
             continue
     if not posts:
         return 0
@@ -235,30 +238,104 @@ def get_reddit_sentiment(ticker):
         total_weight += weight
     return total_score / total_weight if total_weight != 0 else 0
 
-def get_news_sentiment(ticker):
+# -----------------------------------
+# Updated Function: News Sentiment
+# -----------------------------------
+def get_news_sentiment(query):
     """
-    Uses GNews API to fetch news articles and calculate a sentiment score.
+    Uses the GNews API to fetch news articles for the query (ticker or company name) and calculates
+    a combined sentiment score using both the title and the description.
     """
     try:
-        url = f"https://gnews.io/api/v4/search?q={ticker}&lang=en&token={st.secrets['GNEWS_TOKEN']}"
-        articles = requests.get(url).json().get('articles', [])[:10]
-        sentiments = [vader.polarity_scores(art['title'])['compound'] for art in articles]
+        url = f"https://gnews.io/api/v4/search?q={query}&lang=en&token={st.secrets['GNEWS_TOKEN']}"
+        response = requests.get(url)
+        articles = response.json().get('articles', [])[:10]
+        sentiments = []
+        for art in articles:
+            title = art.get('title', '')
+            description = art.get('description', '')
+            title_sent = vader.polarity_scores(title)['compound']
+            # Use description sentiment if available.
+            description_sent = vader.polarity_scores(description)['compound'] if description else 0
+            combined_sent = (title_sent + description_sent) / 2
+            sentiments.append(combined_sent)
         return np.mean(sentiments) if sentiments else 0
-    except Exception:
+    except Exception as e:
+        st.warning(f"Error fetching news data: {e}")
         return 0
 
+# -----------------------------------
+# Market Scenario Sentiment (for broader market conditions)
+# -----------------------------------
+def get_market_scenario():
+    """
+    Retrieves current general market sentiment using a generic query ("stock market")
+    with the GNews API. Provides an overall sentiment score for broader market conditions.
+    """
+    try:
+        query = "stock market"
+        url = f"https://gnews.io/api/v4/search?q={query}&lang=en&token={st.secrets['GNEWS_TOKEN']}"
+        response = requests.get(url)
+        articles = response.json().get('articles', [])[:10]
+        sentiments = []
+        for art in articles:
+            title = art.get('title', '')
+            description = art.get('description', '')
+            title_sent = vader.polarity_scores(title)['compound']
+            description_sent = vader.polarity_scores(description)['compound'] if description else 0
+            combined_sent = (title_sent + description_sent) / 2
+            sentiments.append(combined_sent)
+        return np.mean(sentiments) if sentiments else 0
+    except Exception as e:
+        st.warning(f"Error fetching market scenario data: {e}")
+        return 0
+
+# -----------------------------------
+# RSI Calculation (unchanged, with robustness improvements)
+# -----------------------------------
 def calculate_rsi(prices, window=14):
     """
-    Calculate Relative Strength Index (RSI) from a series of prices.
+    Calculate the Relative Strength Index (RSI) from a series of prices.
+    Uses rolling means with a minimum period and safeguards against division by zero.
     """
     delta = prices.diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window).mean()
-    avg_loss = loss.rolling(window).mean()
+    avg_gain = gain.rolling(window, min_periods=window).mean()
+    avg_loss = loss.rolling(window, min_periods=window).mean().replace(0, np.nan)
     rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs)).iloc[-1]
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1] if not rsi.empty else np.nan
 
+# -----------------------------------
+# Example Usage in a Streamlit App
+# -----------------------------------
+st.title("Enhanced Sentiment Analysis")
+
+# Let the user enter a ticker or company name for sentiment analysis.
+user_query = st.text_input("Enter a ticker or company name (e.g., AAPL or Apple):").strip()
+
+if user_query:
+    # Get sentiment from Reddit and News for the user query.
+    reddit_sent = get_reddit_sentiment(user_query)
+    news_sent = get_news_sentiment(user_query)
+    market_sent = get_market_scenario()
+    
+    st.markdown(f"**Reddit Sentiment for '{user_query}':** {reddit_sent:.2f}")
+    st.markdown(f"**News Sentiment for '{user_query}':** {news_sent:.2f}")
+    st.markdown(f"**Overall Market Sentiment:** {market_sent:.2f}")
+    
+    # Optionally, if you wish to calculate RSI as well:
+    try:
+        import yfinance as yf
+        price_data = yf.Ticker(user_query).history(period="6mo")
+        if not price_data.empty:
+            rsi_value = calculate_rsi(price_data['Close'])
+            st.markdown(f"**RSI for '{user_query}':** {rsi_value:.2f}")
+        else:
+            st.warning("No price data available for RSI calculation.")
+    except Exception as ex:
+        st.error(f"Error calculating RSI: {ex}")
 # -----------------------------------
 # 4. Recommendation Engine
 # -----------------------------------
