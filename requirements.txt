@@ -20,7 +20,7 @@ openai
 
 # Visualization
 matplotlib
-
+tabulate
 # CLI & UI
 questionary
 colorama
