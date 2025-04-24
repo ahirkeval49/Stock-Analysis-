@@ -16,3 +16,7 @@ pydantic==1.10.2  # Added dependency for BaseModel
 langchain-core
 langgraph
 langsmith
+pydantic<2.0.0
+langchain-core>=0.0.195
+langsmith>=0.0.2
+langgraph>=0.2.3
