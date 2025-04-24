@@ -12,10 +12,6 @@ matplotlib==3.10.1
 git+https://github.com/robertmartin8/PyPortfolioOpt.git#egg=PyPortfolioOpt
 vaderSentiment==3.3.2
 python-dateutil>=2.9.0
-pydantic==1.10.2  # Added dependency for BaseModel
-langchain-core
-langgraph
-langsmith
 pydantic<2.0.0
 langchain-core>=0.0.195
 langsmith>=0.0.2
