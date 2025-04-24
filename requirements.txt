@@ -30,5 +30,6 @@ pydantic
 
 # LangChain-ecosystem (v1-compatible)
 langchain-core
+langchain
 langsmith
 langgraph
