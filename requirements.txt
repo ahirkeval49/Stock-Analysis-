@@ -18,12 +18,11 @@ transformers==4.51.1
 vaderSentiment==3.3.2
 openai==0.27.8
 
-# Visualization (choose one valid version)
-matplotlib==3.5.3     # the latest 3.5.x bug-fix release :contentReference[oaicite:7]{index=7}
-# matplotlib==3.7.3   # OR the latest stable release :contentReference[oaicite:8]{index=8}
+# Visualization
+matplotlib==3.8.3
 
 # CLI & UI
-questionary==1.10.2
+questionary==1.10.0
 colorama==0.4.6
 
 # Force Pydantic 1.x for LangChain-ecosystem compatibility
