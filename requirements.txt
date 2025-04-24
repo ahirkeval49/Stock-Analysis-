@@ -7,8 +7,6 @@ python-dateutil>=2.9.0
 pandas==2.2.3
 numpy==1.26.4
 yfinance==0.2.55
-robin_stocks==3.3.1
-PyPortfolioOpt @ git+https://github.com/robertmartin8/PyPortfolioOpt.git#egg=PyPortfolioOpt
 
 # HTTP & scraping
 requests==2.31.0
