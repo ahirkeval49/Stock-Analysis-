@@ -34,3 +34,9 @@ langchain_openai
 langchain
 langsmith
 langgraph
+langchain_anthropic 
+langchain_deepseek
+langchain_google_genai 
+langchain_groq 
+langchain_openai 
+langchain_ollama
