@@ -13,6 +13,8 @@ git+https://github.com/robertmartin8/PyPortfolioOpt.git#egg=PyPortfolioOpt
 vaderSentiment==3.3.2
 python-dateutil>=2.9.0
 pydantic<2.0.0
-langchain-core>=0.0.195
-langsmith>=0.0.2
-langgraph>=0.2.3
+langchain-core==0.0.195
+langsmith==0.1.68
+langgraph==0.2.3
+streamlit
+python-dotenv
