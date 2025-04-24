@@ -316,3 +316,45 @@ if __name__ == "__main__":
         model_provider=model_provider,
     )
     print_trading_output(result)
+
+def st_entrypoint():
+    st.title("AI Hedge Fund Simulator")
+
+    tickers_input = st.sidebar.text_input("Tickers (comma-separated)", "AAPL, MSFT, GOOG")
+    tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+
+    start_date = st.sidebar.date_input("Start date", datetime.now() - relativedelta(months=3))
+    end_date = st.sidebar.date_input("End date", datetime.now())
+    show_reasoning = st.sidebar.checkbox("Show reasoning")
+
+    if st.sidebar.button("Run"):
+        with st.spinner("Running hedge fund…"):
+            portfolio = {
+                "cash": 100000.0,
+                "margin_requirement": 0.0,
+                "margin_used": 0.0,
+                "positions": {t: {"long": 0, "short": 0, "long_cost_basis": 0.0, "short_cost_basis": 0.0, "short_margin_used": 0.0} for t in tickers},
+                "realized_gains": {t: {"long": 0.0, "short": 0.0} for t in tickers},
+            }
+            result = run_hedge_fund(
+                tickers=tickers,
+                start_date=start_date.isoformat(),
+                end_date=end_date.isoformat(),
+                portfolio=portfolio,
+                show_reasoning=show_reasoning,
+                selected_analysts=None,
+                model_name="deepseek",        # force DeepSeek
+                model_provider="DeepSeek",
+            )
+        st.subheader("Decisions")
+        st.json(result["decisions"])
+        st.subheader("Analyst Signals")
+        st.json(result["analyst_signals"])
+
+
+# Dispatch based on invocation context
+if __name__ == "__main__":
+    if getattr(st, "_is_running_with_streamlit", False):
+        st_entrypoint()
+    else:
+        cli_entrypoint()
