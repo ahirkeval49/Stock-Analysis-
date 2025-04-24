@@ -1,29 +1,35 @@
-streamlit
-robin_stocks
-yfinance
-pandas
-numpy
-requests
-openai
-beautifulsoup4
-praw
-transformers
-matplotlib
-git+https://github.com/robertmartin8/PyPortfolioOpt.git#egg=PyPortfolioOpt
-vaderSentiment
+# Core app
+streamlit==1.44.1
+python-dotenv==1.0.0
+python-dateutil>=2.9.0
 
-python-dateutil
-python-dotenv
+# Data & finance
+pandas==2.2.3
+numpy==1.26.4
+yfinance==0.2.55
+robin_stocks==3.3.1
+PyPortfolioOpt @ git+https://github.com/robertmartin8/PyPortfolioOpt.git#egg=PyPortfolioOpt
 
-# ensure Pydantic v1.x for LangSmith / LangGraph compatibility
-pydantic
+# HTTP & scraping
+requests==2.31.0
+beautifulsoup4==4.13.3
+praw==7.8.1
 
-# LangChain-ecosystem (v1-compatible)
-langchain-core
-langsmith
-langgraph
+# ML / NLP
+transformers==4.51.1
+vaderSentiment==3.3.2
+openai==0.27.8
+matplotlib==3.10.1
 
-# CLI & color output
-questionary
-colorama
+# CLI & UI
+questionary==1.10.2
+colorama==0.4.6
+
+# Force Pydantic 1.x for LangChain-ecosystem compatibility
+pydantic<2.0.0
+
+# LangChain-ecosystem (must be v1-compatible)
+langchain-core==0.0.195
+langsmith==0.1.68
+langgraph==0.2.3
 
