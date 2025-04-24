@@ -27,7 +27,10 @@ colorama==0.4.6
 
 # Force Pydantic 1.x for LangChain-ecosystem compatibility
 pydantic<2.0.0
-
+pydantic = ">=1.10.16,<2.0.0"
+langchain-core = "0.0.195"
+langsmith       = "0.1.68"
+langgraph       = "0.2.3"
 # LangChain-ecosystem (must be v1-compatible)
 langchain-core==0.0.195
 langsmith==0.1.68
