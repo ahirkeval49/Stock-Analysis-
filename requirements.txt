@@ -1,33 +1,37 @@
 # Core app
-streamlit==1.44.1                  # Streamlit — your web UI framework :contentReference[oaicite:3]{index=3}  
-python-dotenv==1.0.0              # Load .env files :contentReference[oaicite:4]{index=4}  
-python-dateutil>=2.9.0            # Flexible date parsing :contentReference[oaicite:5]{index=5}  
+streamlit==1.44.1
+python-dotenv==1.0.0
+python-dateutil>=2.9.0
 
 # Data & finance
-pandas==2.2.3                     # Data analysis :contentReference[oaicite:6]{index=6}  
-numpy==1.26.4                     # Numeric computing :contentReference[oaicite:7]{index=7}  
-yfinance==0.2.55                  # Yahoo Finance API :contentReference[oaicite:8]{index=8}  
-
+pandas==2.2.3
+numpy==1.26.4
+yfinance==0.2.55
+robin_stocks==3.3.1
+PyPortfolioOpt @ git+https://github.com/robertmartin8/PyPortfolioOpt.git#egg=PyPortfolioOpt
 
 # HTTP & scraping
-requests==2.31.0                  # HTTP client :contentReference[oaicite:10]{index=10}  
-beautifulsoup4==4.13.3            # HTML parsing :contentReference[oaicite:11]{index=11}  
-praw==7.8.1                       # Reddit API wrapper :contentReference[oaicite:12]{index=12}  
+requests==2.31.0
+beautifulsoup4==4.13.3
+praw==7.8.1
 
 # ML / NLP
-transformers==4.51.1              # Hugging Face Transformers :contentReference[oaicite:13]{index=13}  
-vaderSentiment==3.3.2             # Sentiment analysis :contentReference[oaicite:14]{index=14}  
-openai==0.27.8                    # OpenAI Python client :contentReference[oaicite:15]{index=15}  
-matplotlib==3.10.1                # Plotting library :contentReference[oaicite:16]{index=16}  
+transformers==4.51.1
+vaderSentiment==3.3.2
+openai==0.27.8
 
-# CLI & color output
-questionary==1.10.2               # Interactive prompts :contentReference[oaicite:17]{index=17}  
-colorama==0.4.6                   # ANSI color in terminal :contentReference[oaicite:18]{index=18}  
+# Visualization (choose one valid version)
+matplotlib==3.5.3     # the latest 3.5.x bug-fix release :contentReference[oaicite:7]{index=7}
+# matplotlib==3.7.3   # OR the latest stable release :contentReference[oaicite:8]{index=8}
+
+# CLI & UI
+questionary==1.10.2
+colorama==0.4.6
 
 # Force Pydantic 1.x for LangChain-ecosystem compatibility
-pydantic>=1.10.16,<2.0.0          # Fixes ForwardRef._evaluate recursive_guard issue :contentReference[oaicite:19]{index=19}  
+pydantic>=1.10.16,<2.0.0
 
-# LangChain-ecosystem (must be v1-compatible)
-langchain-core==0.0.195           # Core LangChain package :contentReference[oaicite:20]{index=20}  
-langsmith==0.1.68                 # LangChain run‐tree helper :contentReference[oaicite:21]{index=21}  
-langgraph==0.2.3                  # Graph workflow layer :contentReference[oaicite:22]{index=22}  
+# LangChain-ecosystem (v1-compatible)
+langchain-core==0.0.195
+langsmith==0.1.68
+langgraph==0.2.3
