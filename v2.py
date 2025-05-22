@@ -1,3 +1,4 @@
+"""
 AI Hedge Fund Simulator
 
 Dependencies & Tools (free resources and websites):
