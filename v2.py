@@ -42,18 +42,14 @@ def fetch_fundamentals(ticker: str) -> dict:
         "debtToEquity":   info.get("debtToEquity"),
     }
 
-def fetch_news(ticker: str, api_key: str, page_size: int = 50) -> list[dict]:
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "q": ticker,
-        "apiKey": api_key,
-        "pageSize": page_size,
-        "sortBy": "publishedAt",
-        "language": "en"
-    }
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
-    return resp.json().get("articles", [])
+def fetch_news(ticker: str, api_key: str = None, page_size: int = None) -> list[dict]:
+    """
+    Returns the latest news items for `ticker` using yfinance.
+    Each item is a dict containing keys like:
+      - 'title', 'link', 'publisher', 'providerPublishTime', etc.
+    """
+    tk = yf.Ticker(ticker)
+    return tk.news or []
 
 def fetch_inst_filings(ticker: str) -> list[dict]:
     """
