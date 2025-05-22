@@ -62,11 +62,13 @@ def fetch_news(ticker: str, api_key: str, page_size: int = 50) -> list[dict]:
     return resp.json().get("articles", [])
 
 def fetch_inst_filings(ticker: str, count: int = 1):
-    # ticker first, then form type, then keyword amount
-    return EDGAR.get(ticker, "13F-HR", amount=count)
+    filings = EDGAR.get("13F-HR", ticker)      # returns a list of all 13F-HR filings
+    return filings[:count]                     # take only the first `count`
 
 def fetch_insider_filings(ticker: str, count: int = 1):
-    return EDGAR.get(ticker, "4", amount=count)
+    trades = EDGAR.get("4", ticker)            # returns a list of all Form 4 filings
+    return trades[:count]                      # take only the first `count`
+
 
 # --------------------------------
 # LLM Client
