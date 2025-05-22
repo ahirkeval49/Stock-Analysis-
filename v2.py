@@ -270,3 +270,34 @@ if run_button:
         display_results(output)
     else:
         st.error("No valid analysis results returned. Check input parameters.")
+        def main():
+    st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
+    st.title("🚀 AI Hedge Fund Simulator")
+
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        tickers_in = st.text_input("Tickers (comma-separated)", "AAPL,MSFT,GOOG")
+        years = st.slider("History (years)", 1, 10, 5)
+        use_sentiment = st.checkbox("Include News Sentiment", True)
+        use_filings = st.checkbox("Include Filings Data", True)
+        run_button = st.button("Run Analysis", use_container_width=True)
+
+    if run_button:
+        tickers = [t.strip().upper() for t in tickers_in.split(",") if t.strip()]
+        if not tickers:
+            st.error("Please enter at least one valid ticker")
+            return
+
+        with st.spinner("Running Enhanced Analysis..."):
+            try:
+                output = run_all(tickers, years, use_sentiment, use_filings)
+                if output:
+                    display_results(output)
+                else:
+                    st.error("No valid analysis results returned. Check input parameters.")
+            except Exception as e:
+                st.error(f"Analysis failed: {str(e)}")
+
+# Ensure the main function is called
+if __name__ == "__main__":
+    main()
