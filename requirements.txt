@@ -7,7 +7,7 @@ python-dateutil
 pandas
 numpy
 yfinance
-
+sec-edgar-downloader
 # HTTP & scraping
 requests
 beautifulsoup4
