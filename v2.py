@@ -1,4 +1,15 @@
-# ... (keep previous imports and environment setup)
+# Add this at the very top of the code
+import streamlit as st
+
+# Then keep the rest of the imports
+import os
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from dateutil.relativedelta import relativedelta
+from datetime import datetime
+import openai
+from dotenv import load_dotenv# ... (keep previous imports and environment setup)
 
 # --------------------------------
 # Enhanced Data Fetchers
