@@ -192,20 +192,47 @@ class FundamentalsAgent:
 
 class ValuationAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        s     = data["fundamentals"]
+        stats = data["fundamentals"]
         df    = data["price_history"]
         price = df.Close.iloc[-1]
-        pe    = s.get("forwardPE")
-        rel   = "buy"  if pe and pe<17 else ("sell" if pe and pe>23 else "hold")
-        fcy   = s.get("freeCashflow",0)/(s.get("marketCap") or 1)
-        fair  = price*(1+fcy)
-        dcf   = "buy"  if fair>price*1.1 else ("sell" if fair<price*0.9 else "hold")
+
+        # 1) Relative P/E signal
+        pe = stats.get("forwardPE")
+        if pe is None:
+            rel = "hold"
+        elif pe < 17:
+            rel = "buy"
+        elif pe > 23:
+            rel = "sell"
+        else:
+            rel = "hold"
+
+        # 2) DCF-style fair price
+        fcf  = stats.get("freeCashflow")
+        mcap = stats.get("marketCap")
+
+        # default to zero yield if missing or zero market cap
+        if fcf is None or mcap is None or mcap == 0:
+            fcy = 0.0
+        else:
+            fcy = fcf / mcap
+
+        fair_price = price * (1 + fcy)
+
+        if fair_price > price * 1.1:
+            dcf_sig = "buy"
+        elif fair_price < price * 0.9:
+            dcf_sig = "sell"
+        else:
+            dcf_sig = "hold"
+
         return {
-            "ticker":             ticker,
-            "relative_pe_signal": rel,
-            "dcf_price":          float(fair),
-            "dcf_signal":         dcf,
+            "ticker":              ticker,
+            "relative_pe_signal":  rel,
+            "dcf_price":           float(fair_price),
+            "dcf_signal":          dcf_sig,
         }
+
 
 class FilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
