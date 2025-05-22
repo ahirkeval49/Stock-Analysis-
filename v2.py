@@ -32,15 +32,13 @@ load_dotenv()
 # --------------------------------
 # Data Fetchers
 # --------------------------------
-# Initialize EDGAR Downloader to a writable local folder,
-# and supply EDGAR with your name & email as the User-Agent.
 edgar_dir = os.path.join(os.getcwd(), "sec-edgar-filings")
 os.makedirs(edgar_dir, exist_ok=True)
 
-# EDGAR requires a User-Agent: your name + email
+# Initialize the Downloader *with* your name/email as the User-Agent
 EDGAR = Downloader(
-    output_dir=edgar_dir,
-    user_agent="Keval Ahir keval.ahir2019@gmail.com"
+    edgar_dir,
+    "Keval Ahir keval.ahir2019@gmail.com"
 )
 
 def fetch_price_history(ticker: str, period: str = "5y") -> pd.DataFrame:
