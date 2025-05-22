@@ -279,8 +279,18 @@ def run_all(tickers, history_years, use_sentiment, use_filings):
             "price_history": fetch_price_history(t, period=f"{history_years}y"),
             "fundamentals":  fetch_fundamentals(t),
         }
-        if use_sentiment:
-            data["news"] = fetch_news(t, api_key=st.secrets.get("NEWSAPI_KEY",""))
+              if use_sentiment:
+            newsapi_key = st.secrets.get("NEWSAPI_KEY", "")
+            if not newsapi_key:
+                st.warning("No valid NEWSAPI_KEY found; skipping news sentiment.")
+                data["news"] = []
+            else:
+                try:
+                    data["news"] = fetch_news(t, api_key=newsapi_key)
+                except requests.exceptions.HTTPError:
+                    st.error("NewsAPI returned 401 Unauthorized. Check your NEWSAPI_KEY in Streamlit secrets.")
+                    data["news"] = []
+
         if use_filings:
             data["inst_filings"]    = fetch_inst_filings(t)
             data["insider_filings"] = fetch_insider_filings(t)
