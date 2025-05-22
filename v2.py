@@ -32,7 +32,10 @@ load_dotenv()
 # --------------------------------
 # Data Fetchers
 # --------------------------------
-EDGAR = Downloader()
+# Initialize EDGAR Downloader to a writable directory
+edgar_dir = os.path.join(os.getenv("STREAMLIT_TMP_DIR", "/mnt/data"), "sec-edgar-filings")
+os.makedirs(edgar_dir, exist_ok=True)
+EDGAR = Downloader(edgar_dir)
 
 def fetch_price_history(ticker: str, period: str = "5y") -> pd.DataFrame:
     return yf.Ticker(ticker).history(period=period)
@@ -68,7 +71,7 @@ class ModelClient:
         openai.api_key = api_key
         self.provider = provider
         if provider == "deepseek":
-            # Point OpenAI SDK at DeepSeek endpoint
+            # route OpenAI SDK requests to DeepSeek endpoint
             openai.api_base = "https://api.deepseek.com/v1"
             self.model = "deepseek-reasoner"
         else:
@@ -98,13 +101,21 @@ class PriceAgent:
         loss  = -delta.clip(upper=0).rolling(14).mean()
         df["RSI14"] = 100 - 100 / (1 + gain / loss)
         latest = df.iloc[-1]
+
         if latest.SMA50 > latest.SMA200 and latest.RSI14 < 70:
             signal = "buy"
         elif latest.SMA50 < latest.SMA200 and latest.RSI14 > 30:
             signal = "sell"
         else:
             signal = "hold"
-        return {"ticker": ticker, "sma50": float(latest.SMA50), "sma200": float(latest.SMA200), "rsi14": float(latest.RSI14), "price_signal": signal}
+
+        return {
+            "ticker": ticker,
+            "sma50":   float(latest.SMA50),
+            "sma200":  float(latest.SMA200),
+            "rsi14":   float(latest.RSI14),
+            "price_signal": signal,
+        }
 
 class MomentumAgent:
     def run(self, ticker: str, data: dict) -> dict:
@@ -114,20 +125,31 @@ class MomentumAgent:
         P_12m = df.Close.shift(252).iloc[-1]
         m1  = (P_t / P_1m) - 1 if P_1m else 0
         m12 = (P_t / P_12m) - 1 if P_12m else 0
+
         if m12 > 0 and m1 > 0:
             signal = "buy"
         elif m12 < 0 and m1 < 0:
             signal = "sell"
         else:
             signal = "hold"
-        return {"ticker": ticker, "momentum_1m": m1, "momentum_12m": m12, "momentum_signal": signal}
+
+        return {
+            "ticker": ticker,
+            "momentum_1m":  float(m1),
+            "momentum_12m": float(m12),
+            "momentum_signal": signal,
+        }
 
 class VolatilityAgent:
     def run(self, ticker: str, data: dict) -> dict:
         ret = np.log(data["price_history"].Close / data["price_history"].Close.shift(1)).dropna()
         ann_vol = float(ret.std() * np.sqrt(252))
         weight  = float(1 / ann_vol) if ann_vol else 0.0
-        return {"ticker": ticker, "annual_vol": ann_vol, "vol_weight": weight}
+        return {
+            "ticker": ticker,
+            "annual_vol": ann_vol,
+            "vol_weight": weight,
+        }
 
 class SentimentAgent:
     def __init__(self, client):
@@ -136,11 +158,16 @@ class SentimentAgent:
         heads = [a["title"] for a in data.get("news", [])]
         if not heads:
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold"}
-        prompt = f"Rate the overall sentiment for {ticker} (−1 to +1):\n" + "\n".join(heads)
+
+        prompt = (
+            f"Rate the overall sentiment for {ticker} (−1 to +1):\n" +
+            "\n".join(heads)
+        )
         try:
             score = float(self.client.generate(prompt).strip())
         except:
             score = 0.0
+
         sig = "buy" if score > 0.2 else "sell" if score < -0.2 else "hold"
         return {"ticker": ticker, "sentiment_score": score, "sentiment_signal": sig}
 
@@ -151,16 +178,22 @@ class FundamentalsAgent:
         fcf  = stats.get("freeCashflow") or 0
         roe  = stats.get("returnOnEquity") or 0
         de   = stats.get("debtToEquity") or 1
-        fcy = fcf / mcap
+        fcy  = fcf / mcap
         score = sum([roe > 0, de < 1, fcf > 0])
         sig = "buy" if score >= 3 else "sell" if score == 0 else "hold"
-        return {"ticker": ticker, "fcf_yield": float(fcy), "piotroski_score": score, "fund_signal": sig}
+        return {
+            "ticker": ticker,
+            "fcf_yield": float(fcy),
+            "piotroski_score": score,
+            "fund_signal": sig,
+        }
 
 class ValuationAgent:
     def run(self, ticker: str, data: dict) -> dict:
         stats = data["fundamentals"]
-        df = data["price_history"]
+        df    = data["price_history"]
         price = df.Close.iloc[-1]
+
         pe = stats.get("forwardPE")
         if pe and pe < 17:
             rel = "buy"
@@ -168,45 +201,66 @@ class ValuationAgent:
             rel = "sell"
         else:
             rel = "hold"
+
         fcy = stats.get("freeCashflow", 0) / (stats.get("marketCap") or 1)
         fair = price * (1 + fcy)
-        dcf = "buy" if fair > price * 1.1 else "sell" if fair < price * 0.9 else "hold"
-        return {"ticker": ticker, "relative_pe_signal": rel, "dcf_price": float(fair), "dcf_signal": dcf}
+        dcf  = "buy" if fair > price * 1.1 else "sell" if fair < price * 0.9 else "hold"
+
+        return {
+            "ticker": ticker,
+            "relative_pe_signal": rel,
+            "dcf_price": float(fair),
+            "dcf_signal": dcf,
+        }
 
 class FilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
         inst = data.get("inst_filings", [])
-        ins = data.get("insider_filings", [])
+        ins  = data.get("insider_filings", [])
         net_i = inst[-1]["shares"] - inst[0]["shares"] if len(inst) > 1 else 0
-        net_s = sum([tx.get("shares", 0) * (1 if tx.get("type") == "buy" else -1) for tx in ins])
-        sig = "buy" if net_i > 0 and net_s > 0 else "sell" if net_i < 0 else "hold"
-        return {"ticker": ticker, "net_institutional": net_i, "net_insider": net_s, "filings_signal": sig}
+        net_s = sum([tx.get("shares", 0) * (1 if tx.get("type")=="buy" else -1) for tx in ins])
+        sig = "buy" if net_i>0 and net_s>0 else "sell" if net_i<0 else "hold"
+        return {
+            "ticker": ticker,
+            "net_institutional": net_i,
+            "net_insider": net_s,
+            "filings_signal": sig,
+        }
 
 class AnalystRatingAgent:
     def run(self, ticker: str, data: dict, client=None) -> dict:
         buy_pct, up = 8/14, 0.10
-        sig = "buy" if buy_pct > 0.6 and up > 0.15 else "sell" if up < -0.05 else "hold"
-        return {"ticker": ticker, "analyst_buy_pct": buy_pct, "target_upside": up, "analyst_signal": sig}
+        sig = "buy" if buy_pct>0.6 and up>0.15 else "sell" if up<-0.05 else "hold"
+        return {
+            "ticker": ticker,
+            "analyst_buy_pct": buy_pct,
+            "target_upside": up,
+            "analyst_signal": sig,
+        }
 
 class PortfolioAgent:
-    WEIGHTS = {"price":1.0, "momentum":0.5, "volatility":1.0, "sentiment":0.8, "fund":0.7, "valuation":0.9, "filings":0.6, "analyst":1.0}
+    WEIGHTS = {
+        "price":1.0, "momentum":0.5, "volatility":1.0,
+        "sentiment":0.8, "fund":0.7, "valuation":0.9,
+        "filings":0.6, "analyst":1.0
+    }
     def run(self, ticker: str, signals: list[dict]) -> dict:
         total = 0
         for s in signals:
             key = next(k for k in s if k.endswith("_signal"))
             base = key.split("_")[0]
-            raw = {"buy":1, "hold":0, "sell":-1}[s[key]]
-            w = self.WEIGHTS.get(base, 1.0)
+            raw  = {"buy":1, "hold":0, "sell":-1}[s[key]]
+            w    = self.WEIGHTS.get(base, 1.0)
             total += raw * w
         comp = float(np.tanh(total))
-        final = "buy" if comp > 0.2 else "sell" if comp < -0.2 else "hold"
+        final = "buy" if comp>0.2 else "sell" if comp<-0.2 else "hold"
         return {"ticker": ticker, "composite_score": comp, "final_decision": final}
 
 # --------------------------------
-# Orchestrator & Streamlit App
+# Orchestrator & Streamlit UI
 # --------------------------------
 def run_all(tickers, history_years, use_sentiment, use_filings):
-    # Select LLM client via Streamlit secrets
+    # Select LLM from secrets
     if st.secrets.get("DEEPSEEK_API_KEY"):
         llm = ModelClient(api_key=st.secrets["DEEPSEEK_API_KEY"], provider="deepseek")
     elif st.secrets.get("OPENAI_API_KEY"):
@@ -222,31 +276,32 @@ def run_all(tickers, history_years, use_sentiment, use_filings):
             "fundamentals":  fetch_fundamentals(t),
         }
         if use_sentiment:
-            data["news"]           = fetch_news(t, api_key=st.secrets.get("NEWSAPI_KEY", ""))
+            data["news"] = fetch_news(t, api_key=st.secrets.get("NEWSAPI_KEY",""))
         if use_filings:
             data["inst_filings"]    = fetch_inst_filings(t)
             data["insider_filings"] = fetch_insider_filings(t)
 
-        pa = PriceAgent().run(t, data)
-        ma = MomentumAgent().run(t, data)
-        va = VolatilityAgent().run(t, data)
-        sa = SentimentAgent(llm).run(t, data) if use_sentiment else {"sentiment_signal": "hold"}
-        fa = FundamentalsAgent().run(t, data)
-        vaa = ValuationAgent().run(t, data)
-        fil = FilingsAgent().run(t, data) if use_filings else {"filings_signal": "hold"}
-        ar = AnalystRatingAgent().run(t, data, llm)
-        final = PortfolioAgent().run(t, [pa, ma, va, sa, fa, vaa, fil, ar])
+        pa   = PriceAgent().run(t, data)
+        ma   = MomentumAgent().run(t, data)
+        va   = VolatilityAgent().run(t, data)
+        sa   = SentimentAgent(llm).run(t, data) if use_sentiment else {"sentiment_signal":"hold"}
+        fa   = FundamentalsAgent().run(t, data)
+        vaa  = ValuationAgent().run(t, data)
+        fil  = FilingsAgent().run(t, data) if use_filings else {"filings_signal":"hold"}
+        ar   = AnalystRatingAgent().run(t, data, llm)
+        final= PortfolioAgent().run(t, [pa, ma, va, sa, fa, vaa, fil, ar])
+
         results[t] = {**pa, **ma, **va, **sa, **fa, **vaa, **fil, **ar, **final}
+
     return results
 
-# Streamlit UI
 st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
 st.title("🚀 AI Hedge Fund Simulator")
 
 with st.sidebar:
     st.header("⚙️ Configuration")
-    tickers_in = st.text_input("Tickers (comma-separated)", "AAPL,MSFT,GOOG")
-    years = st.slider("History (years)", 1, 10, 5)
+    tickers_in    = st.text_input("Tickers (comma-separated)", "AAPL,MSFT,GOOG")
+    years         = st.slider("History (years)", 1, 10, 5)
     use_sentiment = st.checkbox("Include News Sentiment", True)
     use_filings   = st.checkbox("Include Filings Data", True)
     run_button    = st.button("Run Analysis", use_container_width=True)
@@ -258,7 +313,7 @@ if run_button:
 
     st.subheader("📊 Buy / Hold / Sell Recommendations")
     for t in tickers:
-        dec = output[t]["final_decision"].upper()
+        dec   = output[t]["final_decision"].upper()
         score = output[t]["composite_score"]
         st.markdown(f"**{t}:** {dec}  |  Composite Score: {score:.2f}")
 
@@ -270,6 +325,6 @@ if run_button:
     st.line_chart(output[first]["price_history"]["Close"])
 
     st.subheader(f"🔍 Detailed Signals for {first}")
-    keys = ["price_signal","momentum_signal","sentiment_signal","fund_signal","dcf_signal","filings_signal","analyst_signal"]
+    keys  = ["price_signal","momentum_signal","sentiment_signal","fund_signal","dcf_signal","filings_signal","analyst_signal"]
     table = {k: output[first].get(k) for k in keys}
     st.table(table)
