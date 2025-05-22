@@ -163,6 +163,7 @@ class VolatilityAgent:
             "ticker":     ticker,
             "annual_vol": ann_vol,
             "vol_weight": weight,
+            "volatility_signal": vol_signal,    # <-- add this
         }
 
 class SentimentAgent:
