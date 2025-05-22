@@ -62,12 +62,11 @@ def fetch_news(ticker: str, api_key: str, page_size: int = 50) -> list[dict]:
     return resp.json().get("articles", [])
 
 def fetch_inst_filings(ticker: str, count: int = 1):
-    return EDGAR.get("13F-HR", ticker, count)
+    # ticker first, then form type, then keyword amount
+    return EDGAR.get(ticker, "13F-HR", amount=count)
 
 def fetch_insider_filings(ticker: str, count: int = 1):
-    return EDGAR.get("4", ticker, count)
- 
- data["inst_filings"] = fetch_inst_filings(t)
+    return EDGAR.get(ticker, "4", amount=count)
 
 # --------------------------------
 # LLM Client
