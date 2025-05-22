@@ -5,13 +5,11 @@ Dependencies & Tools (free resources and websites):
  - Streamlit              : https://streamlit.io
  - yfinance               : https://pypi.org/project/yfinance/
  - NewsAPI (newsapi-python): https://newsapi.org/
- - SEC EDGAR Downloader   : https://pypi.org/project/sec-edgar-downloader/
  - OpenAI Python SDK      : https://platform.openai.com/
  - pandas                 : https://pandas.pydata.org/
  - numpy                  : https://numpy.org/
  - python-dotenv          : https://pypi.org/project/python-dotenv/
  - python-dateutil        : https://dateutil.readthedocs.io/
- - sec-edgar-downloader   : https://pypi.org/project/sec-edgar-downloader/
 """
 
 import os
@@ -24,7 +22,6 @@ from dateutil.relativedelta import relativedelta
 from datetime import datetime
 import openai
 from dotenv import load_dotenv
-from sec_edgar_downloader import Downloader
 
 # Load .env when running locally
 load_dotenv()
@@ -32,43 +29,54 @@ load_dotenv()
 # --------------------------------
 # Data Fetchers
 # --------------------------------
-edgar_dir = os.path.join(os.getcwd(), "sec-edgar-filings")
-os.makedirs(edgar_dir, exist_ok=True)
-
-# Initialize the Downloader *with* your name/email as the User-Agent
-EDGAR = Downloader(
-    edgar_dir,
-    "Keval Ahir keval.ahir2019@gmail.com"
-)
-
 def fetch_price_history(ticker: str, period: str = "5y") -> pd.DataFrame:
     return yf.Ticker(ticker).history(period=period)
 
 def fetch_fundamentals(ticker: str) -> dict:
     info = yf.Ticker(ticker).info
     return {
-        "marketCap":       info.get("marketCap"),
-        "freeCashflow":    info.get("freeCashflow"),
-        "forwardPE":       info.get("forwardPE"),
-        "returnOnEquity":  info.get("returnOnEquity"),
-        "debtToEquity":    info.get("debtToEquity"),
+        "marketCap":      info.get("marketCap"),
+        "freeCashflow":   info.get("freeCashflow"),
+        "forwardPE":      info.get("forwardPE"),
+        "returnOnEquity": info.get("returnOnEquity"),
+        "debtToEquity":   info.get("debtToEquity"),
     }
 
 def fetch_news(ticker: str, api_key: str, page_size: int = 50) -> list[dict]:
     url = "https://newsapi.org/v2/everything"
-    params = {"q": ticker, "apiKey": api_key, "pageSize": page_size, "sortBy": "publishedAt", "language": "en"}
+    params = {
+        "q": ticker,
+        "apiKey": api_key,
+        "pageSize": page_size,
+        "sortBy": "publishedAt",
+        "language": "en"
+    }
     resp = requests.get(url, params=params)
     resp.raise_for_status()
     return resp.json().get("articles", [])
 
-def fetch_inst_filings(ticker: str, count: int = 1):
-    filings = EDGAR.get("13F-HR", ticker)      # returns a list of all 13F-HR filings
-    return filings[:count]                     # take only the first `count`
+def fetch_inst_filings(ticker: str) -> list[dict]:
+    """
+    Return current institutional holders snapshot via yfinance.
+    """
+    df = yf.Ticker(ticker).institutional_holders
+    return df.to_dict("records")
 
-def fetch_insider_filings(ticker: str, count: int = 1):
-    trades = EDGAR.get("4", ticker)            # returns a list of all Form 4 filings
-    return trades[:count]                      # take only the first `count`
-
+def fetch_insider_filings(ticker: str) -> list[dict]:
+    """
+    Return recent insider transactions via yfinance, adding a 'type' field.
+    """
+    df = yf.Ticker(ticker).get_insider_transactions()
+    recs = df.to_dict("records")
+    for r in recs:
+        tx = r.get("Transaction", "").lower()
+        if "purchase" in tx or "buy" in tx:
+            r["type"] = "buy"
+        elif "sale" in tx or "sell" in tx:
+            r["type"] = "sell"
+        else:
+            r["type"] = "other"
+    return recs
 
 # --------------------------------
 # LLM Client
@@ -78,7 +86,6 @@ class ModelClient:
         openai.api_key = api_key
         self.provider = provider
         if provider == "deepseek":
-            # route OpenAI SDK requests to DeepSeek endpoint
             openai.api_base = "https://api.deepseek.com/v1"
             self.model = "deepseek-reasoner"
         else:
@@ -117,10 +124,10 @@ class PriceAgent:
             signal = "hold"
 
         return {
-            "ticker": ticker,
-            "sma50":   float(latest.SMA50),
-            "sma200":  float(latest.SMA200),
-            "rsi14":   float(latest.RSI14),
+            "ticker":       ticker,
+            "sma50":        float(latest.SMA50),
+            "sma200":       float(latest.SMA200),
+            "rsi14":        float(latest.RSI14),
             "price_signal": signal,
         }
 
@@ -141,9 +148,9 @@ class MomentumAgent:
             signal = "hold"
 
         return {
-            "ticker": ticker,
-            "momentum_1m":  float(m1),
-            "momentum_12m": float(m12),
+            "ticker":          ticker,
+            "momentum_1m":     float(m1),
+            "momentum_12m":    float(m12),
             "momentum_signal": signal,
         }
 
@@ -153,7 +160,7 @@ class VolatilityAgent:
         ann_vol = float(ret.std() * np.sqrt(252))
         weight  = float(1 / ann_vol) if ann_vol else 0.0
         return {
-            "ticker": ticker,
+            "ticker":     ticker,
             "annual_vol": ann_vol,
             "vol_weight": weight,
         }
@@ -166,10 +173,7 @@ class SentimentAgent:
         if not heads:
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold"}
 
-        prompt = (
-            f"Rate the overall sentiment for {ticker} (−1 to +1):\n" +
-            "\n".join(heads)
-        )
+        prompt = f"Rate the overall sentiment for {ticker} (−1 to +1):\n" + "\n".join(heads)
         try:
             score = float(self.client.generate(prompt).strip())
         except:
@@ -189,10 +193,10 @@ class FundamentalsAgent:
         score = sum([roe > 0, de < 1, fcf > 0])
         sig = "buy" if score >= 3 else "sell" if score == 0 else "hold"
         return {
-            "ticker": ticker,
-            "fcf_yield": float(fcy),
+            "ticker":         ticker,
+            "fcf_yield":      float(fcy),
             "piotroski_score": score,
-            "fund_signal": sig,
+            "fund_signal":    sig,
         }
 
 class ValuationAgent:
@@ -209,58 +213,68 @@ class ValuationAgent:
         else:
             rel = "hold"
 
-        fcy = stats.get("freeCashflow", 0) / (stats.get("marketCap") or 1)
+        fcy  = stats.get("freeCashflow", 0) / (stats.get("marketCap") or 1)
         fair = price * (1 + fcy)
         dcf  = "buy" if fair > price * 1.1 else "sell" if fair < price * 0.9 else "hold"
 
         return {
-            "ticker": ticker,
-            "relative_pe_signal": rel,
-            "dcf_price": float(fair),
-            "dcf_signal": dcf,
+            "ticker":              ticker,
+            "relative_pe_signal":  rel,
+            "dcf_price":           float(fair),
+            "dcf_signal":          dcf,
         }
 
 class FilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        inst = data.get("inst_filings", [])
-        ins  = data.get("insider_filings", [])
-        net_i = inst[-1]["shares"] - inst[0]["shares"] if len(inst) > 1 else 0
-        net_s = sum([tx.get("shares", 0) * (1 if tx.get("type")=="buy" else -1) for tx in ins])
-        sig = "buy" if net_i>0 and net_s>0 else "sell" if net_i<0 else "hold"
+        insiders = data.get("insider_filings", [])
+        net_insider = sum(
+            r.get("Shares", 0) if r["type"] == "buy" else -r.get("Shares", 0)
+            for r in insiders
+        )
+        if net_insider > 0:
+            signal = "buy"
+        elif net_insider < 0:
+            signal = "sell"
+        else:
+            signal = "hold"
         return {
-            "ticker": ticker,
-            "net_institutional": net_i,
-            "net_insider": net_s,
-            "filings_signal": sig,
+            "ticker":          ticker,
+            "net_insider":     int(net_insider),
+            "filings_signal":  signal,
         }
 
 class AnalystRatingAgent:
     def run(self, ticker: str, data: dict, client=None) -> dict:
         buy_pct, up = 8/14, 0.10
-        sig = "buy" if buy_pct>0.6 and up>0.15 else "sell" if up<-0.05 else "hold"
+        sig = "buy" if buy_pct > 0.6 and up > 0.15 else "sell" if up < -0.05 else "hold"
         return {
-            "ticker": ticker,
-            "analyst_buy_pct": buy_pct,
-            "target_upside": up,
-            "analyst_signal": sig,
+            "ticker":            ticker,
+            "analyst_buy_pct":   buy_pct,
+            "target_upside":     up,
+            "analyst_signal":    sig,
         }
 
 class PortfolioAgent:
     WEIGHTS = {
-        "price":1.0, "momentum":0.5, "volatility":1.0,
-        "sentiment":0.8, "fund":0.7, "valuation":0.9,
-        "filings":0.6, "analyst":1.0
+        "price":      1.0,
+        "momentum":   0.5,
+        "volatility": 1.0,
+        "sentiment":  0.8,
+        "fund":       0.7,
+        "valuation":  0.9,
+        "filings":    0.6,
+        "analyst":    1.0
     }
     def run(self, ticker: str, signals: list[dict]) -> dict:
         total = 0
         for s in signals:
-            key = next(k for k in s if k.endswith("_signal"))
+            key  = next(k for k in s if k.endswith("_signal"))
             base = key.split("_")[0]
             raw  = {"buy":1, "hold":0, "sell":-1}[s[key]]
             w    = self.WEIGHTS.get(base, 1.0)
             total += raw * w
-        comp = float(np.tanh(total))
-        final = "buy" if comp>0.2 else "sell" if comp<-0.2 else "hold"
+        comp  = float(np.tanh(total))
+        final = "buy" if comp > 0.2 else "sell" if comp < -0.2 else "hold"
         return {"ticker": ticker, "composite_score": comp, "final_decision": final}
 
 # --------------------------------
@@ -298,15 +312,15 @@ def run_all(tickers, history_years, use_sentiment, use_filings):
             data["inst_filings"]    = fetch_inst_filings(t)
             data["insider_filings"] = fetch_insider_filings(t)
 
-        pa   = PriceAgent().run(t, data)
-        ma   = MomentumAgent().run(t, data)
-        va   = VolatilityAgent().run(t, data)
-        sa   = SentimentAgent(llm).run(t, data) if use_sentiment else {"sentiment_signal":"hold"}
-        fa   = FundamentalsAgent().run(t, data)
-        vaa  = ValuationAgent().run(t, data)
-        fil  = FilingsAgent().run(t, data) if use_filings else {"filings_signal":"hold"}
-        ar   = AnalystRatingAgent().run(t, data, llm)
-        final= PortfolioAgent().run(t, [pa, ma, va, sa, fa, vaa, fil, ar])
+        pa    = PriceAgent().run(t, data)
+        ma    = MomentumAgent().run(t, data)
+        va    = VolatilityAgent().run(t, data)
+        sa    = SentimentAgent(llm).run(t, data) if use_sentiment else {"sentiment_signal":"hold"}
+        fa    = FundamentalsAgent().run(t, data)
+        vaa   = ValuationAgent().run(t, data)
+        fil   = FilingsAgent().run(t, data) if use_filings else {"filings_signal":"hold"}
+        ar    = AnalystRatingAgent().run(t, data, llm)
+        final = PortfolioAgent().run(t, [pa, ma, va, sa, fa, vaa, fil, ar])
 
         results[t] = {**pa, **ma, **va, **sa, **fa, **vaa, **fil, **ar, **final}
 
