@@ -279,7 +279,7 @@ def run_all(tickers, history_years, use_sentiment, use_filings):
             "price_history": fetch_price_history(t, period=f"{history_years}y"),
             "fundamentals":  fetch_fundamentals(t),
         }
-              if use_sentiment:
+             if use_sentiment:
             newsapi_key = st.secrets.get("NEWSAPI_KEY", "")
             if not newsapi_key:
                 st.warning("No valid NEWSAPI_KEY found; skipping news sentiment.")
