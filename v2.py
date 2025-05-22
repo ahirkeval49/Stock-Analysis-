@@ -66,6 +66,8 @@ def fetch_inst_filings(ticker: str, count: int = 1):
 
 def fetch_insider_filings(ticker: str, count: int = 1):
     return EDGAR.get("4", ticker, count)
+ 
+ data["inst_filings"] = fetch_inst_filings(t)
 
 # --------------------------------
 # LLM Client
