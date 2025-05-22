@@ -313,7 +313,7 @@ def run_all(tickers, history_years, use_sentiment, use_filings):
         ar    = AnalystRatingAgent().run(t, data, llm)
         final = PortfolioAgent().run(t, [pa, ma, va, sa, fa, vaa, fil, ar])
 
-        results[t] = {**pa, **ma, **va, **sa, **fa, **vaa, **fil, **ar, **final}
+        results[t] = {**pa, **ma, **va, **sa, **fa, **vaa, **fil, **ar, **final, "price_history": data["price_history"]}
 
     return results
 
