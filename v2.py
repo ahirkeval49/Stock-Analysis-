@@ -3,7 +3,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from dateutil.relativedelta import relativedelta
+from dateutil.relativedelta import relativedelta # This import seems unused directly, pd.DateOffset is used.
 from datetime import datetime, timedelta
 import openai
 from dotenv import load_dotenv
@@ -24,12 +24,10 @@ def fetch_price_history(ticker: str, period: str = "5y", interval: str = "1d") -
         ticker_obj = yf.Ticker(ticker)
         df = ticker_obj.history(period=period, interval=interval)
         if df.empty:
-            # st.warning(f"No price history found for {ticker} with period {period} and interval {interval}.") # HIDDEN
             return pd.DataFrame()
         df.index = pd.to_datetime(df.index).tz_localize(None)
         return df
     except Exception as e:
-        # st.error(f"Error fetching price history for {ticker}: {e}") # Error handled by returning empty DataFrame
         return pd.DataFrame()
 
 @st.cache_data
@@ -38,29 +36,27 @@ def fetch_ticker_info(ticker: str) -> dict:
     try:
         info = yf.Ticker(ticker).info
         if not info or info.get('regularMarketPrice') is None and info.get('currentPrice') is None :
-            # st.warning(f"Could not retrieve valid market data for {ticker}. It might be delisted or an invalid ticker.") # HIDDEN
-            return {} # Empty dict signifies an issue
+            return {}
         return {
-            "marketCap":        info.get("marketCap"),
-            "freeCashflow":     info.get("freeCashflow"),
-            "forwardPE":        info.get("forwardPE"),
-            "trailingPE":       info.get("trailingPE"),
-            "priceToBook":      info.get("priceToBook"),
+            "marketCap": info.get("marketCap"),
+            "freeCashflow": info.get("freeCashflow"),
+            "forwardPE": info.get("forwardPE"),
+            "trailingPE": info.get("trailingPE"),
+            "priceToBook": info.get("priceToBook"),
             "enterpriseToRevenue": info.get("enterpriseToRevenue"),
             "enterpriseToEbitda": info.get("enterpriseToEbitda"),
-            "returnOnEquity":   info.get("returnOnEquity"),
-            "debtToEquity":     info.get("debtToEquity"),
-            "beta":             info.get("beta"),
-            "targetMeanPrice":  info.get("targetMeanPrice"),
+            "returnOnEquity": info.get("returnOnEquity"),
+            "debtToEquity": info.get("debtToEquity"),
+            "beta": info.get("beta"),
+            "targetMeanPrice": info.get("targetMeanPrice"),
             "recommendationKey":info.get("recommendationKey"),
             "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"),
-            "industry":         info.get("industry"),
-            "sector":           info.get("sector"),
+            "industry": info.get("industry"),
+            "sector": info.get("sector"),
             "longBusinessSummary": info.get("longBusinessSummary"),
             "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
         }
     except Exception as e:
-        # st.error(f"Error fetching .info for {ticker} from yfinance: {e}") # HIDDEN
         return {}
 
 @st.cache_data
@@ -69,7 +65,6 @@ def fetch_news(ticker: str) -> list[dict]:
         news = yf.Ticker(ticker).news
         return news or []
     except Exception as e:
-        # st.error(f"Error fetching news for {ticker}: {e}") # HIDDEN
         return []
 
 @st.cache_data
@@ -80,7 +75,6 @@ def fetch_inst_filings(ticker: str) -> list[dict]:
             return df.to_dict("records")
         return []
     except Exception as e:
-        # st.error(f"Error fetching institutional filings for {ticker}: {e}") # HIDDEN
         return []
 
 
@@ -101,7 +95,6 @@ def fetch_insider_filings(ticker: str) -> list[dict]:
                 r["type"] = "other"
         return recs
     except Exception as e:
-        # st.error(f"Error fetching insider filings for {ticker}: {e}") # HIDDEN
         return []
 
 @st.cache_data(ttl=3600)
@@ -157,7 +150,6 @@ def fetch_fair_value_from_value_trades(ticker: str) -> dict:
 
 @st.cache_data(ttl=3600)
 def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
-    # st.info(f"Attempting to scrape Capitol Trades for {ticker} (experimental)...") # HIDDEN
     url = f"https://www.capitoltrades.com/trades?asset={ticker.upper()}&pageSize=100&perPage=100"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -172,8 +164,7 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
         trade_rows = soup.find_all('a', href=lambda href: href and href.startswith('/trades/'))
 
         if not trade_rows:
-            # st.warning(f"No politician trade rows found for {ticker} on Capitol Trades using current selectors.") # HIDDEN
-            return [] # Return empty if no rows found, error will be handled by agent or display logic
+            return []
 
         for row_link_tag in trade_rows:
             politician_name_tag = row_link_tag.find('div', class_=lambda x: x and 'politician-name' in x)
@@ -196,17 +187,12 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
                     "value_range": value_range, "value_estimate_lower": value_estimate,
                     "date_str": date_str, "source_url": "https://www.capitoltrades.com" + row_link_tag['href']
                 })
-        # if politician_trades_list:
-            # st.info(f"Found {len(politician_trades_list)} politician trades for {ticker} (experimental scrape).") # HIDDEN
-        # else:
-            # st.warning(f"No politician trades parsed for {ticker}. Check selectors or site structure.") # HIDDEN
         return politician_trades_list
     except requests.exceptions.HTTPError as http_err:
-        # st.error(f"CapitolTrades HTTP error for {ticker}: {http_err}") # HIDDEN
-        return [{"error": f"CT HTTP error for {ticker}: {http_err}"}] # Return error in list
+        return [{"error": f"CT HTTP error for {ticker}: {http_err}"}]
     except Exception as e:
-        # st.error(f"Error parsing Capitol Trades data for {ticker}: {e}") # HIDDEN
         return [{"error": f"CT Parsing error for {ticker}: {e}"}]
+
 # --------------------------------
 # LLM Client
 # --------------------------------
@@ -215,7 +201,7 @@ class ModelClient:
         self.api_key = api_key
         self.provider = provider
         if not api_key:
-            raise ValueError("API key required.") # This error is fine as it's at init
+            raise ValueError("API key required.")
 
         openai.api_key = self.api_key
         if provider == "deepseek":
@@ -230,19 +216,25 @@ class ModelClient:
             resp = openai.ChatCompletion.create(model=self.model, messages=[{"role": "user", "content": prompt}])
             return resp.choices[0].message["content"]
         except Exception as e:
-            # st.error(f"LLM Error ({self.provider}): {e}") # This error is better shown in the sidebar or results context
-            return f"Error: Could not generate LLM response. Detail: {str(e)[:100]}" # Return error string
+            return f"Error: Could not generate LLM response. Detail: {str(e)[:100]}"
 
 # --------------------------------
-# Agents (No changes to agent logic itself, only how errors from fetchers might be handled)
+# Agents
 # --------------------------------
-class PriceAgent: # No st.write/info/error/warning
+class PriceAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
         if price_data_slice.empty or len(price_data_slice) < 200:
             return {"ticker": ticker, "price_signal": "hold", "sma50": np.nan, "sma200": np.nan, "rsi14": np.nan}
-        df = price_data_slice.copy(); df["SMA50"]  = df["Close"].rolling(50).mean(); df["SMA200"] = df["Close"].rolling(200).mean()
-        delta = df["Close"].diff(); gain  = delta.clip(lower=0).rolling(14).mean(); loss  = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss.replace(0, np.nan); df["RSI14"] = 100 - (100 / (1 + rs)); latest = df.iloc[-1]; signal = "hold"
+        df = price_data_slice.copy()
+        df["SMA50"]  = df["Close"].rolling(50).mean()
+        df["SMA200"] = df["Close"].rolling(200).mean()
+        delta = df["Close"].diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs = gain / loss.replace(0, np.nan)
+        df["RSI14"] = 100 - (100 / (1 + rs))
+        latest = df.iloc[-1]
+        signal = "hold"
         if pd.isna(latest.SMA50) or pd.isna(latest.SMA200) or pd.isna(latest.RSI14): signal = "hold"
         elif latest.SMA50 > latest.SMA200 and latest.RSI14 < 70: signal = "buy"
         elif latest.SMA50 < latest.SMA200 and latest.RSI14 > 30: signal = "sell"
@@ -250,146 +242,206 @@ class PriceAgent: # No st.write/info/error/warning
                 "sma200": float(latest.SMA200) if pd.notna(latest.SMA200) else np.nan,
                 "rsi14": float(latest.RSI14) if pd.notna(latest.RSI14) else np.nan, "price_signal": signal}
 
-class MomentumAgent: # No st.write/info/error/warning
+class MomentumAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
         if price_data_slice.empty or len(price_data_slice) < 252:
              return {"ticker": ticker, "momentum_signal": "hold", "momentum_1m": 0, "momentum_12m": 0}
-        df = price_data_slice; P_t = df.Close.iloc[-1]
+        df = price_data_slice
+        P_t = df.Close.iloc[-1]
         P_1m = df.Close.shift(21).iloc[-1] if len(df) > 21 else np.nan
         P_12m = df.Close.shift(252).iloc[-1] if len(df) > 252 else np.nan
         m1  = (P_t/P_1m)-1  if pd.notna(P_1m) and P_1m != 0 else 0
-        m12 = (P_t/P_12m)-1 if pd.notna(P_12m) and P_12m != 0 else 0; signal = "hold"
+        m12 = (P_t/P_12m)-1 if pd.notna(P_12m) and P_12m != 0 else 0
+        signal = "hold"
         if m12 > 0.01 and m1 > 0.01: signal = "buy"
         elif m12 < -0.01 and m1 < -0.01: signal = "sell"
         return {"ticker": ticker, "momentum_1m": float(m1), "momentum_12m": float(m12), "momentum_signal": signal}
 
-class VolatilityAgent: # No st.write/info/error/warning
+class VolatilityAgent:
     def run(self, ticker: str, data: dict, price_data_slice: pd.DataFrame = None) -> dict:
-        beta = data.get("ticker_info", {}).get("beta", 1.0); sig  = "sell" if beta > 1.5 else ("buy" if beta < 0.8 else "hold")
-        ann_vol = np.nan; weight = 0.0
+        beta = data.get("ticker_info", {}).get("beta", 1.0)
+        if beta is None: beta = 1.0 # Default if beta is missing
+        sig  = "sell" if beta > 1.5 else ("buy" if beta < 0.8 else "hold")
+        ann_vol = np.nan
+        weight = 0.0
         if price_data_slice is not None and not price_data_slice.empty and len(price_data_slice) > 1:
             ret = np.log(price_data_slice.Close / price_data_slice.Close.shift(1)).dropna()
-            if not ret.empty: ann_vol = float(ret.std() * np.sqrt(252)); weight  = float(1/ann_vol) if ann_vol > 0 else 0.0
+            if not ret.empty:
+                ann_vol = float(ret.std() * np.sqrt(252))
+                weight  = float(1/ann_vol) if ann_vol > 0 else 0.0
         return {"ticker": ticker, "beta": beta, "annual_vol": ann_vol, "vol_weight": weight, "volatility_signal": sig}
 
-class SentimentAgent: # No st.write/info/error/warning
+class SentimentAgent:
     def __init__(self, client): self.client = client
     def run(self, ticker: str, data: dict) -> dict:
         headlines = [h.get("title","") for h in data.get("news",[])[:10]]
         if not headlines: return {"ticker":ticker, "sentiment_score":0.0, "sentiment_signal":"hold", "sentiment_error": None}
         prompt = (f"Rate sentiment for {ticker} (−1 negative, +1 positive) based ONLY on:\n" + "\n".join(f"- {h}" for h in headlines) + "\n\nOutput only the number.")
-        score = 0.0; error_msg = None
+        score = 0.0
+        error_msg = None
         try:
             response = self.client.generate(prompt).strip()
-            if response.startswith("Error:"): error_msg = response # Capture LLM error
+            if response.startswith("Error:"): error_msg = response
             else: score = float(response)
-        except Exception as e: error_msg = str(e)[:150] # Catch other errors
+        except Exception as e: error_msg = str(e)[:150]
         sig = "buy" if score > 0.25 else ("sell" if score < -0.25 else "hold")
         return {"ticker":ticker, "sentiment_score":score, "sentiment_signal":sig, "sentiment_error": error_msg}
 
-class FundamentalsAgent: # No st.write/info/error/warning
+class FundamentalsAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        s = data.get("ticker_info", {}); mcap = s.get("marketCap") or 1; fcf = s.get("freeCashflow") or 0
-        roe = s.get("returnOnEquity") or 0; de = s.get("debtToEquity"); de = 1000 if de is None else de
-        fcy = fcf/mcap if mcap != 0 else 0; piotroski_score = sum([roe > 0.01, de < 100, fcf > 0])
+        s = data.get("ticker_info", {})
+        mcap = s.get("marketCap") or 1
+        fcf = s.get("freeCashflow") or 0
+        roe = s.get("returnOnEquity") or 0
+        de = s.get("debtToEquity")
+        de = 1000 if de is None else de
+        fcy = fcf/mcap if mcap != 0 else 0
+        piotroski_score = sum([roe > 0.01, de < 100, fcf > 0]) # True is 1, False is 0
         sig  = "buy" if piotroski_score >= 2 else ("sell" if piotroski_score == 0 else "hold")
         return {"ticker": ticker, "fcf_yield": float(fcy), "piotroski_score": piotroski_score, "fund_signal": sig}
 
-class ValuationAgent: # No st.write/info/error/warning
+class ValuationAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        stats = data.get("ticker_info", {}); price_history_df = data.get("price_history")
+        stats = data.get("ticker_info", {})
+        price_history_df = data.get("price_history")
         price = stats.get("currentPrice") or (price_history_df["Close"].iloc[-1] if price_history_df is not None and not price_history_df.empty else None)
         if price is None: return {"ticker": ticker, "forward_pe": None, "relative_pe_signal": "hold", "dcf_fair_price": np.nan, "dcf_signal": "hold"}
-        pe = stats.get("forwardPE"); rel_sig = "hold";
-        if pe is not None: rel_sig = "buy" if pe < 15 else "sell" if pe > 25 else "hold"
-        fcf = stats.get("freeCashflow"); mcap = stats.get("marketCap")
+        pe = stats.get("forwardPE")
+        rel_sig = "hold"
+        if pe is not None:
+            rel_sig = "buy" if pe < 15 else "sell" if pe > 25 else "hold"
+        fcf = stats.get("freeCashflow")
+        mcap = stats.get("marketCap")
         fcy = (fcf / mcap) if fcf is not None and mcap is not None and mcap != 0 else 0.0
-        fair_price = price * (1 + fcy); dcf_sig = "hold"
+        fair_price = price * (1 + fcy)
+        dcf_sig = "hold"
         if fair_price > price * 1.15: dcf_sig = "buy"
         elif fair_price < price * 0.85: dcf_sig = "sell"
         return {"ticker": ticker, "forward_pe": pe, "relative_pe_signal": rel_sig, "dcf_fair_price": float(fair_price), "dcf_signal": dcf_sig}
 
-class FilingsAgent: # No st.write/info/error/warning
+class FilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        insiders = data.get("insider_filings",[]); net_shares = 0
+        insiders = data.get("insider_filings",[])
+        net_shares = 0
         if insiders:
             for r in insiders:
                 shares_val = r.get("Shares",0)
-                try: shares = int(str(shares_val).replace(',',''))
-                except ValueError: shares = 0
+                try:
+                    shares = int(str(shares_val).replace(',',''))
+                except ValueError:
+                    shares = 0
                 if r.get("type") == "buy": net_shares += shares
                 elif r.get("type") == "sell": net_shares -= shares
         sig = "buy" if net_shares > 1000 else ("sell" if net_shares < -1000 else "hold")
         return {"ticker": ticker, "net_insider_shares": int(net_shares), "filings_signal": sig}
 
-class AnalystRatingAgent: # No st.write/info/error/warning
+class AnalystRatingAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        ticker_info = data.get("ticker_info", {}); price_history_df = data.get("price_history")
+        ticker_info = data.get("ticker_info", {})
+        price_history_df = data.get("price_history")
         current_price = ticker_info.get("currentPrice") or (price_history_df["Close"].iloc[-1] if price_history_df is not None and not price_history_df.empty else None)
-        target_mean_price = ticker_info.get("targetMeanPrice"); recommendation = str(ticker_info.get("recommendationKey", "hold")).lower(); upside = 0.0
+        target_mean_price = ticker_info.get("targetMeanPrice")
+        recommendation = str(ticker_info.get("recommendationKey", "hold")).lower()
+        upside = 0.0
         if target_mean_price and current_price and current_price > 0:
-            try: upside = (float(target_mean_price) / float(current_price)) - 1
-            except: upside = 0.0
-        sig = "hold"
-        if recommendation in ["buy", "strong_buy"] and upside > 0.10: sig = "buy"
-        elif recommendation == "buy" and upside > 0.05: sig = "buy"
-        elif recommendation in ["sell", "strong_sell", "underperform"] and upside < -0.05: sig = "sell"
-        elif upside > 0.20: sig = "buy"
-        elif upside < -0.15: sig = "sell"
-        buy_pct_inferred = {"strong_buy": 0.9, "buy": 0.7, "hold": 0.5, "underperform": 0.3, "sell": 0.1}.get(recommendation, 0.5)
-        return {"ticker": ticker, "analyst_buy_pct_inferred": buy_pct_inferred, "target_upside": float(upside),
-                "yfinance_recommendation": recommendation, "analyst_signal": sig}
+            try:
+                upside = (float(target_mean_price) / float(current_price)) - 1
+            except:
+                upside = 0.0
 
-class PoliticianFilingsAgent: # No st.write/info/error/warning
+        sig = "hold"
+        if recommendation in ["buy", "strong_buy"] and upside > 0.10:
+            sig = "buy"
+        elif recommendation == "buy" and upside > 0.05:
+            sig = "buy"
+        elif recommendation in ["sell", "strong_sell", "underperform"] and upside < -0.05:
+            sig = "sell"
+        elif upside > 0.20:
+            sig = "buy"
+        elif upside < -0.15:
+            sig = "sell"
+
+        buy_pct_inferred = {"strong_buy": 0.9, "buy": 0.7, "hold": 0.5, "underperform": 0.3, "sell": 0.1}.get(recommendation, 0.5)
+
+        return {
+            "ticker": ticker,
+            "analyst_buy_pct_inferred": buy_pct_inferred,
+            "target_upside": float(upside),
+            "yfinance_recommendation": recommendation,
+            "analyst_signal": sig,
+        }
+
+class PoliticianFilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        trades = data.get("politician_trades", []); net_value_estimate = 0; buy_count = 0; sell_count = 0; error = None
-        if trades and isinstance(trades, list) and len(trades)>0 and "error" in trades[0]: # Check if fetcher returned an error object
+        trades = data.get("politician_trades", [])
+        net_value_estimate = 0
+        buy_count = 0
+        sell_count = 0
+        error = None
+        if trades and isinstance(trades, list) and len(trades)>0 and "error" in trades[0]:
             error = trades[0]["error"]
         elif trades:
             for trade in trades:
                 value = trade.get("value_estimate_lower", 0)
-                if trade.get("transaction_type") == "purchase": net_value_estimate += value; buy_count +=1
-                elif trade.get("transaction_type") == "sale": net_value_estimate -= value; sell_count +=1
+                if trade.get("transaction_type") == "purchase":
+                    net_value_estimate += value
+                    buy_count +=1
+                elif trade.get("transaction_type") == "sale":
+                    net_value_estimate -= value
+                    sell_count +=1
         signal = "hold"
         if not error:
             if buy_count > sell_count and buy_count > 1 : signal = "buy"
             elif sell_count > buy_count and sell_count > 1: signal = "sell"
         return {"ticker": ticker, "politician_net_trade_value_estimate": net_value_estimate,
-                "politician_buy_tx_count": buy_count, "politician_sell_tx_count": sell_count, 
+                "politician_buy_tx_count": buy_count, "politician_sell_tx_count": sell_count,
                 "politician_filings_signal": signal, "politician_data_error": error}
 
-class FairValueAgentVT: # No st.write/info/error/warning
+class FairValueAgentVT:
     def run(self, ticker: str, data: dict) -> dict:
-        vt_data = data.get("value_trades_fair_value_data", {}); fair_value = vt_data.get("vt_fair_value"); error = vt_data.get("error")
+        vt_data = data.get("value_trades_fair_value_data", {})
+        fair_value = vt_data.get("vt_fair_value")
+        error = vt_data.get("error")
         current_price_data = data.get("ticker_info", {})
         current_price = current_price_data.get("currentPrice")
         if current_price is None and data.get("price_history") is not None and not data["price_history"].empty:
             current_price = data["price_history"]["Close"].iloc[-1]
-        signal = "hold"; margin_of_safety = 0.20
-        if error and error not in ["FV not found on page.", "VT Configuration incomplete in secrets.", "VT: Skipped by user."]: pass
+        signal = "hold"
+        margin_of_safety = 0.20
+        if error and error not in ["FV not found on page.", "VT Configuration incomplete in secrets.", "VT: Skipped by user."]:
+             pass
         elif fair_value is not None and current_price is not None and current_price > 0:
             if current_price < fair_value * (1 - margin_of_safety): signal = "buy"
             elif current_price > fair_value * (1 + margin_of_safety): signal = "sell"
         return {"ticker": ticker, "vt_fair_value_estimate": fair_value, "vt_fair_value_signal": signal, "vt_data_error": error}
 
-class PortfolioAgent: # No st.write/info/error/warning
+class PortfolioAgent:
     WEIGHTS = {
         "price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.6, "fund": 0.9,
         "valuation_dcf":0.5, "valuation_pe":0.5, "filings": 0.5, "analyst": 0.7,
         "politician_filings": 0.4, "vt_fair_value": 0.8
     }
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
-        current_weights = agent_weights or self.WEIGHTS; total_weighted_score = 0; sum_of_weights_used = 0
-        agg_signals = {}; [agg_signals.update(s_dict) for s_dict in signals]
+        current_weights = agent_weights or self.WEIGHTS
+        total_weighted_score = 0
+        sum_of_weights_used = 0
+        agg_signals = {}
+        for s_dict in signals: # Ensure s_dict is a dictionary
+            if isinstance(s_dict, dict):
+                 agg_signals.update(s_dict)
+            # else: st.warning(f"Signal item not a dict: {s_dict} for {ticker}") # Optional debug
+
         signal_map = {"price_signal": "price", "momentum_signal": "momentum", "volatility_signal": "volatility",
                       "sentiment_signal": "sentiment", "fund_signal": "fund", "dcf_signal": "valuation_dcf",
                       "relative_pe_signal": "valuation_pe", "filings_signal": "filings", "analyst_signal": "analyst",
                       "politician_filings_signal": "politician_filings", "vt_fair_value_signal": "vt_fair_value"}
         for signal_key, weight_key in signal_map.items():
-            signal_value = agg_signals.get(signal_key); weight = current_weights.get(weight_key, 0)
+            signal_value = agg_signals.get(signal_key)
+            weight = current_weights.get(weight_key, 0)
             if signal_value and weight > 0 :
                 raw_score = {"buy":1, "hold":0, "sell":-1}.get(signal_value, 0)
-                total_weighted_score += raw_score * weight; sum_of_weights_used += weight
+                total_weighted_score += raw_score * weight
+                sum_of_weights_used += weight
         composite_score = (total_weighted_score / sum_of_weights_used) if sum_of_weights_used else 0.0
         final_decision = "buy" if composite_score > 0.15 else "sell" if composite_score < -0.15 else "hold"
         return {"ticker":ticker, "composite_score":composite_score, "final_decision":final_decision}
@@ -400,7 +452,6 @@ class PortfolioAgent: # No st.write/info/error/warning
 def run_live_analysis(tickers, history_years, llm_client, configs):
     results = {}
     for t in tickers:
-        # Intermediate st.write calls removed for cleaner UI
         price_history_full = fetch_price_history(t, period=f"{history_years}y")
         if price_history_full.empty:
             results[t] = {"error": f"Failed to fetch price history for {t}.", "ticker": t, "final_decision":"error", "composite_score":0}
@@ -413,7 +464,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
         current_price_for_ticker = ticker_info.get("currentPrice") or (price_history_full["Close"].iloc[-1] if not price_history_full.empty else None)
         news_data_list = fetch_news(t) if configs["use_sentiment"] else []
         politician_trades_list = fetch_politician_trades(t) if configs["use_politician_filings"] else []
-        
+
         data_bundle = {
             "price_history": price_history_full, "ticker_info": ticker_info,
             "news": news_data_list,
@@ -437,9 +488,10 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
                 else: res = agent_instance.run(t, data_bundle)
                 agent_results_list.append(res)
             except Exception as e:
-                # Capture error specific to this agent and ticker
                 agent_error_key = agent_name.lower().replace("agent","") + "_error"
-                agent_results_list.append({agent_name.lower().replace("agent","") + "_signal": "error", agent_error_key: f"Agent {agent_name} error: {str(e)[:100]}"})
+                # Ensure a dict with at least a default signal key and the error
+                default_signal_key_name = agent_name.lower().replace("agent","") + "_signal"
+                agent_results_list.append({default_signal_key_name: "error", agent_error_key: f"Agent {agent_name} error: {str(e)[:100]}"})
 
 
         final_decision = PortfolioAgent().run(t, agent_results_list)
@@ -450,26 +502,24 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
                                "news_headlines_for_display": [n.get('title') for n in news_data_list[:5]],
                                "politician_trades_for_display": politician_trades_list[:5]
                                }
-        for res_dict in agent_results_list: current_result_dict.update(res_dict)
+        for res_dict in agent_results_list:
+            if isinstance(res_dict, dict): # Make sure we only update with dicts
+                current_result_dict.update(res_dict)
         current_result_dict.update(final_decision)
         results[t] = current_result_dict
-        # st.success(f"Analysis for {t}: {final_decision['final_decision']} (Score: {final_decision['composite_score']:.2f})") # HIDDEN - success shown via results cards
     return results
 
 # --------------------------------
 # Backtesting Engine
 # --------------------------------
 def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_placeholder, backtest_agent_weights):
-    # st.write(f"Starting backtest for {ticker} from {start_date} to {end_date}...") # HIDDEN
     s_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
-    fetch_start_date = (s_date_obj - pd.DateOffset(months=18)).strftime("%Y-%m-%d")
+    fetch_start_date = (s_date_obj - pd.DateOffset(months=18)).strftime("%Y-%m-%d") # Corrected
     full_price_history = fetch_price_history(ticker, period=None, interval="1d")
     if full_price_history.empty:
-        # st.error("Cannot run backtest: Price history is empty.") # HIDDEN
         return {"error": "Backtest failed: Price history empty."}, pd.DataFrame()
     price_history = full_price_history[(full_price_history.index >= pd.to_datetime(fetch_start_date)) & (full_price_history.index <= pd.to_datetime(end_date))].copy()
     if price_history.empty or len(price_history[price_history.index >= pd.to_datetime(start_date)]) < 2:
-        # st.error(f"Not enough historical data for {ticker} in the selected backtest range after filtering.") # HIDDEN
         return {"error": "Backtest failed: Not enough data in range."}, pd.DataFrame()
 
     ticker_info_for_backtest = fetch_ticker_info(ticker)
@@ -494,7 +544,6 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     log_df = pd.DataFrame(portfolio_log);
     if not log_df.empty: log_df.set_index("date", inplace=True)
     if log_df.empty or len(log_df) < 2:
-        # st.warning("Backtest log is too short to calculate performance metrics.") # HIDDEN
         return {"message":"Log too short to calculate performance metrics."}, pd.DataFrame()
 
     total_return = (log_df["portfolio_value"].iloc[-1] / initial_capital - 1) * 100
@@ -508,7 +557,6 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
                "Total Return (%)": f"{total_return:.2f}%", "Annualized Return (%)": f"{annualized_return:.2f}%",
                "Annualized Volatility (%)": f"{annualized_volatility:.2f}%", "Sharpe Ratio": f"{sharpe_ratio:.2f}",
                "Max Drawdown (%)": f"{max_drawdown:.2f}%", "Number of Trades (approx)": f"{(log_df['signal'] != log_df['signal'].shift()).fillna(False).sum() // 2}"}
-    # st.success(f"Backtest for {ticker} complete.") # HIDDEN
     return metrics, log_df
 
 # --------------------------------
@@ -536,10 +584,10 @@ except Exception as e: st.sidebar.error(f"LLM Init Unexpected Error: {e}")
 # --- Configuration Moved to Main Area ---
 st.header("⚙️ Configuration")
 config_container = st.container(border=True)
-app_mode = "Live Analysis" # Default, will be updated by radio
+app_mode = "Live Analysis" 
 
 with config_container:
-    app_mode = st.radio("Select Mode:", ["Live Analysis", "Backtesting"], key="app_mode_select_main", horizontal=True, index=0) # Default to Live Analysis
+    app_mode = st.radio("Select Mode:", ["Live Analysis", "Backtesting"], key="app_mode_select_main", horizontal=True, index=0)
     st.markdown("---")
 
     if app_mode == "Live Analysis":
@@ -563,7 +611,7 @@ with config_container:
         col1_bt, col2_bt = st.columns(2)
         with col1_bt:
             default_bt_end_date_main = datetime.now() - timedelta(days=1)
-            default_bt_start_date_main = default_bt_end_date_main - pd.DateOffset(years=3)
+            default_bt_start_date_main = default_bt_end_date_main - pd.DateOffset(years=3) # This is fine, years=3 is int
             bt_start_date_main = st.date_input("Start Date:", default_bt_start_date_main, max_value=default_bt_end_date_main - timedelta(days=1), key="bt_start_date_main").strftime("%Y-%m-%d")
         with col2_bt:
             bt_end_date_main = st.date_input("End Date:", default_bt_end_date_main, min_value=datetime.strptime(bt_start_date_main, "%Y-%m-%d") + timedelta(days=1), key="bt_end_date_main").strftime("%Y-%m-%d")
@@ -595,7 +643,7 @@ if app_mode == "Live Analysis":
             with st.spinner("⏳ Processing analysis... Please wait."):
                 st.session_state.live_output = run_live_analysis(live_tickers_list_main, history_years_live_main, llm_client, live_configs_main)
 
-            st.header("📊 Live Analysis Summary") # Summary remains visible
+            st.header("📊 Live Analysis Summary")
             num_tickers = len(live_tickers_list_main)
             cols_per_row = min(num_tickers, 3)
             for i in range(0, num_tickers, cols_per_row):
@@ -604,7 +652,7 @@ if app_mode == "Live Analysis":
                 for idx, t_symbol in enumerate(row_tickers):
                     with cols[idx]:
                         res = st.session_state.live_output.get(t_symbol)
-                        if not res or "error" in res and res["error"] is not None: # Check if error has a value
+                        if not res or "error" in res and res["error"] is not None:
                             st.error(f"**{t_symbol}**: {res.get('error', 'Unknown error') if res else 'No data'}")
                             continue
                         dec = res.get("final_decision", "N/A").upper(); score = res.get("composite_score", float('nan')); price_disp = res.get("current_price_display")
@@ -633,9 +681,8 @@ if app_mode == "Live Analysis":
                         fund_s = {"Market Cap": f"${res.get('market_cap_display',0):,}" if res.get('market_cap_display') else "N/A", "FCF Yield": f"{res.get('fcf_yield',0)*100:.2f}%", "Piotroski Score": res.get('piotroski_score'), "ROE / DebtToEquity": f"{res.get('ticker_info',{}).get('returnOnEquity',0)*100:.1f}% / {res.get('ticker_info',{}).get('debtToEquity',0):.1f}", "Fundamental Signal": res.get("fund_signal", "N/A").upper()}
                         st.dataframe(pd.Series(fund_s, name="Value"), use_container_width=True)
                         business_summary = res.get("ticker_info",{}).get("longBusinessSummary")
-                        
-                        if business_summary : 
-                            with st.popover("View Business Summary"): 
+                        if business_summary:
+                            with st.popover("View Business Summary"):
                                 st.markdown(business_summary)
                     with tabs[2]:
                         st.subheader("Valuation Metrics")
@@ -677,24 +724,24 @@ if app_mode == "Live Analysis":
                 st.caption("These weights are used by the PortfolioAgent to combine individual signals.")
                 st.json(PortfolioAgent.WEIGHTS)
 
-    elif current_app_mode == "Backtesting":
-        if 'run_button_backtest_main' in locals() and run_button_backtest_main and 'bt_ticker_main' in locals() and bt_ticker_main:
-            if 'bt_metrics' not in st.session_state: st.session_state.bt_metrics = None
-            if 'bt_log_df' not in st.session_state: st.session_state.bt_log_df = pd.DataFrame()
-            with st.spinner(f"⏳ Running backtest for {bt_ticker_main}... This may take a while."):
-                st.session_state.bt_metrics, st.session_state.bt_log_df = run_backtest(
-                    bt_ticker_main, bt_start_date_main, bt_end_date_main,
-                    bt_initial_capital_main, llm_client, backtest_portfolio_weights_main)
-            if st.session_state.bt_metrics and "message" not in st.session_state.bt_metrics and "error" not in st.session_state.bt_metrics:
-                st.header(f"📈 Backtest Results for {bt_ticker_main}")
-                metrics_df = pd.DataFrame.from_dict(st.session_state.bt_metrics, orient='index', columns=['Value'])
-                st.table(metrics_df)
-                if not st.session_state.bt_log_df.empty:
-                    st.subheader("Portfolio Value Over Time"); st.line_chart(st.session_state.bt_log_df["portfolio_value"])
-                    st.subheader("Drawdown Over Time"); st.area_chart(st.session_state.bt_log_df["drawdown"])
-                    with st.expander("View Backtest Log and Signals (Last 1000 rows)"): st.dataframe(st.session_state.bt_log_df[["price", "signal", "composite_score", "portfolio_value", "cash", "shares_held"]].tail(1000))
-                else: st.warning("Backtest log empty, no charts.")
-            else: st.error(f"Backtest failed: {st.session_state.bt_metrics.get('message', '') or st.session_state.bt_metrics.get('error', 'Unknown error') if st.session_state.bt_metrics else 'Unknown error'}")
+elif app_mode == "Backtesting":
+    if 'run_button_backtest_main' in locals() and run_button_backtest_main and 'bt_ticker_main' in locals() and bt_ticker_main:
+        if 'bt_metrics' not in st.session_state: st.session_state.bt_metrics = None
+        if 'bt_log_df' not in st.session_state: st.session_state.bt_log_df = pd.DataFrame()
+        with st.spinner(f"⏳ Running backtest for {bt_ticker_main}... This may take a while."):
+            st.session_state.bt_metrics, st.session_state.bt_log_df = run_backtest(
+                bt_ticker_main, bt_start_date_main, bt_end_date_main,
+                bt_initial_capital_main, llm_client, backtest_portfolio_weights_main)
+        if st.session_state.bt_metrics and "message" not in st.session_state.bt_metrics and "error" not in st.session_state.bt_metrics:
+            st.header(f"📈 Backtest Results for {bt_ticker_main}")
+            metrics_df = pd.DataFrame.from_dict(st.session_state.bt_metrics, orient='index', columns=['Value'])
+            st.table(metrics_df)
+            if not st.session_state.bt_log_df.empty:
+                st.subheader("Portfolio Value Over Time"); st.line_chart(st.session_state.bt_log_df["portfolio_value"])
+                st.subheader("Drawdown Over Time"); st.area_chart(st.session_state.bt_log_df["drawdown"])
+                with st.expander("View Backtest Log and Signals (Last 1000 rows)"): st.dataframe(st.session_state.bt_log_df[["price", "signal", "composite_score", "portfolio_value", "cash", "shares_held"]].tail(1000))
+            else: st.warning("Backtest log empty, no charts.")
+        else: st.error(f"Backtest failed: {st.session_state.bt_metrics.get('message', '') or st.session_state.bt_metrics.get('error', 'Unknown error') if st.session_state.bt_metrics else 'Unknown error'}")
 
 # Sidebar for global info / disclaimers
 st.sidebar.markdown("---")
