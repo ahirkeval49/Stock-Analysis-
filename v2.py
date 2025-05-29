@@ -633,7 +633,7 @@ if app_mode == "Live Analysis":
                         fund_s = {"Market Cap": f"${res.get('market_cap_display',0):,}" if res.get('market_cap_display') else "N/A", "FCF Yield": f"{res.get('fcf_yield',0)*100:.2f}%", "Piotroski Score": res.get('piotroski_score'), "ROE / DebtToEquity": f"{res.get('ticker_info',{}).get('returnOnEquity',0)*100:.1f}% / {res.get('ticker_info',{}).get('debtToEquity',0):.1f}", "Fundamental Signal": res.get("fund_signal", "N/A").upper()}
                         st.dataframe(pd.Series(fund_s, name="Value"), use_container_width=True)
                         business_summary = res.get("ticker_info",{}).get("longBusinessSummary")
-                        if business_summary : with st.popover("View Business Summary"): st.markdown(business_summary)
+                         if business_summary : with st.popover("View Business Summary"): st.markdown(business_summary)
                     with tabs[2]:
                         st.subheader("Valuation Metrics")
                         val_s = {"Forward P/E": f"{res.get('forward_pe',0):.1f}", "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(), "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A", "DCF Signal": res.get('dcf_signal', "N/A").upper()}
