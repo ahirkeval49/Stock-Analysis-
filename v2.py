@@ -701,7 +701,7 @@ if app_mode == "Live Analysis":
                             sent_s = {"Sentiment Score": f"{res.get('sentiment_score',0):.2f}", "Sentiment Signal": res.get("sentiment_signal", "N/A").upper(), "LLM Status": "Error" if sent_error else "OK"}
                             st.dataframe(pd.Series(sent_s, name="Value"), use_container_width=True)
                             if sent_error: st.caption(f"LLM Error: {sent_error}")
-                            if res.get("news_headlines_for_display"): with st.popover("View News Headlines"): [st.markdown(f"- {title}") for title in res["news_headlines_for_display"]]
+                            if res.get("news_headlines_for_display"):with st.popover("View News Headlines"): [st.markdown(f"- {title}") for title in res["news_headlines_for_display"]]
                         if live_configs_main["use_filings"]:
                             st.subheader("Insider Filings")
                             fil_s = {"Net Insider Shares (Recent)": f"{res.get('net_insider_shares',0):,}", "Insider Filings Signal": res.get("filings_signal", "N/A").upper()}
