@@ -449,6 +449,12 @@ class PortfolioAgent:
 # --------------------------------
 # Orchestrator for Live Analysis
 # --------------------------------
+# (Keep all code above run_live_analysis the same as your last version)
+# ... existing Data Fetchers, LLM Client, Agents, PortfolioAgent ...
+
+# --------------------------------
+# Orchestrator for Live Analysis
+# --------------------------------
 def run_live_analysis(tickers, history_years, llm_client, configs):
     results = {}
     for t in tickers:
@@ -462,14 +468,16 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             continue
 
         current_price_for_ticker = ticker_info.get("currentPrice") or (price_history_full["Close"].iloc[-1] if not price_history_full.empty else None)
+        
+        # Fetch data and prepare for display
         news_data_list = fetch_news(t) if configs["use_sentiment"] else []
-        politician_trades_list = fetch_politician_trades(t) if configs["use_politician_filings"] else []
-
+        politician_trades_data = fetch_politician_trades(t) if configs["use_politician_filings"] else [] # Will contain list of trades or error dict
+        
         data_bundle = {
             "price_history": price_history_full, "ticker_info": ticker_info,
-            "news": news_data_list,
+            "news": news_data_list, # Pass the actual news items
             "insider_filings": fetch_insider_filings(t) if configs["use_filings"] else [],
-            "politician_trades": politician_trades_list,
+            "politician_trades": politician_trades_data, # Pass the actual politician trades data
             "value_trades_fair_value_data": fetch_fair_value_from_value_trades(t) if configs["use_value_trades"] else \
                                             {"vt_fair_value": None, "error": "VT: Skipped by user config."}
         }
@@ -483,81 +491,36 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
         for agent_instance in all_agents_instances:
             agent_name = agent_instance.__class__.__name__
             try:
-                if isinstance(agent_instance, (PriceAgent, MomentumAgent)): res = agent_instance.run(t, data_bundle["price_history"])
-                elif isinstance(agent_instance, VolatilityAgent): res = agent_instance.run(t, data_bundle, data_bundle["price_history"])
-                else: res = agent_instance.run(t, data_bundle)
-                agent_results_list.append(res)
+                if isinstance(agent_instance, (PriceAgent, MomentumAgent)): res_agent = agent_instance.run(t, data_bundle["price_history"])
+                elif isinstance(agent_instance, VolatilityAgent): res_agent = agent_instance.run(t, data_bundle, data_bundle["price_history"])
+                else: res_agent = agent_instance.run(t, data_bundle)
+                agent_results_list.append(res_agent)
             except Exception as e:
                 agent_error_key = agent_name.lower().replace("agent","") + "_error"
-                # Ensure a dict with at least a default signal key and the error
                 default_signal_key_name = agent_name.lower().replace("agent","") + "_signal"
                 agent_results_list.append({default_signal_key_name: "error", agent_error_key: f"Agent {agent_name} error: {str(e)[:100]}"})
 
-
         final_decision = PortfolioAgent().run(t, agent_results_list)
-        current_result_dict = {"ticker": t, "current_price_display": current_price_for_ticker,
-                               "market_cap_display": ticker_info.get("marketCap"),
-                               "industry_display": ticker_info.get("industry"),
-                               "sector_display": ticker_info.get("sector"),
-                               "news_headlines_for_display": [n.get('title') for n in news_data_list[:5]],
-                               "politician_trades_for_display": politician_trades_list[:5]
-                               }
+        
+        current_result_dict = {
+            "ticker": t, 
+            "current_price_display": current_price_for_ticker,
+            "market_cap_display": ticker_info.get("marketCap"),
+            "industry_display": ticker_info.get("industry"),
+            "sector_display": ticker_info.get("sector"),
+            # Store the actual data needed for popovers directly in the result for this ticker
+            "news_headlines_for_popover": [n.get('title') for n in news_data_list[:5]],
+            "politician_trades_for_popover": politician_trades_data[:5] # Pass the first 5 trade dicts
+        }
         for res_dict in agent_results_list:
-            if isinstance(res_dict, dict): # Make sure we only update with dicts
+            if isinstance(res_dict, dict):
                 current_result_dict.update(res_dict)
         current_result_dict.update(final_decision)
         results[t] = current_result_dict
     return results
 
-# --------------------------------
-# Backtesting Engine
-# --------------------------------
-def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_placeholder, backtest_agent_weights):
-    s_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
-    fetch_start_date = (s_date_obj - pd.DateOffset(months=18)).strftime("%Y-%m-%d") # Corrected
-    full_price_history = fetch_price_history(ticker, period=None, interval="1d")
-    if full_price_history.empty:
-        return {"error": "Backtest failed: Price history empty."}, pd.DataFrame()
-    price_history = full_price_history[(full_price_history.index >= pd.to_datetime(fetch_start_date)) & (full_price_history.index <= pd.to_datetime(end_date))].copy()
-    if price_history.empty or len(price_history[price_history.index >= pd.to_datetime(start_date)]) < 2:
-        return {"error": "Backtest failed: Not enough data in range."}, pd.DataFrame()
-
-    ticker_info_for_backtest = fetch_ticker_info(ticker)
-    data_bundle_static = {"ticker_info": ticker_info_for_backtest}
-    price_agent = PriceAgent(); momentum_agent = MomentumAgent(); volatility_agent = VolatilityAgent(); portfolio_agent = PortfolioAgent()
-    portfolio_log = []; cash = initial_capital; shares_held = 0; portfolio_value = initial_capital
-    backtest_run_dates = price_history[price_history.index >= pd.to_datetime(start_date)].index
-
-    for current_date in backtest_run_dates:
-        data_slice = price_history[price_history.index <= current_date]
-        current_price_point = data_slice.Close.iloc[-1] if not data_slice.empty else portfolio_value / shares_held if shares_held else 0
-        if data_slice.empty or len(data_slice) < 252:
-            portfolio_log.append({"date": current_date, "cash": cash, "shares_held": shares_held, "price": current_price_point, "portfolio_value": portfolio_value, "signal": "hold (insufficient data)", "composite_score":0.0}); continue
-        current_price = data_slice.Close.iloc[-1]
-        pa_res = price_agent.run(ticker, data_slice); ma_res = momentum_agent.run(ticker, data_slice); va_res = volatility_agent.run(ticker, data_bundle_static, data_slice)
-        final_decision_obj = portfolio_agent.run(ticker, [pa_res, ma_res, va_res], agent_weights=backtest_agent_weights)
-        final_decision = final_decision_obj["final_decision"]
-        if final_decision == "buy" and cash > current_price : shares_to_buy = cash / current_price; shares_held += shares_to_buy; cash = 0
-        elif final_decision == "sell" and shares_held > 0: cash += shares_held * current_price; shares_held = 0
-        portfolio_value = cash + shares_held * current_price
-        portfolio_log.append({"date": current_date, "cash": cash, "shares_held": shares_held, "price": current_price, "portfolio_value": portfolio_value, "signal": final_decision, "composite_score": final_decision_obj["composite_score"]})
-    log_df = pd.DataFrame(portfolio_log);
-    if not log_df.empty: log_df.set_index("date", inplace=True)
-    if log_df.empty or len(log_df) < 2:
-        return {"message":"Log too short to calculate performance metrics."}, pd.DataFrame()
-
-    total_return = (log_df["portfolio_value"].iloc[-1] / initial_capital - 1) * 100
-    num_days = (log_df.index[-1] - log_df.index[0]).days; num_years = num_days / 365.25 if num_days > 0 else 1/365.25
-    annualized_return = ((log_df["portfolio_value"].iloc[-1] / initial_capital) ** (1/num_years) - 1) * 100 if num_years > 0 else total_return if num_days > 0 else 0
-    log_df["daily_return"] = log_df["portfolio_value"].pct_change().fillna(0); annualized_volatility = log_df["daily_return"].std() * np.sqrt(252) * 100
-    sharpe_ratio = (annualized_return / annualized_volatility) if annualized_volatility != 0 else 0
-    log_df["cumulative_max"] = log_df["portfolio_value"].cummax(); log_df["drawdown"] = (log_df["portfolio_value"] - log_df["cumulative_max"]) / log_df["cumulative_max"]
-    max_drawdown = log_df["drawdown"].min() * 100
-    metrics = {"Initial Capital": f"${initial_capital:,.2f}", "Final Portfolio Value": f"${log_df['portfolio_value'].iloc[-1]:,.2f}",
-               "Total Return (%)": f"{total_return:.2f}%", "Annualized Return (%)": f"{annualized_return:.2f}%",
-               "Annualized Volatility (%)": f"{annualized_volatility:.2f}%", "Sharpe Ratio": f"{sharpe_ratio:.2f}",
-               "Max Drawdown (%)": f"{max_drawdown:.2f}%", "Number of Trades (approx)": f"{(log_df['signal'] != log_df['signal'].shift()).fillna(False).sum() // 2}"}
-    return metrics, log_df
+# ... (Backtesting Engine and other Agent classes remain the same) ...
+# Ensure all agents and other functions are correctly defined before this UI section.
 
 # --------------------------------
 # Streamlit UI
@@ -611,7 +574,7 @@ with config_container:
         col1_bt, col2_bt = st.columns(2)
         with col1_bt:
             default_bt_end_date_main = datetime.now() - timedelta(days=1)
-            default_bt_start_date_main = default_bt_end_date_main - pd.DateOffset(years=3) # This is fine, years=3 is int
+            default_bt_start_date_main = default_bt_end_date_main - pd.DateOffset(years=3)
             bt_start_date_main = st.date_input("Start Date:", default_bt_start_date_main, max_value=default_bt_end_date_main - timedelta(days=1), key="bt_start_date_main").strftime("%Y-%m-%d")
         with col2_bt:
             bt_end_date_main = st.date_input("End Date:", default_bt_end_date_main, min_value=datetime.strptime(bt_start_date_main, "%Y-%m-%d") + timedelta(days=1), key="bt_end_date_main").strftime("%Y-%m-%d")
@@ -652,7 +615,7 @@ if app_mode == "Live Analysis":
                 for idx, t_symbol in enumerate(row_tickers):
                     with cols[idx]:
                         res = st.session_state.live_output.get(t_symbol)
-                        if not res or "error" in res and res["error"] is not None:
+                        if not res or ("error" in res and res["error"] is not None):
                             st.error(f"**{t_symbol}**: {res.get('error', 'Unknown error') if res else 'No data'}")
                             continue
                         dec = res.get("final_decision", "N/A").upper(); score = res.get("composite_score", float('nan')); price_disp = res.get("current_price_display")
@@ -666,7 +629,7 @@ if app_mode == "Live Analysis":
             st.markdown("---")
             for t_symbol in live_tickers_list_main:
                 res = st.session_state.live_output.get(t_symbol)
-                if not res or "error" in res and res["error"] is not None: continue
+                if not res or ("error" in res and res["error"] is not None): continue
                 with st.expander(f"🔍 Detailed Analysis for {t_symbol}"):
                     tab_titles = ["📈 Chart & Core", "펀 Fundamentals", "💰 Valuation & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
                     tabs = st.tabs(tab_titles)
@@ -678,9 +641,15 @@ if app_mode == "Live Analysis":
                         st.dataframe(pd.Series(core_s, name="Value"), use_container_width=True)
                     with tabs[1]:
                         st.subheader(f"Fundamental Snapshot - {res.get('industry_display', 'N/A')}")
-                        fund_s = {"Market Cap": f"${res.get('market_cap_display',0):,}" if res.get('market_cap_display') else "N/A", "FCF Yield": f"{res.get('fcf_yield',0)*100:.2f}%", "Piotroski Score": res.get('piotroski_score'), "ROE / DebtToEquity": f"{res.get('ticker_info',{}).get('returnOnEquity',0)*100:.1f}% / {res.get('ticker_info',{}).get('debtToEquity',0):.1f}", "Fundamental Signal": res.get("fund_signal", "N/A").upper()}
+                        # Ensure 'ticker_info' is part of 'res' or access it from data_bundle if necessary and available here
+                        ticker_info_res = res.get("ticker_info", {}) # Fallback to empty dict
+                        fund_s = {"Market Cap": f"${res.get('market_cap_display',0):,}" if res.get('market_cap_display') else "N/A", 
+                                  "FCF Yield": f"{res.get('fcf_yield',0)*100:.2f}%", 
+                                  "Piotroski Score": res.get('piotroski_score'), 
+                                  "ROE / DebtToEquity": f"{ticker_info_res.get('returnOnEquity',0)*100:.1f}% / {ticker_info_res.get('debtToEquity',0):.1f}", 
+                                  "Fundamental Signal": res.get("fund_signal", "N/A").upper()}
                         st.dataframe(pd.Series(fund_s, name="Value"), use_container_width=True)
-                        business_summary = res.get("ticker_info",{}).get("longBusinessSummary")
+                        business_summary = ticker_info_res.get("longBusinessSummary")
                         if business_summary:
                             with st.popover("View Business Summary"):
                                 st.markdown(business_summary)
@@ -694,17 +663,18 @@ if app_mode == "Live Analysis":
                             if "VT Configuration incomplete" in str(vt_scrape_status) or "Skipped by user" in str(vt_scrape_status) : vt_scrape_status = "Not Attempted (Check Config/Secrets)"
                             vt_s = {"VT Scraped Fair Value": f"${res.get('vt_fair_value_estimate',0):.2f}" if res.get('vt_fair_value_estimate') is not None else "N/A", "VT Fair Value Signal": res.get('vt_fair_value_signal', "N/A").upper(), "VT Scrape Status": vt_scrape_status }
                             st.dataframe(pd.Series(vt_s, name="Value"), use_container_width=True)
-                    with tabs[3]:
+                    with tabs[3]: # News & Filings Tab
                         if live_configs_main["use_sentiment"]:
                             st.subheader("News Sentiment (LLM)")
                             sent_error = res.get("sentiment_error")
                             sent_s = {"Sentiment Score": f"{res.get('sentiment_score',0):.2f}", "Sentiment Signal": res.get("sentiment_signal", "N/A").upper(), "LLM Status": "Error" if sent_error else "OK"}
                             st.dataframe(pd.Series(sent_s, name="Value"), use_container_width=True)
                             if sent_error: st.caption(f"LLM Error: {sent_error}")
-                                
-                            if res.get("news_headlines_for_display"):
-                                with st.popover("View News Headlines"): [st.markdown(f"- {title}") 
-                                                                         for title in res["news_headlines_for_display"]]
+                            news_headlines = res.get("news_headlines_for_popover") # Get headlines from results
+                            if news_headlines:
+                                with st.popover("View News Headlines"):
+                                    for title in news_headlines: # Corrected: For loop
+                                        st.markdown(f"- {title}")
                         if live_configs_main["use_filings"]:
                             st.subheader("Insider Filings")
                             fil_s = {"Net Insider Shares (Recent)": f"{res.get('net_insider_shares',0):,}", "Insider Filings Signal": res.get("filings_signal", "N/A").upper()}
@@ -715,10 +685,11 @@ if app_mode == "Live Analysis":
                             pol_s = {"Net Trade Value Estimate (Recent)": f"${res.get('politician_net_trade_value_estimate',0):,}", "Buy/Sell Transactions": f"{res.get('politician_buy_tx_count',0)} / {res.get('politician_sell_tx_count',0)}", "Politician Filings Signal": res.get("politician_filings_signal", "N/A").upper(), "Scrape Status": "Error" if pol_scrape_error else "OK"}
                             st.dataframe(pd.Series(pol_s, name="Value"), use_container_width=True)
                             if pol_scrape_error: st.caption(f"Scraping Note: {pol_scrape_error}")
-                                
-                            if res.get("politician_trades_for_display"): 
-                             with st.popover("View Scraped Politician Trades (Max 5)"): [st.markdown(f"**{p_trade.get('politician_name')}**: {p_trade.get('transaction_type')} ({p_trade.get('value_range')}) on {p_trade.get('date_str')}") 
-                                                                                         for p_trade in res["politician_trades_for_display"]]
+                            politician_trades_display = res.get("politician_trades_for_popover") # Get trades from results
+                            if politician_trades_display:
+                                with st.popover("View Scraped Politician Trades (Max 5)"):
+                                    for p_trade in politician_trades_display: # Corrected: For loop
+                                        st.markdown(f"**{p_trade.get('politician_name')}**: {p_trade.get('transaction_type')} ({p_trade.get('value_range')}) on {p_trade.get('date_str')}")
                     with tabs[4]:
                         st.subheader("All Agent Signals & Final Decision")
                         all_s_keys = [k for k in res if k.endswith("_signal")]; all_s_table = {k.replace("_signal","").replace("_"," ").title(): str(res[k]).upper() for k in all_s_keys}
