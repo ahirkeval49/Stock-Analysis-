@@ -343,7 +343,7 @@ class ModelClient:
         openai.api_key = self.api_key
         if provider == "deepseek":
             openai.api_base = "https://api.deepseek.com/v1"
-            self.model = "deepseek-chat" # Changed from deepseek-reasoner
+            self.model = "deepseek-reasoner" # Changed from deepseek-reasoner
         else: # Default to openai
             openai.api_base = "https://api.openai.com/v1"
             self.model = "gpt-4o"
@@ -855,8 +855,9 @@ except ValueError as e: st.sidebar.error(f"LLM Init Error: {e}")
 except Exception as e: st.sidebar.error(f"LLM Unexpected Error: {e}")
 
 # Sidebar Configuration
-st.header("⚙️ Configuration")
-app_mode = st.selectbox("Select Mode", ["Live Analysis", "Backtesting"], key="app_mode_select")
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    app_mode = st.selectbox("Select Mode", ["Live Analysis", "Backtesting"], key="app_mode_select")
     
     if app_mode == "Live Analysis":
         st.subheader("Live Analysis Settings")
