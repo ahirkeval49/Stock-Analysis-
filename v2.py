@@ -462,47 +462,109 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
 # --------------------------------
 # Backtesting Engine
 # --------------------------------
+
 def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_placeholder, backtest_agent_weights):
-    # ... (previous backtesting code) ...
     st.write(f"Starting backtest for {ticker} from {start_date} to {end_date}...")
     s_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
-    fetch_start_date = (s_date_obj - pd.DateOffset(years=1.5)).strftime("%Y-%m-%d")
-    full_price_history = fetch_price_history(ticker, period=None, interval="1d")
-    if full_price_history.empty: return None, pd.DataFrame()
-    price_history = full_price_history[(full_price_history.index >= pd.to_datetime(fetch_start_date)) & (full_price_history.index <= pd.to_datetime(end_date))].copy()
-    if price_history.empty or len(price_history[price_history.index >= pd.to_datetime(start_date)]) < 2: return None, pd.DataFrame()
-    ticker_info_for_backtest = fetch_ticker_info(ticker)
+    # Fetch data from at least 1 year prior to s_date_obj to allow for 200/252 day moving averages/momentum
+    # --- CORRECTED LINE ---
+    fetch_start_date = (s_date_obj - pd.DateOffset(months=18)).strftime("%Y-%m-%d")
+    # --- END CORRECTION ---
+
+    full_price_history = fetch_price_history(ticker, period=None, interval="1d") # Fetch max available daily
+    if full_price_history.empty:
+        st.error("Cannot run backtest: Price history is empty.")
+        return None, pd.DataFrame()
+
+    # Filter data for the required extended range (fetch_start_date to end_date)
+    price_history = full_price_history[(full_price_history.index >= pd.to_datetime(fetch_start_date)) &
+                                       (full_price_history.index <= pd.to_datetime(end_date))].copy()
+
+
+    if price_history.empty or len(price_history[price_history.index >= pd.to_datetime(start_date)]) < 2: # Need at least 2 days in actual test period
+        st.error(f"Not enough historical data for {ticker} in the selected backtest range after filtering.")
+        return None, pd.DataFrame()
+
+    ticker_info_for_backtest = fetch_ticker_info(ticker) # Fetched once, lookahead for some agents
     data_bundle_static = {"ticker_info": ticker_info_for_backtest}
-    price_agent = PriceAgent(); momentum_agent = MomentumAgent(); volatility_agent = VolatilityAgent(); portfolio_agent = PortfolioAgent()
-    portfolio_log = []; cash = initial_capital; shares_held = 0; portfolio_value = initial_capital
+
+    price_agent = PriceAgent()
+    momentum_agent = MomentumAgent()
+    volatility_agent = VolatilityAgent()
+    portfolio_agent = PortfolioAgent()
+    portfolio_log = []
+    cash = initial_capital
+    shares_held = 0
+    portfolio_value = initial_capital
     backtest_run_dates = price_history[price_history.index >= pd.to_datetime(start_date)].index
+
     for current_date in backtest_run_dates:
         data_slice = price_history[price_history.index <= current_date]
-        current_price_point = data_slice.Close.iloc[-1] if not data_slice.empty else portfolio_value / shares_held if shares_held else 0
-        if data_slice.empty or len(data_slice) < 252:
-            portfolio_log.append({"date": current_date, "cash": cash, "shares_held": shares_held, "price": current_price_point, "portfolio_value": portfolio_value, "signal": "hold (insufficient data)", "composite_score":0.0}); continue
+        current_price_point = data_slice.Close.iloc[-1] if not data_slice.empty else portfolio_value / shares_held if shares_held else 0 # Fallback price
+        if data_slice.empty or len(data_slice) < 252: # Min data for some indicators
+            portfolio_log.append({
+                "date": current_date, "cash": cash, "shares_held": shares_held,
+                "price": current_price_point,
+                "portfolio_value": portfolio_value,
+                "signal": "hold (insufficient data)",
+                "composite_score":0.0
+            })
+            continue
         current_price = data_slice.Close.iloc[-1]
-        pa_res = price_agent.run(ticker, data_slice); ma_res = momentum_agent.run(ticker, data_slice); va_res = volatility_agent.run(ticker, data_bundle_static, data_slice)
-        final_decision_obj = portfolio_agent.run(ticker, [pa_res, ma_res, va_res], agent_weights=backtest_agent_weights)
+        # Run backtestable agents
+        pa_res = price_agent.run(ticker, data_slice)
+        ma_res = momentum_agent.run(ticker, data_slice)
+        va_res = volatility_agent.run(ticker, data_bundle_static, data_slice) # Beta is lookahead
+
+        backtest_signals = [pa_res, ma_res, va_res]
+        final_decision_obj = portfolio_agent.run(ticker, backtest_signals, agent_weights=backtest_agent_weights)
         final_decision = final_decision_obj["final_decision"]
-        if final_decision == "buy" and cash > current_price : shares_to_buy = cash / current_price; shares_held += shares_to_buy; cash = 0
-        elif final_decision == "sell" and shares_held > 0: cash += shares_held * current_price; shares_held = 0
+
+        # Trading logic (simplified)
+        if final_decision == "buy" and cash > current_price : # Ensure can afford at least one share (approx)
+            shares_to_buy = cash / current_price
+            shares_held += shares_to_buy
+            cash = 0
+        elif final_decision == "sell" and shares_held > 0:
+            cash += shares_held * current_price
+            shares_held = 0
+
         portfolio_value = cash + shares_held * current_price
-        portfolio_log.append({"date": current_date, "cash": cash, "shares_held": shares_held, "price": current_price, "portfolio_value": portfolio_value, "signal": final_decision, "composite_score": final_decision_obj["composite_score"]})
+        portfolio_log.append({
+            "date": current_date, "cash": cash, "shares_held": shares_held,
+            "price": current_price, "portfolio_value": portfolio_value,
+            "signal": final_decision, "composite_score": final_decision_obj["composite_score"]
+        })
     log_df = pd.DataFrame(portfolio_log);
     if not log_df.empty: log_df.set_index("date", inplace=True)
-    if log_df.empty or len(log_df) < 2: return {"message":"Log too short"}, pd.DataFrame()
+
+    if log_df.empty or len(log_df) < 2:
+        st.warning("Backtest log is too short to calculate performance metrics.")
+        return {"message":"Log too short"}, pd.DataFrame()
+
     total_return = (log_df["portfolio_value"].iloc[-1] / initial_capital - 1) * 100
-    num_days = (log_df.index[-1] - log_df.index[0]).days; num_years = num_days / 365.25 if num_days > 0 else 1/365.25
+    num_days = (log_df.index[-1] - log_df.index[0]).days
+    num_years = num_days / 365.25 if num_days > 0 else 1/365.25 # Handle very short periods (avoid div by zero)
+
     annualized_return = ((log_df["portfolio_value"].iloc[-1] / initial_capital) ** (1/num_years) - 1) * 100 if num_years > 0 else total_return if num_days > 0 else 0
-    log_df["daily_return"] = log_df["portfolio_value"].pct_change().fillna(0); annualized_volatility = log_df["daily_return"].std() * np.sqrt(252) * 100
+    log_df["daily_return"] = log_df["portfolio_value"].pct_change().fillna(0)
+    annualized_volatility = log_df["daily_return"].std() * np.sqrt(252) * 100
     sharpe_ratio = (annualized_return / annualized_volatility) if annualized_volatility != 0 else 0
-    log_df["cumulative_max"] = log_df["portfolio_value"].cummax(); log_df["drawdown"] = (log_df["portfolio_value"] - log_df["cumulative_max"]) / log_df["cumulative_max"]
+    log_df["cumulative_max"] = log_df["portfolio_value"].cummax()
+    log_df["drawdown"] = (log_df["portfolio_value"] - log_df["cumulative_max"]) / log_df["cumulative_max"]
     max_drawdown = log_df["drawdown"].min() * 100
-    metrics = {"Initial Capital": f"${initial_capital:,.2f}", "Final Portfolio Value": f"${log_df['portfolio_value'].iloc[-1]:,.2f}",
-               "Total Return (%)": f"{total_return:.2f}%", "Annualized Return (%)": f"{annualized_return:.2f}%",
-               "Annualized Volatility (%)": f"{annualized_volatility:.2f}%", "Sharpe Ratio": f"{sharpe_ratio:.2f}",
-               "Max Drawdown (%)": f"{max_drawdown:.2f}%", "Number of Trades (approx)": f"{(log_df['signal'] != 'hold').diff().fillna(False).sum() // 2}"}
+    metrics = {
+        "Initial Capital": f"${initial_capital:,.2f}",
+        "Final Portfolio Value": f"${log_df['portfolio_value'].iloc[-1]:,.2f}",
+        "Total Return (%)": f"{total_return:.2f}%",
+        "Annualized Return (%)": f"{annualized_return:.2f}%",
+        "Annualized Volatility (%)": f"{annualized_volatility:.2f}%",
+        "Sharpe Ratio": f"{sharpe_ratio:.2f}",
+        "Max Drawdown (%)": f"{max_drawdown:.2f}%",
+        # Corrected trade count: count where signal changes from/to hold, or from buy to sell etc.
+        "Number of Trades (approx)": f"{(log_df['signal'] != log_df['signal'].shift()).fillna(False).sum() // 2}"
+    }
+    st.success(f"Backtest for {ticker} complete.")
     return metrics, log_df
 
 # --------------------------------
