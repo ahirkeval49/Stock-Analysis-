@@ -855,7 +855,7 @@ except ValueError as e: st.sidebar.error(f"LLM Init Error: {e}")
 except Exception as e: st.sidebar.error(f"LLM Unexpected Error: {e}")
 
 # Sidebar Configuration
-    st.header("⚙️ Configuration")
+st.header("⚙️ Configuration")
     app_mode = st.selectbox("Select Mode", ["Live Analysis", "Backtesting"], key="app_mode_select")
     
     if app_mode == "Live Analysis":
