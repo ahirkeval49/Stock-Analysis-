@@ -318,20 +318,39 @@ class FilingsAgent:
 
 class AnalystRatingAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        ticker_info = data.get("ticker_info", {}); price_history_df = data.get("price_history")
+        ticker_info = data.get("ticker_info", {})
+        price_history_df = data.get("price_history")
         current_price = ticker_info.get("currentPrice") or (price_history_df["Close"].iloc[-1] if price_history_df is not None and not price_history_df.empty else None)
-        target_mean_price = ticker_info.get("targetMeanPrice"); recommendation = str(ticker_info.get("recommendationKey", "hold")).lower(); upside = 0.0
+        target_mean_price = ticker_info.get("targetMeanPrice")
+        recommendation = str(ticker_info.get("recommendationKey", "hold")).lower()
+        upside = 0.0
         if target_mean_price and current_price and current_price > 0:
-            try: upside = (float(target_mean_price) / float(current_price)) - 1
-            except: upside = 0.0
+            try:
+                upside = (float(target_mean_price) / float(current_price)) - 1
+            except: # Catch any conversion/math error
+                upside = 0.0
+        
         sig = "hold"
-        if recommendation in ["buy", "strong_buy"] and upside > 0.10: sig = "buy"
-        elif recommendation == "buy" and upside > 0.05: sig = "buy"
-        elif recommendation in ["sell", "strong_sell", "underperform"] and upside < -0.05: sig = "sell"
-        elif upside > 0.20 : sig = "buy"; elif upside < -0.15 : sig = "sell"
+        if recommendation in ["buy", "strong_buy"] and upside > 0.10:
+            sig = "buy"
+        elif recommendation == "buy" and upside > 0.05:
+            sig = "buy"
+        elif recommendation in ["sell", "strong_sell", "underperform"] and upside < -0.05:
+            sig = "sell"
+        elif upside > 0.20: # This was the line with the issue start
+            sig = "buy"
+        elif upside < -0.15: # This elif must be on a new line
+            sig = "sell"
+            
         buy_pct_inferred = {"strong_buy": 0.9, "buy": 0.7, "hold": 0.5, "underperform": 0.3, "sell": 0.1}.get(recommendation, 0.5)
-        return {"ticker": ticker, "analyst_buy_pct_inferred": buy_pct_inferred, "target_upside": float(upside),
-                "yfinance_recommendation": recommendation, "analyst_signal": sig}
+        
+        return {
+            "ticker": ticker,
+            "analyst_buy_pct_inferred": buy_pct_inferred,
+            "target_upside": float(upside),
+            "yfinance_recommendation": recommendation,
+            "analyst_signal": sig,
+        }
 
 class PoliticianFilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
