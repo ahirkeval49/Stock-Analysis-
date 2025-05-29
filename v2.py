@@ -715,7 +715,10 @@ if app_mode == "Live Analysis":
                             pol_s = {"Net Trade Value Estimate (Recent)": f"${res.get('politician_net_trade_value_estimate',0):,}", "Buy/Sell Transactions": f"{res.get('politician_buy_tx_count',0)} / {res.get('politician_sell_tx_count',0)}", "Politician Filings Signal": res.get("politician_filings_signal", "N/A").upper(), "Scrape Status": "Error" if pol_scrape_error else "OK"}
                             st.dataframe(pd.Series(pol_s, name="Value"), use_container_width=True)
                             if pol_scrape_error: st.caption(f"Scraping Note: {pol_scrape_error}")
-                            if res.get("politician_trades_for_display"): with st.popover("View Scraped Politician Trades (Max 5)"): [st.markdown(f"**{p_trade.get('politician_name')}**: {p_trade.get('transaction_type')} ({p_trade.get('value_range')}) on {p_trade.get('date_str')}") for p_trade in res["politician_trades_for_display"]]
+                                
+                            if res.get("politician_trades_for_display"): 
+                             with st.popover("View Scraped Politician Trades (Max 5)"): [st.markdown(f"**{p_trade.get('politician_name')}**: {p_trade.get('transaction_type')} ({p_trade.get('value_range')}) on {p_trade.get('date_str')}") 
+                                                                                         for p_trade in res["politician_trades_for_display"]]
                     with tabs[4]:
                         st.subheader("All Agent Signals & Final Decision")
                         all_s_keys = [k for k in res if k.endswith("_signal")]; all_s_table = {k.replace("_signal","").replace("_"," ").title(): str(res[k]).upper() for k in all_s_keys}
