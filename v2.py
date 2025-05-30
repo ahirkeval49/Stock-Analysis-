@@ -101,7 +101,7 @@ def fetch_insider_filings(ticker: str) -> list[dict]:
 def fetch_fair_value_from_value_trades(ticker: str) -> dict:
     username = st.secrets.get("VT_USERNAME")
     password = st.secrets.get("VT_PASSWORD")
-    login_processing_url = "https://value-trades.com/wp-login.php"
+    login_processing_url = "https://value-trades.com/"
     stock_page_template = st.secrets.get("VT_STOCK_PAGE_URL_TEMPLATE")
 
     if not all([username, password, stock_page_template]):
