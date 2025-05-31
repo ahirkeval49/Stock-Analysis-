@@ -53,8 +53,8 @@ def fetch_ticker_info(ticker: str) -> dict:
             "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"),
             "industry": info.get("industry"),
             "sector": info.get("sector"),
-            "longName": info.get("longName"), # Added for fetch_enriched_news
-            "shortName": info.get("shortName"), # Added for fetch_enriched_news
+            "longName": info.get("longName"),
+            "shortName": info.get("shortName"),
             "longBusinessSummary": info.get("longBusinessSummary"),
             "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
         }
@@ -62,20 +62,15 @@ def fetch_ticker_info(ticker: str) -> dict:
         return {}
 
 @st.cache_data
-def fetch_enriched_news(ticker: str) -> list[dict]: # Renamed from fetch_news
+def fetch_enriched_news(ticker: str) -> list[dict]:
     """
     Fetches news for a ticker and enriches it with company name,
     formatted publish time, and the ticker symbol itself.
     """
     try:
         ticker_obj = yf.Ticker(ticker)
-        
-        # Get company name from info, which should be fetched once and passed if possible,
-        # but for standalone cacheable function, fetching it here.
-        # For optimization, ticker_info could be an argument.
-        info_data = ticker_obj.info # Consider if this should be from a shared fetch_ticker_info call
+        info_data = ticker_obj.info
         company_name = info_data.get('longName', info_data.get('shortName', ticker))
-        
         raw_news = ticker_obj.news
         enriched_news_list = []
 
@@ -86,7 +81,6 @@ def fetch_enriched_news(ticker: str) -> list[dict]: # Renamed from fetch_news
             enriched_item = news_item.copy()
             enriched_item['ticker'] = ticker
             enriched_item['company_name'] = company_name
-            
             if 'providerPublishTime' in news_item:
                 try:
                     timestamp = int(news_item['providerPublishTime'])
@@ -97,13 +91,11 @@ def fetch_enriched_news(ticker: str) -> list[dict]: # Renamed from fetch_news
                     enriched_item['publish_datetime_utc'] = None
                     enriched_item['publish_time_readable'] = "N/A"
                     enriched_item['publish_time_error'] = str(e)
-            
             enriched_item.setdefault('title', 'No Title')
             enriched_item.setdefault('publisher', 'N/A')
             enriched_item.setdefault('link', '#')
             enriched_item.setdefault('type', 'N/A')
             enriched_news_list.append(enriched_item)
-            
         enriched_news_list.sort(key=lambda x: x.get('publish_datetime_utc', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
         return enriched_news_list
     except Exception as e:
@@ -141,52 +133,74 @@ def fetch_insider_filings(ticker: str) -> list[dict]:
         return []
 
 @st.cache_data(ttl=3600)
-def fetch_fair_value_from_value_trades(ticker: str) -> dict:
-    username = st.secrets.get("VT_USERNAME")
-    password = st.secrets.get("VT_PASSWORD")
-    login_processing_url = "https://value-trades.com/wp-login.php"
-    stock_page_template = st.secrets.get("VT_STOCK_PAGE_URL_TEMPLATE")
-
-    if not all([username, password, stock_page_template]):
-        return {"error": "VT Configuration incomplete in secrets.", "vt_fair_value": None}
+def fetch_fair_value_from_value_trades(ticker: str) -> dict: # Removed company_name_from_yfinance, not used in this version
+    search_url_template = "https://value-trades.com/?s={query}"
+    search_query = ticker.upper()
+    search_url = search_url_template.format(query=search_query)
 
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     })
-    login_payload = {'log': username, 'pwd': password, 'wp-submit': 'Log In',
-                     'redirect_to': stock_page_template.format(ticker=ticker.lower()), 'testcookie': '1'}
+    stock_page_url = None
     try:
-        response_login = session.post(login_processing_url, data=login_payload, allow_redirects=True)
-        response_login.raise_for_status()
-        stock_page_url = stock_page_template.format(ticker=ticker.lower())
-        if response_login.url.strip('/') != stock_page_url.strip('/'):
-            response_data_page = session.get(stock_page_url)
+        response_search = session.get(search_url, timeout=15, allow_redirects=True)
+        response_search.raise_for_status()
+        soup_search = BeautifulSoup(response_search.content, 'html.parser')
+        first_result_link_tag = soup_search.find('h2', class_='entry-title')
+        if first_result_link_tag and first_result_link_tag.find('a'):
+            stock_page_url = first_result_link_tag.find('a')['href']
         else:
-            response_data_page = response_login
-        response_data_page.raise_for_status()
+            article_tag = soup_search.find('article')
+            if article_tag and article_tag.find('a', href=True):
+                 stock_page_url = article_tag.find('a')['href']
+        if not stock_page_url:
+            return {"error": f"VT: Could not find stock page link for {ticker} from search.", "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
 
-        if "wp-login.php" in response_data_page.url and "loggedout=true" not in response_data_page.url:
-            return {"error": f"VT Login failed or bad redirect for {ticker} (URL: {response_data_page.url}).", "vt_fair_value": None}
+        response_stock_page = session.get(stock_page_url, timeout=15)
+        response_stock_page.raise_for_status()
+        soup_stock_page = BeautifulSoup(response_stock_page.content, 'html.parser')
 
-        soup_data_page = BeautifulSoup(response_data_page.content, 'html.parser')
-        fair_value = None
-        potential_fv_tags = soup_data_page.find_all(string=re.compile(r"Fair Value Estimate", re.IGNORECASE))
-        if potential_fv_tags:
-            for tag_label in potential_fv_tags:
-                parent_with_value = tag_label.find_parent("td") or tag_label.find_parent("div")
-                if parent_with_value:
-                    value_tag = parent_with_value.find_next_sibling("td") # More specific
-                    if value_tag:
-                        fv_text_match = re.search(r'\$?(\d{1,3}(?:,\d{3})*\.\d{2})', value_tag.text)
-                        if fv_text_match:
-                            fair_value = float(fv_text_match.group(1).replace(',', ''))
-                            break
-        return {"vt_fair_value": fair_value, "error": None if fair_value else f"VT: FV not found on page for {ticker}."}
+        page_text_elements = soup_stock_page.find_all('p')
+        full_valuation_text = None; fair_value = None; site_current_price = None
+        valuation_status = None; valuation_percentage = None
+
+        for p_tag in page_text_elements:
+            text_content = p_tag.get_text(separator=" ", strip=True)
+            ticker_pattern = re.escape(ticker.upper())
+            pattern_str = rf"The\s+fair\s+value\s+of\s+(?:.+?)\s*\({ticker_pattern}\)\s*is\s*\$([\d,]+\.?\d*)\s*\.\s*The\s+current\s+price\s*\(\s*\$([\d,]+\.?\d*)\s*\)\s*indicates\s+stock\s+is\s*(overvalued|undervalued)\s+by\s*([\d\.,]+)%"
+            match = re.search(pattern_str, text_content, re.IGNORECASE)
+            if match:
+                full_valuation_text = match.group(0)
+                try:
+                    fair_value = float(match.group(1).replace(',', ''))
+                    site_current_price = float(match.group(2).replace(',', ''))
+                    valuation_status = match.group(3).lower()
+                    valuation_percentage = float(match.group(4).replace(',', ''))
+                    break
+                except ValueError:
+                    return {"error": f"VT: Found valuation sentence for {ticker} but failed to parse numbers.", "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": text_content}
+        if fair_value is not None:
+            return {"vt_fair_value": fair_value, "vt_current_price": site_current_price,
+                    "vt_valuation_status": valuation_status, "vt_valuation_percentage": valuation_percentage,
+                    "vt_valuation_text": full_valuation_text, "error": None}
+        else: # Fallback if specific sentence not found
+            potential_fv_tags_fallback = soup_stock_page.find_all(string=re.compile(r"Fair Value Estimate", re.IGNORECASE))
+            if potential_fv_tags_fallback:
+                 for tag_label in potential_fv_tags_fallback:
+                    parent_with_value = tag_label.find_parent("td") or tag_label.find_parent("div")
+                    if parent_with_value:
+                        value_tag = parent_with_value.find_next_sibling("td")
+                        if value_tag:
+                            fv_text_match = re.search(r'\$?(\d{1,3}(?:,\d{3})*\.\d{2})', value_tag.text)
+                            if fv_text_match:
+                                fair_value = float(fv_text_match.group(1).replace(',', ''))
+                                return {"vt_fair_value": fair_value, "error": "VT: Found FV by fallback method.", "vt_current_price": None, "vt_valuation_text": value_tag.text.strip()}
+            return {"error": f"VT: Specific fair value sentence not found for {ticker}.", "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
     except requests.exceptions.HTTPError as http_err:
-        return {"error": f"VT HTTP error for {ticker}: {http_err}", "vt_fair_value": None}
+        return {"error": f"VT HTTP error for {ticker}: {http_err}", "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
     except Exception as e:
-        return {"error": f"VT Unexpected error for {ticker}: {e}", "vt_fair_value": None}
+        return {"error": f"VT Unexpected error for {ticker}: {e}", "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
     finally:
         if 'session' in locals() and session: session.close()
 
@@ -205,10 +219,7 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         trade_rows = soup.find_all('a', href=lambda href: href and href.startswith('/trades/'))
-
-        if not trade_rows:
-            return []
-
+        if not trade_rows: return []
         for row_link_tag in trade_rows:
             politician_name_tag = row_link_tag.find('div', class_=lambda x: x and 'politician-name' in x)
             tx_type_tag = row_link_tag.find('div', class_=lambda x: x and 'tx-type' in x)
@@ -245,7 +256,6 @@ class ModelClient:
         self.provider = provider
         if not api_key:
             raise ValueError("API key required.")
-
         openai.api_key = self.api_key
         if provider == "deepseek":
             openai.api_base = "https://api.deepseek.com/v1"
@@ -305,8 +315,7 @@ class VolatilityAgent:
         beta = data.get("ticker_info", {}).get("beta", 1.0)
         if beta is None: beta = 1.0
         sig  = "sell" if beta > 1.5 else ("buy" if beta < 0.8 else "hold")
-        ann_vol = np.nan
-        weight = 0.0
+        ann_vol = np.nan; weight = 0.0
         if price_data_slice is not None and not price_data_slice.empty and len(price_data_slice) > 1:
             ret = np.log(price_data_slice.Close / price_data_slice.Close.shift(1)).dropna()
             if not ret.empty:
@@ -323,12 +332,12 @@ class SentimentAgent:
                     "sentiment_error": enriched_news_items[0].get("error") if enriched_news_items and isinstance(enriched_news_items, list) and enriched_news_items[0] else "No news items found."}
 
         headlines_with_context = []
-        company_name_overall = ticker # Default
-        if enriched_news_items and isinstance(enriched_news_items, list) and enriched_news_items[0] and "company_name" in enriched_news_items[0]:
+        company_name_overall = ticker
+        if enriched_news_items and isinstance(enriched_news_items, list) and len(enriched_news_items) > 0 and isinstance(enriched_news_items[0], dict) and "company_name" in enriched_news_items[0]:
             company_name_overall = enriched_news_items[0].get("company_name", ticker)
 
         for item in enriched_news_items[:10]:
-            if isinstance(item, dict): # Ensure item is a dictionary
+            if isinstance(item, dict):
                 title = item.get('title', 'No Title')
                 publisher = item.get('publisher', 'N/A')
                 company_name = item.get('company_name', ticker)
@@ -375,23 +384,18 @@ class ValuationAgent:
         price_history_df = data.get("price_history")
         price = stats.get("currentPrice") or (price_history_df["Close"].iloc[-1] if price_history_df is not None and not price_history_df.empty else None)
         if price is None: return {"ticker": ticker, "forward_pe": None, "relative_pe_signal": "hold", "dcf_fair_price": np.nan, "dcf_signal": "hold"}
-        pe = stats.get("forwardPE")
-        rel_sig = "hold"
-        if pe is not None:
-            rel_sig = "buy" if pe < 15 else "sell" if pe > 25 else "hold"
-        fcf = stats.get("freeCashflow")
-        mcap = stats.get("marketCap")
+        pe = stats.get("forwardPE"); rel_sig = "hold";
+        if pe is not None: rel_sig = "buy" if pe < 15 else "sell" if pe > 25 else "hold"
+        fcf = stats.get("freeCashflow"); mcap = stats.get("marketCap")
         fcy = (fcf / mcap) if fcf is not None and mcap is not None and mcap != 0 else 0.0
-        fair_price = price * (1 + fcy)
-        dcf_sig = "hold"
+        fair_price = price * (1 + fcy); dcf_sig = "hold"
         if fair_price > price * 1.15: dcf_sig = "buy"
         elif fair_price < price * 0.85: dcf_sig = "sell"
         return {"ticker": ticker, "forward_pe": pe, "relative_pe_signal": rel_sig, "dcf_fair_price": float(fair_price), "dcf_signal": dcf_sig}
 
 class FilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        insiders = data.get("insider_filings",[])
-        net_shares = 0
+        insiders = data.get("insider_filings",[]); net_shares = 0
         if insiders:
             for r in insiders:
                 shares_val = r.get("Shares",0)
@@ -431,7 +435,7 @@ class PoliticianFilingsAgent:
             error = trades[0]["error"]
         elif trades:
             for trade in trades:
-                if isinstance(trade, dict): # Ensure trade is a dict before get
+                if isinstance(trade, dict):
                     value = trade.get("value_estimate_lower", 0)
                     if trade.get("transaction_type") == "purchase": net_value_estimate += value; buy_count +=1
                     elif trade.get("transaction_type") == "sale": net_value_estimate -= value; sell_count +=1
@@ -453,11 +457,16 @@ class FairValueAgentVT:
         if current_price is None and data.get("price_history") is not None and not data["price_history"].empty:
             current_price = data["price_history"]["Close"].iloc[-1]
         signal = "hold"; margin_of_safety = 0.20
-        if error and error not in ["FV not found on page.", "VT Configuration incomplete in secrets.", "VT: Skipped by user config."]: pass # Error logged by fetcher
+        if error and error not in ["FV not found on page.", "VT Configuration incomplete in secrets.", "VT: Skipped by user config."]: pass
         elif fair_value is not None and current_price is not None and current_price > 0:
             if current_price < fair_value * (1 - margin_of_safety): signal = "buy"
             elif current_price > fair_value * (1 + margin_of_safety): signal = "sell"
-        return {"ticker": ticker, "vt_fair_value_estimate": fair_value, "vt_fair_value_signal": signal, "vt_data_error": error}
+        return {"ticker": ticker, "vt_fair_value_estimate": fair_value, "vt_fair_value_signal": signal, "vt_data_error": error,
+                "vt_site_current_price": vt_data.get("vt_current_price"), # Pass these through
+                "vt_valuation_status": vt_data.get("vt_valuation_status"),
+                "vt_valuation_percentage": vt_data.get("vt_valuation_percentage"),
+                "vt_valuation_text_display": vt_data.get("vt_valuation_text")}
+
 
 class PortfolioAgent:
     WEIGHTS = {
@@ -494,19 +503,18 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
         if price_history_full.empty:
             results[t] = {"error": f"Failed to fetch price history for {t}.", "ticker": t, "final_decision":"error", "composite_score":0}
             continue
-        ticker_info = fetch_ticker_info(t) # Fetches multiple fields including names
+        ticker_info = fetch_ticker_info(t)
         if not ticker_info:
             results[t] = {"error": f"Failed to fetch ticker info for {t}.", "ticker": t, "final_decision":"error", "composite_score":0}
             continue
 
         current_price_for_ticker = ticker_info.get("currentPrice") or (price_history_full["Close"].iloc[-1] if not price_history_full.empty else None)
         
-        # news_data_list already uses ticker_info.get('longName') via fetch_enriched_news if needed.
-        news_data_list = fetch_enriched_news(t) if configs["use_sentiment"] else [] # Changed from fetch_news
+        news_data_list = fetch_enriched_news(t) if configs["use_sentiment"] else []
         politician_trades_list = fetch_politician_trades(t) if configs["use_politician_filings"] else []
         
         data_bundle = {
-            "price_history": price_history_full, "ticker_info": ticker_info, # ticker_info is now more comprehensive
+            "price_history": price_history_full, "ticker_info": ticker_info,
             "news": news_data_list,
             "insider_filings": fetch_insider_filings(t) if configs["use_filings"] else [],
             "politician_trades": politician_trades_list,
@@ -540,9 +548,9 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             "market_cap_display": ticker_info.get("marketCap"),
             "industry_display": ticker_info.get("industry"),
             "sector_display": ticker_info.get("sector"),
-            "ticker_info": ticker_info, # Pass through the full ticker_info
-            "news_headlines_for_popover": [n.get('title', 'N/A') for n in news_data_list[:5] if isinstance(n,dict)], # Ensure n is dict
-            "politician_trades_for_popover": [pt for pt in politician_trades_list[:5] if isinstance(pt, dict) and "error" not in pt] # Ensure pt is dict and not an error placeholder
+            "ticker_info": ticker_info, 
+            "news_headlines_for_popover": [n.get('title', 'N/A') for n in news_data_list[:5] if isinstance(n,dict)],
+            "politician_trades_for_popover": [pt for pt in politician_trades_list[:5] if isinstance(pt, dict) and "error" not in pt]
         }
         for res_dict in agent_results_list:
             if isinstance(res_dict, dict):
@@ -643,7 +651,7 @@ with config_container:
             use_filings_live_main = st.checkbox("Insider Filings", value=True, key="live_insider_cb_main", help="Analyzes yfinance insider transaction data.")
         with cols_features[1]:
             use_politician_filings_main = st.checkbox("Politician Filings", value=False, key="live_politician_cb_main", help="EXPERIMENTAL: Attempts to scrape CapitolTrades.com. May be slow/unreliable.")
-            use_value_trades_main = st.checkbox("Value-Trades Fair Value", value=False, key="live_vt_cb_main", help="EXPERIMENTAL: Attempts login to Value-Trades.com. Requires VT_ secrets. CHECK ToS!")
+            use_value_trades_main = st.checkbox("Value-Trades Fair Value", value=False, key="live_vt_cb_main", help="EXPERIMENTAL: Scrapes public Value-Trades.com data. CHECK ToS!") # Updated help text
         st.markdown("")
         run_button_live_main = st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_btn_main")
 
@@ -736,10 +744,25 @@ if app_mode == "Live Analysis":
                         val_s = {"Forward P/E": f"{res.get('forward_pe',0):.1f}", "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(), "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A", "DCF Signal": res.get('dcf_signal', "N/A").upper()}
                         st.dataframe(pd.Series(val_s, name="Value"), use_container_width=True)
                         if live_configs_main["use_value_trades"]:
-                            st.subheader("Value-Trades.com Fair Value (Experimental)")
-                            vt_scrape_status = res.get('vt_data_error') if res.get('vt_data_error') else "Success (or FV not on page)"
-                            if "VT Configuration incomplete" in str(vt_scrape_status) or "Skipped by user" in str(vt_scrape_status) : vt_scrape_status = "Not Attempted (Check Config/Secrets)"
-                            vt_s = {"VT Scraped Fair Value": f"${res.get('vt_fair_value_estimate',0):.2f}" if res.get('vt_fair_value_estimate') is not None else "N/A", "VT Fair Value Signal": res.get('vt_fair_value_signal', "N/A").upper(), "VT Scrape Status": vt_scrape_status }
+                            st.subheader("Value-Trades.com Analysis (Experimental)") # Changed header
+                            vt_scrape_status = res.get('vt_data_error') if res.get('vt_data_error') else "Success"
+                            if res.get('vt_fair_value_estimate') is None and not res.get('vt_data_error'): # No value but no error = not found
+                                vt_scrape_status = "Data not found on page"
+                            elif "VT Configuration incomplete" in str(vt_scrape_status) or "Skipped by user" in str(vt_scrape_status) : 
+                                vt_scrape_status = "Not Attempted (Check Config/Secrets)"
+                            
+                            vt_full_text_display = res.get('vt_valuation_text_display')
+                            if vt_full_text_display:
+                                st.markdown(f"""> *"{vt_full_text_display}"*""") # Display the sentence
+
+                            vt_s = {
+                                "VT Scraped Fair Value": f"${res.get('vt_fair_value_estimate'):.2f}" if res.get('vt_fair_value_estimate') is not None else "N/A",
+                                "VT Site Current Price": f"${res.get('vt_site_current_price'):.2f}" if res.get('vt_site_current_price') is not None else "N/A",
+                                "VT Site Valuation Status": str(res.get('vt_valuation_status', "N/A")).title(),
+                                "VT Site Valuation (%)": f"{res.get('vt_valuation_percentage'):.2f}%" if res.get('vt_valuation_percentage') is not None else "N/A",
+                                "VT Fair Value Signal": res.get('vt_fair_value_signal', "N/A").upper(),
+                                "VT Scrape Status": vt_scrape_status
+                            }
                             st.dataframe(pd.Series(vt_s, name="Value"), use_container_width=True)
                     with tabs[3]: # News & Filings Tab
                         if live_configs_main["use_sentiment"]:
