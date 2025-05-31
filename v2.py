@@ -60,12 +60,138 @@ def fetch_ticker_info(ticker: str) -> dict:
         return {}
 
 @st.cache_data
-def fetch_news(ticker: str) -> list[dict]:
+def fetch_enriched_news(ticker: str) -> list[dict]:
+    """
+    Fetches news for a ticker and enriches it with company name,
+    formatted publish time, and the ticker symbol itself.
+    """
     try:
-        news = yf.Ticker(ticker).news
-        return news or []
+        ticker_obj = yf.Ticker(ticker)
+        
+        # Get company name
+        company_name = ticker_obj.info.get('longName', ticker_obj.info.get('shortName', ticker)) # Get longName, fallback to shortName, then ticker
+        
+        raw_news = ticker_obj.news
+        enriched_news_list = []
+
+        if not raw_news:
+            return []
+
+        for news_item in raw_news:
+            enriched_item = news_item.copy() # Start with existing data
+            
+            enriched_item['ticker'] = ticker
+            enriched_item['company_name'] = company_name
+            
+            # Convert providerPublishTime to datetime object and readable string
+            if 'providerPublishTime' in news_item:
+                try:
+                    timestamp = int(news_item['providerPublishTime'])
+                    # Create a timezone-aware datetime object (UTC)
+                    dt_object_utc = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                    enriched_item['publish_datetime_utc'] = dt_object_utc
+                    # Format as a readable string (adjust format as needed)
+                    # Example: "2023-05-30 14:35:00 UTC"
+                    enriched_item['publish_time_readable'] = dt_object_utc.strftime('%Y-%m-%d %H:%M:%S %Z')
+                except (ValueError, TypeError, OSError) as e: # Handle potential errors with timestamp
+                    enriched_item['publish_datetime_utc'] = None
+                    enriched_item['publish_time_readable'] = "N/A"
+                    enriched_item['publish_time_error'] = str(e)
+            
+            # Ensure basic fields are present, even if None
+            enriched_item.setdefault('title', 'No Title')
+            enriched_item.setdefault('publisher', 'N/A')
+            enriched_item.setdefault('link', '#')
+            enriched_item.setdefault('type', 'N/A')
+            
+            enriched_news_list.append(enriched_item)
+            
+        # Optionally, sort by most recent first if not already
+        enriched_news_list.sort(key=lambda x: x.get('publish_datetime_utc', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+        
+        return enriched_news_list
+        
     except Exception as e:
-        return []
+        # st.error(f"Error fetching or enriching news for {ticker}: {e}") # Keep error handling silent for now
+        return [{"error": f"Failed to fetch/enrich news for {ticker}: {e}"}] # Return error in data
+
+# You would replace the old `fetch_news` call in `run_live_analysis`
+# with `fetch_enriched_news`.
+
+# Example of how you might use this in `run_live_analysis` or `SentimentAgent`:
+
+class SentimentAgent:
+    def __init__(self, client):
+        self.client = client
+
+    def run(self, ticker: str, data: dict) -> dict: # data now contains enriched news
+        # 'news' key in data_bundle should now come from fetch_enriched_news
+        enriched_news_items = data.get("news", []) 
+        
+        if not enriched_news_items or ("error" in enriched_news_items[0] if enriched_news_items else False):
+            return {
+                "ticker": ticker, 
+                "sentiment_score": 0.0, 
+                "sentiment_signal": "hold", 
+                "sentiment_error": enriched_news_items[0].get("error") if enriched_news_items else "No news items found."
+            }
+
+        # Consider only recent news, e.g., last 7 days (optional, depends on your strategy)
+        # recent_news = [
+        #    item for item in enriched_news_items 
+        #    if item.get('publish_datetime_utc') and 
+        #       (datetime.now(timezone.utc) - item.get('publish_datetime_utc')) < timedelta(days=7)
+        # ]
+        # Use recent_news or enriched_news_items[:10] (top N most recent)
+
+        headlines_with_context = []
+        for item in enriched_news_items[:10]: # Limit to N most recent for LLM prompt
+            title = item.get('title', 'No Title')
+            publisher = item.get('publisher', 'N/A')
+            company_name = item.get('company_name', ticker) # Use company name if available
+            # You could add more context like: "News from {publisher} about {company_name}: {title}"
+            headlines_with_context.append(f"From {publisher} about {company_name}: {title}")
+
+        if not headlines_with_context:
+            return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": "No relevant headlines after processing."}
+        
+        prompt = (
+            f"Analyze the sentiment of the following news headlines regarding {company_name} ({ticker}). "
+            f"Provide a single floating-point sentiment score between -1.0 (very negative) and +1.0 (very positive). "
+            f"Consider the source and content. Output only the number.\n\nHeadlines:\n"
+            + "\n".join(f"- {h}" for h in headlines_with_context)
+        )
+        
+        score = 0.0
+        error_msg = None
+        try:
+            response = self.client.generate(prompt).strip()
+            if response.startswith("Error:"): 
+                error_msg = response
+            else: 
+                # Try to parse, even if there's extra text
+                match = re.search(r"[-+]?\d*\.\d+|\d+", response) # Look for a float or int
+                if match:
+                    score = float(match.group(0))
+                else:
+                    error_msg = "LLM did not return a parsable number."
+        except Exception as e: 
+            error_msg = str(e)[:150]
+            
+        # Clamp score to [-1, 1] just in case
+        score = max(-1.0, min(1.0, score))
+
+        sig = "buy" if score > 0.25 else ("sell" if score < -0.25 else "hold")
+        return {"ticker": ticker, "sentiment_score": score, "sentiment_signal": sig, "sentiment_error": error_msg}
+
+# In your `run_live_analysis` function, change:
+# news_data_list = fetch_news(t) if configs["use_sentiment"] else []
+# TO:
+# news_data_list = fetch_enriched_news(t) if configs["use_sentiment"] else []
+
+# And ensure the 'news_headlines_for_popover' in run_live_analysis uses the enriched data:
+# "news_headlines_for_popover": [f"{n.get('publish_time_readable', '')} - {n.get('title', '')} ({n.get('publisher', '')})" for n in news_data_list[:5]],
+
 
 @st.cache_data
 def fetch_inst_filings(ticker: str) -> list[dict]:
