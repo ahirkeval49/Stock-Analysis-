@@ -134,7 +134,7 @@ def fetch_insider_filings(ticker: str) -> list[dict]:
 
 @st.cache_data(ttl=3600)
 def fetch_fair_value_from_value_trades(ticker: str) -> dict: # Removed company_name_from_yfinance, not used in this version
-    search_url_template = "https://value-trades.com/?s={query}"
+    search_url_template = "https://value-trades.com/"
     search_query = ticker.upper()
     search_url = search_url_template.format(query=search_query)
 
