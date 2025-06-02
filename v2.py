@@ -133,124 +133,95 @@ def fetch_insider_filings(ticker: str) -> list[dict]:
     except Exception as e:
         return []
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600) # Cache for an hour
 def fetch_fair_value_from_value_trades(ticker: str) -> dict:
+    """
+    Attempts to fetch fair value information for a ticker from value-trades.com
+    by searching for the ticker and parsing the resulting page.
+    This version does NOT use login.
+    """
+    # The search URL for value-trades.com
     search_url_template = "https://value-trades.com/?s={query}"
     search_query = ticker.upper()
-    initial_search_url = search_url_template.format(query=search_query)
+    search_url = search_url_template.format(query=search_query)
 
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36' # Updated UA
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36'
     })
 
-    stock_page_url = None
-    soup_stock_page = None
-
     try:
-        response_search = session.get(initial_search_url, timeout=20, allow_redirects=True)
-        response_search.raise_for_status()
-        final_search_url = response_search.url
-        soup_after_search = BeautifulSoup(response_search.content, 'html.parser')
-
-        # Attempt to find the direct stock page link from search results
-        # This part is VERY site-specific and likely needs adjustment based on actual HTML
-        # Scenario 1: Direct redirect (common for exact ticker match)
-        if "/stock/" in final_search_url.lower() and ticker.lower() in final_search_url.lower().replace('-', ''): # aарl-apple-inc
-            stock_page_url = final_search_url
-            soup_stock_page = soup_after_search
-        else: # Scenario 2: Parse search results page
-            # Try common WordPress patterns for the main result link
-            # This requires inspecting value-trades.com's search result HTML
-            link_tag = None
-            # Check for <article> -> <h3> -> <a>
-            articles = soup_after_search.find_all('article', limit=3) # Check first few articles
-            for article in articles:
-                header = article.find(['h1','h2','h3'], class_='entry-title') # Common class for titles
-                if header and header.find('a', href=True):
-                    # Check if the link text or href strongly implies it's for the correct ticker
-                    a = header.find('a')
-                    link_text = a.get_text(strip=True).lower()
-                    href_val = a['href'].lower()
-                    if ticker.lower() in link_text or ticker.lower() in href_val:
-                        link_tag = a
-                        break
-            
-            if link_tag:
-                stock_page_url = link_tag['href']
-                if not stock_page_url.startswith('http'):
-                    stock_page_url = urljoin(final_search_url, stock_page_url)
-            else:
-                return {"error": f"VT: Could not identify stock page link for '{ticker}' from search results. Please check site structure.",
-                        "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
-
-            response_stock_page_nav = session.get(stock_page_url, timeout=15)
-            response_stock_page_nav.raise_for_status()
-            soup_stock_page = BeautifulSoup(response_stock_page_nav.content, 'html.parser')
-
-        if soup_stock_page is None:
-             return {"error": f"VT: Failed to obtain HTML content for {ticker}'s stock page.",
-                     "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
-
-        # --- Revised parsing based on your screenshot indicating it might be a "heading" ---
-        # We will search broadly in common text containers.
-        # The regex is designed to find the specific sentence structure.
+        # 1. Make the search request. Allow redirects as the search might redirect to the stock page.
+        response_page = session.get(search_url, timeout=20, allow_redirects=True)
+        response_page.raise_for_status()
         
-        full_valuation_text = None; fair_value = None; site_current_price = None
-        valuation_status = None; valuation_percentage = None
+        # The URL we landed on after search and any redirects
+        final_url_after_search = response_page.url
+        soup_page_content = BeautifulSoup(response_page.content, 'html.parser')
+
+        # 2. Parse the specific sentence from the page content
+        # The screenshot suggests the text might be a "heading" or "StaticText"
+        # We will search common text-containing tags.
+        tags_to_search = soup_page_content.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'span', 'article', 'section'])
         
-        # Target sentence: "The fair value of Apple Inc (AAPL) is $179. The current price ($200.85) indicates stock is overvalued by 12.21%."
+        full_valuation_text = None
+        fair_value = None
+        site_current_price = None
+        valuation_status = None
+        valuation_percentage = None
+
         ticker_pattern = re.escape(ticker.upper())
         # Regex: "The fair value of (any characters for name) (TICKER) is $(digits/commas/dot). The current price ($(digits/commas/dot)) indicates stock is (overvalued|undervalued) by (digits/commas/dot)%."
         pattern_str = rf"The\s+fair\s+value\s+of\s+(.+?)\s*\({ticker_pattern}\)\s*is\s*\$([\d,]+\.?\d*)\.\s*The\s+current\s+price\s*\(\s*\$([\d,]+\.?\d*)\s*\)\s*indicates\s+stock\s+is\s*(overvalued|undervalued)\s+by\s*([\d\.,]+)%"
-
-        # Search within the main content area if possible, otherwise search all text.
-        # Often content is in a <div class="entry-content"> or <main> or <article>
-        main_content = soup_stock_page.find(class_="entry-content") or \
-                       soup_stock_page.find("article") or \
-                       soup_stock_page.find("main")
         
-        search_area_text = ""
-        if main_content:
-            search_area_text = main_content.get_text(separator=" ", strip=True)
-        else: # Fallback to all visible text if specific content area not found
-            search_area_text = soup_stock_page.get_text(separator=" ", strip=True)
-
-        match = re.search(pattern_str, search_area_text, re.IGNORECASE)
+        found_sentence = False
+        for tag in tags_to_search:
+            # Using .get_text(separator=' ', strip=True) helps join text spread across sub-tags
+            text_content = tag.get_text(separator=" ", strip=True)
+            match = re.search(pattern_str, text_content, re.IGNORECASE)
+            if match:
+                full_valuation_text = match.group(0) # The whole matched sentence
+                try:
+                    # Group 1: Company Name (captured by (.+?)) - We don't strictly need it if regex works
+                    # Group 2: Fair Value
+                    fair_value = float(match.group(2).replace(',', ''))
+                    # Group 3: Current Price
+                    site_current_price = float(match.group(3).replace(',', ''))
+                    # Group 4: Valuation Status (overvalued/undervalued)
+                    valuation_status = match.group(4).lower()
+                    # Group 5: Valuation Percentage
+                    valuation_percentage = float(match.group(5).replace(',', ''))
+                    found_sentence = True
+                    break # Found it
+                except ValueError as ve: # Error parsing the numbers
+                    return {"error": f"VT: Found valuation sentence for {ticker} but failed to parse numbers: '{full_valuation_text}'. Parse error: {ve}",
+                            "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": full_valuation_text} # return the text that failed
         
-        if match:
-            full_valuation_text = match.group(0) # The whole matched sentence
-            # company_name_on_site = match.group(1).strip() # Extracted company name
-            try:
-                fair_value = float(match.group(2).replace(',', '')) # Group 2 for fair value
-                site_current_price = float(match.group(3).replace(',', '')) # Group 3 for current price
-                valuation_status = match.group(4).lower() # Group 4 for status
-                valuation_percentage = float(match.group(5).replace(',', '')) # Group 5 for percentage
-            except ValueError as ve:
-                return {"error": f"VT: Found valuation sentence for {ticker} but failed to parse numbers: '{full_valuation_text}'. Parse error: {ve}",
-                        "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": full_valuation_text}
-        
-        if fair_value is not None:
+        if found_sentence:
             return {
                 "vt_fair_value": fair_value,
                 "vt_current_price": site_current_price,
                 "vt_valuation_status": valuation_status,
                 "vt_valuation_percentage": valuation_percentage,
-                "vt_valuation_text": full_valuation_text,
+                "vt_valuation_text": full_valuation_text, 
                 "error": None
             }
         else:
-            return {"error": f"VT: Specific fair value sentence not found for {ticker} on page {stock_page_url if stock_page_url else 'unknown'}.",
+            # For debugging, you might want to see what text IS being found:
+            # all_text_on_page = soup_page_content.get_text(separator=" ", strip=True)
+            # print(f"VT DEBUG: Could not find sentence for {ticker}. Page text sample: {all_text_on_page[:1000]}")
+            return {"error": f"VT: Specific fair value sentence not found for {ticker} on page {final_url_after_search}. Regex might need adjustment or content is dynamic.",
                     "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
 
     except requests.exceptions.Timeout:
-        return {"error": f"VT: Timeout while trying to reach {initial_search_url or stock_page_url}", "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
+        return {"error": f"VT: Timeout while trying to reach {search_url}", "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
     except requests.exceptions.HTTPError as http_err:
-        return {"error": f"VT HTTP error for {ticker}: {http_err}", "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
+        return {"error": f"VT HTTP error for {ticker}: {http_err} (URL: {getattr(http_err.request, 'url', search_url)})", 
+                "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
     except requests.exceptions.RequestException as req_err:
         return {"error": f"VT Request error for {ticker}: {req_err}", "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
     except Exception as e:
-        # import traceback # For detailed debugging
+        # import traceback # For detailed debugging during development
         # print(traceback.format_exc())
         return {"error": f"VT Unexpected error for {ticker}: {e}", "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
     finally:
