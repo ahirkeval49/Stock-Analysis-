@@ -141,7 +141,7 @@ def fetch_fair_value_from_value_trades(ticker: str) -> dict:
     This version does NOT use login.
     """
     # The search URL for value-trades.com
-    search_url_template = "https://value-trades.com/?s={query}"
+    search_url_template = "https://value-trades.com/"
     search_query = ticker.upper()
     search_url = search_url_template.format(query=search_query)
 
