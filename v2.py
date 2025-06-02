@@ -134,75 +134,100 @@ def fetch_insider_filings(ticker: str) -> list[dict]:
         return []
 
 @st.cache_data(ttl=3600)
-def fetch_vt_via_main_search(ticker: str) -> dict:
+def fetch_vt_via_search_php_endpoint(ticker: str) -> dict:
     """
-    OPTION 1: Attempts to fetch fair value from value-trades.com by using their main search
-    (e.g., /?s=TICKER) and then trying to navigate to/parse the stock page.
+    OPTION 2: Attempts to fetch fair value by directly calling the search.php (or similar)
+    endpoint that the website's JavaScript uses.
+    *** USER ACTION REQUIRED: You must inspect your browser's Network tab to find:
+        1. ACTUAL_SEARCH_PHP_URL: The full URL path to search.php (e.g., "https://value-trades.com/wp-admin/admin-ajax.php" or "https://value-trades.com/search.php")
+        2. REQUEST_METHOD: "GET" or "POST"
+        3. PARAMS_OR_DATA_FOR_SEARCH_PHP: A dictionary of parameters (for GET) or data (for POST)
+           that includes the ticker. Common keys: 's', 'query', 'term', 'action' (for WordPress AJAX).
     """
-    search_url_template = "https://value-trades.com/?s={query}"
-    search_query = ticker.upper()
-    initial_search_url = search_url_template.format(query=search_query)
+    # ---- USER: CONFIGURE THESE BASED ON YOUR NETWORK TAB INSPECTION ----
+    ACTUAL_SEARCH_PHP_URL = st.secrets.get("VT_SEARCH_PHP_URL") # e.g., "https://value-trades.com/search.php" or "https://value-trades.com/wp-admin/admin-ajax.php"
+    REQUEST_METHOD = st.secrets.get("VT_SEARCH_PHP_METHOD", "GET").upper() # Default to GET, user can set to POST
+    # Parameters for search.php. Keys depend on what the site expects.
+    # Example if it's WordPress AJAX: {'action': 'live_search_action', 'query': ticker.upper()}
+    # Example if simple GET: {'s': ticker.upper()}
+    # This needs to be a dictionary string in secrets if complex, or construct it here.
+    # For simplicity, let's assume a secret key for the query parameter name.
+    query_param_name = st.secrets.get("VT_SEARCH_PHP_QUERY_PARAM", "s") # Default to 's'
+
+    if not ACTUAL_SEARCH_PHP_URL:
+        return {"error": "VT (Option 2): VT_SEARCH_PHP_URL not configured in secrets.", "vt_fair_value": None}
+
+    PARAMS_OR_DATA_FOR_SEARCH_PHP = {query_param_name: ticker.upper()}
+    if REQUEST_METHOD == "POST" and st.secrets.get("VT_SEARCH_PHP_ACTION_PARAM"): # Common for WP AJAX
+        PARAMS_OR_DATA_FOR_SEARCH_PHP['action'] = st.secrets.get("VT_SEARCH_PHP_ACTION_PARAM")
+
 
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
+        'X-Requested-With': 'XMLHttpRequest', # Often required for AJAX/fetch requests
         'Referer': 'https://value-trades.com/'
     })
 
-    stock_page_url_found = None
-    soup_stock_page_content = None
-    error_message_detail = ""
+    soup_for_parsing = None
+    final_page_url_info = ACTUAL_SEARCH_PHP_URL # For error reporting
 
     try:
-        response_search = session.get(initial_search_url, timeout=20, allow_redirects=True)
-        response_search.raise_for_status()
-        final_url_after_search = response_search.url
-        soup_after_search = BeautifulSoup(response_search.content, 'html.parser')
-
-        if "/stock/" in final_url_after_search.lower() and ticker.lower() in final_url_after_search.lower().replace('-', ''):
-            stock_page_url_found = final_url_after_search
-            soup_stock_page_content = soup_after_search
+        if REQUEST_METHOD == "GET":
+            response = session.get(ACTUAL_SEARCH_PHP_URL, params=PARAMS_OR_DATA_FOR_SEARCH_PHP, timeout=15)
+        elif REQUEST_METHOD == "POST":
+            response = session.post(ACTUAL_SEARCH_PHP_URL, data=PARAMS_OR_DATA_FOR_SEARCH_PHP, timeout=15)
         else:
-            link_tag_found = None
-            # YOU MAY NEED TO ADJUST THESE SELECTORS BASED ON value-trades.com SEARCH RESULTS HTML
-            possible_selectors = [
-                {'name': ['h1', 'h2', 'h3'], 'class_': 'entry-title'}, # Common WordPress title
-                {'name': 'article'} # General article tag
-            ]
-            for selector_args in possible_selectors:
-                elements = soup_after_search.find_all(**selector_args, limit=5)
-                for element in elements:
-                    a_tag = element.find('a', href=True)
-                    if a_tag:
-                        link_text = a_tag.get_text(strip=True).lower()
-                        href_val = a_tag.get('href', '').lower()
-                        # More specific check for ticker relevance
-                        if (ticker.lower() in link_text or 
-                            ticker.lower() in href_val or 
-                            f"({ticker.lower()})" in link_text): # e.g. Apple (aapl)
-                            link_tag_found = a_tag
-                            break
-                if link_tag_found:
-                    break
-            
-            if link_tag_found:
-                stock_page_url_found = link_tag_found['href']
-                if not stock_page_url_found.startswith('http'):
-                    stock_page_url_found = urljoin(final_url_after_search, stock_page_url_found)
-                
-                response_specific_stock_page = session.get(stock_page_url_found, timeout=15)
-                response_specific_stock_page.raise_for_status()
-                soup_stock_page_content = BeautifulSoup(response_specific_stock_page.content, 'html.parser')
-            else:
-                error_message_detail = f"VT: Could not identify stock page link for '{ticker}' from search results at {final_url_after_search}."
-                return {"error": error_message_detail, "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
+            return {"error": "VT (Option 2): Invalid REQUEST_METHOD configured.", "vt_fair_value": None}
+        
+        response.raise_for_status()
+
+        # Now, what does search.php return?
+        # Scenario A: It returns JSON with a link to the stock page, or directly the data.
+        # Scenario B: It returns HTML (either a full results page or just the snippet for the stock).
+        
+        content_type = response.headers.get('content-type', '').lower()
+        
+        if 'application/json' in content_type:
+            json_response = response.json()
+            # --- USER: INSPECT json_response AND EXTRACT INFO OR NEXT URL ---
+            # Example:
+            # if json_response.get("success") and json_response.get("data"):
+            #     if isinstance(json_response["data"], list) and json_response["data"][0].get("url"):
+            #         stock_page_url_from_api = json_response["data"][0]["url"]
+            #         if not stock_page_url_from_api.startswith('http'):
+            #             stock_page_url_from_api = urljoin("https://value-trades.com/", stock_page_url_from_api)
+            #         
+            #         response_stock_page = session.get(stock_page_url_from_api, timeout=15)
+            #         response_stock_page.raise_for_status()
+            #         soup_stock_page_content = BeautifulSoup(response_stock_page.content, 'html.parser')
+            #         final_page_url_info = stock_page_url_from_api # For error reporting
+            #     elif isinstance(json_response["data"], str): # Maybe HTML snippet in JSON?
+            #          soup_stock_page_content = BeautifulSoup(json_response["data"], 'html.parser')
+            #          final_page_url_info = f"API response from {ACTUAL_SEARCH_PHP_URL}"
+            #     else: # Direct data
+            #         # fair_value = json_response.get("fair_value") ... parse directly
+            #         return {"error": f"VT (Option 2): JSON from API, but structure not yet handled for {ticker}.", "vt_fair_value": None}
+
+            # This is a placeholder - you MUST adapt this based on the actual JSON structure
+            return {"error": f"VT (Option 2): Received JSON from {ACTUAL_SEARCH_PHP_URL}, needs parsing logic.", "vt_fair_value": None, "raw_json_response": json_response}
+
+
+        elif 'text/html' in content_type:
+            soup_stock_page_content = BeautifulSoup(response.content, 'html.parser')
+            final_page_url_info = f"HTML response from {ACTUAL_SEARCH_PHP_URL}"
+            # Now, this soup_stock_page_content could be:
+            # 1. A search results page -> you'd need to find link and make another request (complex)
+            # 2. The actual stock page content -> proceed to parse for the sentence
+            # 3. An HTML snippet -> parse for sentence.
+            # For simplicity, we assume it might contain the sentence directly or is the stock page.
+        else:
+            return {"error": f"VT (Option 2): Unknown content type '{content_type}' from {ACTUAL_SEARCH_PHP_URL}", "vt_fair_value": None}
 
         if soup_stock_page_content is None:
-             error_message_detail = f"VT: Failed to obtain HTML content for {ticker}'s stock page."
-             return {"error": error_message_detail, "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
+             return {"error": f"VT (Option 2): Failed to get parsable content for {ticker} from {ACTUAL_SEARCH_PHP_URL}.", "vt_fair_value": None}
 
+        # --- Parsing the fair value sentence ---
         tags_to_search = soup_stock_page_content.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'div', 'span'])
         full_valuation_text = None; fair_value = None; site_current_price = None
         valuation_status = None; valuation_percentage = None
@@ -223,29 +248,21 @@ def fetch_vt_via_main_search(ticker: str) -> dict:
                     found_sentence = True
                     break
                 except ValueError as ve:
-                    error_message_detail = f"VT: Found sentence for {ticker}, but failed to parse numbers: '{full_valuation_text}'. Error: {ve}"
-                    return {"error": error_message_detail, "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": full_valuation_text}
+                    return {"error": f"VT (Option 2): Found sentence for {ticker}, but failed to parse numbers: '{full_valuation_text}'. Error: {ve}", "vt_fair_value": None}
         
         if found_sentence:
             return {"vt_fair_value": fair_value, "vt_current_price": site_current_price,
                     "vt_valuation_status": valuation_status, "vt_valuation_percentage": valuation_percentage,
                     "vt_valuation_text": full_valuation_text, "error": None}
         else:
-            error_message_detail = f"VT: Specific fair value sentence not found for {ticker} on page {stock_page_url_found if stock_page_url_found else 'unknown'}."
-            return {"error": error_message_detail, "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
+            return {"error": f"VT (Option 2): Fair value sentence not found for {ticker} in response from {final_page_url_info}.", "vt_fair_value": None}
 
-    except requests.exceptions.Timeout as e:
-        error_message_detail = f"VT: Timeout accessing URL: {e}"
-        return {"error": error_message_detail, "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
     except requests.exceptions.RequestException as e:
-        error_message_detail = f"VT: RequestException for {ticker}: {e}"
-        return {"error": error_message_detail, "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
+        return {"error": f"VT (Option 2): RequestException for {ticker} to {ACTUAL_SEARCH_PHP_URL}: {e}", "vt_fair_value": None}
     except Exception as e:
-        error_message_detail = f"VT: Unexpected general error for {ticker}: {e}"
-        return {"error": error_message_detail, "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None}
+        return {"error": f"VT (Option 2): Unexpected error for {ticker} with {ACTUAL_SEARCH_PHP_URL}: {e}", "vt_fair_value": None}
     finally:
-        if 'session' in locals() and session:
-            session.close()
+        if 'session' in locals(): session.close()
 @st.cache_data(ttl=3600)
 def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
     url = f"https://www.capitoltrades.com/trades?asset={ticker.upper()}&pageSize=100&perPage=100"
@@ -574,7 +591,23 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
         if configs["use_sentiment"] and llm_client: all_agents_instances.append(SentimentAgent(llm_client))
         if configs["use_filings"]: all_agents_instances.append(FilingsAgent())
         if configs["use_politician_filings"]: all_agents_instances.append(PoliticianFilingsAgent())
-        if configs["use_value_trades"]: all_agents_instances.append(FairValueAgentVT())
+        # In run_live_analysis, inside the loop for ticker t:
+# ...
+if configs["use_value_trades"]:
+    # Choose which fetcher to try. Start with Option 1.
+    # You might add logic here to try Option 2 if Option 1 fails and Option 2 is configured.
+    vt_data_from_scraper = fetch_vt_via_main_search(t) 
+
+    # If using Option 2 and it's configured (you'd add more logic here to switch or try both)
+    # if st.secrets.get("VT_SEARCH_PHP_URL"):
+    #     vt_data_from_scraper = fetch_vt_via_search_php_endpoint(t)
+    # else:
+    #     vt_data_from_scraper = fetch_vt_via_main_search(t) # Fallback or primary
+
+    data_bundle["value_trades_fair_value_data"] = vt_data_from_scraper
+else:
+    data_bundle["value_trades_fair_value_data"] = {"vt_fair_value": None, "error": "VT: Skipped by user config."}
+# ...
 
         agent_results_list = []
         for agent_instance in all_agents_instances:
