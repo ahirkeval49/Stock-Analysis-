@@ -216,7 +216,7 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                     filing_date = datetime.strptime(filing_dates[i], '%Y-%m-%d').replace(tzinfo=timezone.utc)
                     if filing_date >= date_limit:
                         filings_to_process_metadata.append({"form_type": forms[i], "filing_date_str": filing_dates[i],
-                                                            "accession_number": accession_numbers[i], "primary_document": primary_documents[i]})
+                                                             "accession_number": accession_numbers[i], "primary_document": primary_documents[i]})
                 except ValueError: continue
             form4_xml_fetches = 0; max_form4_xml_fetches = 20; max_other_filings_to_list = 15
             for filing_info in filings_to_process_metadata:
@@ -265,16 +265,16 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                                 acq_disp_code = acq_disp_node.find('value').text.strip().upper() if acq_disp_node and acq_disp_node.find('value') else "N/A"
                                 if shares_val != 0:
                                     filings_list.append({"is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": filing_date_str,
-                                        "transaction_date": trans_date, "reporting_owner": owner_name,
-                                        "owner_relationship": owner_relationship_str, "transaction_code": trans_code,
-                                        "acq_disp_code": acq_disp_code, "shares": shares_val, "price_per_share": price_val,
-                                        "link_to_filing": xml_url.replace(primary_document_name, "FilingSummary.xml")})
+                                            "transaction_date": trans_date, "reporting_owner": owner_name,
+                                            "owner_relationship": owner_relationship_str, "transaction_code": trans_code,
+                                            "acq_disp_code": acq_disp_code, "shares": shares_val, "price_per_share": price_val,
+                                            "link_to_filing": xml_url.replace(primary_document_name, "FilingSummary.xml")})
                     except requests.exceptions.RequestException: pass
                     except Exception: pass
                 elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other_filings_to_list :
                     filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": filing_date_str,
-                                         "form_type": form_type, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{primary_document_name}",
-                                         "summary_link": sec_filing_link })
+                                          "form_type": form_type, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{primary_document_name}",
+                                          "summary_link": sec_filing_link })
             if not filings_list and form4_xml_fetches > 0 : return [{"error": f"SEC: Found {form4_xml_fetches} Form 4s for {ticker_symbol} but failed to parse tx details."}]
             if not filings_list: return [{"error": f"SEC: No relevant filings found or parsable for {ticker_symbol} in last {lookback_days} days."}]
         else: return [{"error": f"SEC: No recent filings data for {ticker_symbol} (CIK: {cik})"}]
@@ -453,7 +453,7 @@ class SentimentAgent:
         except Exception as e: llm_error_msg = f"LLM call failed: {str(e)[:150]}"
         final_error_message_for_sentiment = llm_error_msg
         if overall_news_fetch_error and ("Error" in overall_news_fetch_error or "failed" in overall_news_fetch_error.lower()) :
-             final_error_message_for_sentiment = f"News: {overall_news_fetch_error}" + (f" | LLM: {llm_error_msg}" if llm_error_msg else "")
+            final_error_message_for_sentiment = f"News: {overall_news_fetch_error}" + (f" | LLM: {llm_error_msg}" if llm_error_msg else "")
         sig = "buy" if score > 0.25 and not llm_error_msg else ("sell" if score < -0.25 and not llm_error_msg else "hold")
         return {"ticker":ticker, "sentiment_score":score, "sentiment_signal":sig, "sentiment_error": final_error_message_for_sentiment}
 
@@ -542,6 +542,57 @@ class SECFilingAgent:
                 "sec_filings_signal": signal, "sec_filings_error": None,
                 "sec_recent_form4_transactions": form4_transactions_processed[:10], 
                 "sec_other_recent_filings": other_filings_metadata[:10]}
+
+class InstitutionalHoldingsAgent:
+    def run(self, ticker: str, data: dict) -> dict:
+        institutional_holdings_data = data.get("institutional_holdings", [])
+        
+        # Check for errors from the fetcher
+        error = None
+        if institutional_holdings_data and isinstance(institutional_holdings_data[0], dict) and "error" in institutional_holdings_data[0]:
+            error = institutional_holdings_data[0]["error"]
+            return {
+                "ticker": ticker,
+                "inst_num_holders": 0,
+                "inst_total_shares_held": 0,
+                "inst_total_pct_out": 0.0,
+                "inst_holdings_signal": "hold",
+                "inst_holdings_error": error,
+                "inst_top_holders": []
+            }
+
+        num_holders = 0
+        total_shares_held = 0
+        total_pct_out = 0.0
+        top_holders = []
+
+        if institutional_holdings_data:
+            num_holders = len(institutional_holdings_data)
+            try:
+                total_shares_held = sum(d.get('Shares', 0) for d in institutional_holdings_data if isinstance(d, dict))
+                total_pct_out = sum(d.get('% Out', 0.0) for d in institutional_holdings_data if isinstance(d, dict))
+                
+                top_holders = sorted(institutional_holdings_data, key=lambda x: x.get('Shares', 0), reverse=True)[:10]
+
+            except Exception as e:
+                error = f"Error processing institutional holdings data: {e}"
+
+        signal = "hold"
+        if total_pct_out > 0.50: 
+            signal = "buy"
+        elif total_pct_out < 0.05 and num_holders > 0: 
+            signal = "sell"
+
+        return {
+            "ticker": ticker,
+            "inst_num_holders": num_holders,
+            "inst_total_shares_held": int(total_shares_held),
+            "inst_total_pct_out": float(total_pct_out),
+            "inst_holdings_signal": signal,
+            "inst_holdings_error": error,
+            "inst_top_holders": top_holders
+        }
+
 
 class PoliticianFilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
@@ -801,9 +852,9 @@ with config_container:
             bt_weights_momentum_main = st.slider("Momentum Signal Weight:", 0.0, 2.0, 0.8, 0.1, key="bt_w_momentum_main")
             bt_weights_volatility_main = st.slider("Volatility Signal Weight:", 0.0, 2.0, 0.2, 0.1, key="bt_w_vol_main")
         backtest_portfolio_weights_main = {"price": bt_weights_price_main, "momentum": bt_weights_momentum_main, "volatility": bt_weights_volatility_main,
-                                      "sentiment": 0.0, "fund": 0.0, "valuation_dcf":0.0, "valuation_pe":0.0,
-                                      "sec_filings": 0.0, "inst_holdings": 0.0, "analyst": 0.0, 
-                                      "politician_filings": 0.0, "vi_signal": 0.0}
+                                           "sentiment": 0.0, "fund": 0.0, "valuation_dcf":0.0, "valuation_pe":0.0,
+                                           "sec_filings": 0.0, "inst_holdings": 0.0, "analyst": 0.0, 
+                                           "politician_filings": 0.0, "vi_signal": 0.0}
         st.markdown("")
         run_button_backtest_main = st.button("📈 Run Backtest", use_container_width=True, type="primary", key="run_bt_btn_main")
 
@@ -814,7 +865,7 @@ if app_mode == "Live Analysis":
         if not live_tickers_list_main: st.error("Please enter at least one valid ticker.")
         else:
             live_configs_main = {"use_sentiment": use_sentiment_live_main, "use_filings": use_filings_live_main,
-                            "use_politician_filings": use_politician_filings_main, "use_value_trades": use_value_trades_main}
+                                 "use_politician_filings": use_politician_filings_main, "use_value_trades": use_value_trades_main}
             if 'live_output' not in st.session_state: st.session_state.live_output = {}
             with st.spinner("⏳ Processing analysis... Please wait."):
                 st.session_state.live_output = run_live_analysis(live_tickers_list_main, history_years_live_main, llm_client, live_configs_main)
@@ -832,11 +883,11 @@ if app_mode == "Live Analysis":
                         dec = res.get("final_decision", "N/A").upper(); score = res.get("composite_score", float('nan')); price_disp = res.get("current_price_display")
                         card_color_map = {"BUY": "green", "SELL": "red", "HOLD": "#FFA500"}; card_color = card_color_map.get(dec, "#D3D3D3")
                         st.markdown(f"""<div style="border: 1px solid {card_color}; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: {card_color}20;">
-                                        <h3 style="margin-bottom: 5px; color: {card_color};">{t_symbol}</h3>
-                                        <p style="font-size: 1.6em; font-weight: bold; color: {card_color}; margin-bottom: 5px;">{dec}</p>
-                                        <p style="font-size: 0.9em; margin-bottom: 3px;">Composite Score: <strong style="color: {card_color};">{score:.2f}</strong></p>
-                                        {f'<p style="font-size: 0.9em;">Price: <strong>${price_disp:,.2f}</strong></p>' if price_disp is not None else ""}
-                                    </div>""", unsafe_allow_html=True)
+                                     <h3 style="margin-bottom: 5px; color: {card_color};">{t_symbol}</h3>
+                                     <p style="font-size: 1.6em; font-weight: bold; color: {card_color}; margin-bottom: 5px;">{dec}</p>
+                                     <p style="font-size: 0.9em; margin-bottom: 3px;">Composite Score: <strong style="color: {card_color};">{score:.2f}</strong></p>
+                                     {f'<p style="font-size: 0.9em;">Price: <strong>${price_disp:,.2f}</strong></p>' if price_disp is not None else ""}
+                                 </div>""", unsafe_allow_html=True)
             st.markdown("---")
             for t_symbol in live_tickers_list_main:
                 res = st.session_state.live_output.get(t_symbol)
@@ -898,16 +949,16 @@ if app_mode == "Live Analysis":
                                 with st.popover("View News Headlines (Top 10)"):
                                     for title_info in news_headlines: st.markdown(f"- {title_info}")
                             elif "Error" not in llm_status_message and "No news items" not in llm_status_message and "No valid news" not in llm_status_message :
-                                 st.caption("No news headlines available or processed.")
+                                   st.caption("No news headlines available or processed.")
                         
                         if live_configs_main["use_filings"]:
                             st.subheader("SEC Insider Transactions (Form 4 - Past Year)")
                             sec_filings_error = res.get("sec_filings_error")
                             if sec_filings_error: st.caption(f"SEC Filings Status: {sec_filings_error}")
                             sec_data_display = {"Net Insider Shares (1Y)": f"{res.get('sec_net_insider_shares_1y',0):,}",
-                                                "Total Buy Value (1Y Est.)": f"${res.get('sec_insider_buy_value_1y',0):,.0f}",
-                                                "Total Sell Value (1Y Est.)": f"${res.get('sec_insider_sell_value_1y',0):,.0f}",
-                                                "SEC Filings Signal": res.get("sec_filings_signal", "N/A").upper()}
+                                                  "Total Buy Value (1Y Est.)": f"${res.get('sec_insider_buy_value_1y',0):,.0f}",
+                                                  "Total Sell Value (1Y Est.)": f"${res.get('sec_insider_sell_value_1y',0):,.0f}",
+                                                  "SEC Filings Signal": res.get("sec_filings_signal", "N/A").upper()}
                             st.dataframe(pd.Series(sec_data_display, name="Value"), use_container_width=True)
                             recent_form4_txs = res.get("sec_recent_form4_transactions")
                             if recent_form4_txs:
@@ -916,8 +967,8 @@ if app_mode == "Live Analysis":
                                         direction = "Acquired" if tx.get('acq_disp_code') == 'A' else "Disposed"
                                         price_info = f"@ ${tx.get('price_per_share'):.2f}" if tx.get('price_per_share') is not None else "(price N/A)"
                                         st.markdown(f"- **{tx.get('transaction_date')}**: {tx.get('reporting_owner')} ({tx.get('owner_relationship', '')}) "
-                                                    f"{direction} {tx.get('shares'):,.0f} shares {price_info}. Code: {tx.get('transaction_code')}. "
-                                                    f"[Link]({tx.get('link_to_filing')})")
+                                                             f"{direction} {tx.get('shares'):,.0f} shares {price_info}. Code: {tx.get('transaction_code')}. "
+                                                             f"[Link]({tx.get('link_to_filing')})")
                             elif not sec_filings_error: st.caption("No recent Form 4 transactions parsed or found.")
 
                             other_filings_display = res.get("sec_other_recent_filings")
@@ -932,9 +983,9 @@ if app_mode == "Live Analysis":
                             inst_holdings_error = res.get("inst_holdings_error")
                             if inst_holdings_error: st.caption(f"Institutional Holdings Status: {inst_holdings_error}")
                             inst_data_display = {"Number of Institutions": res.get('inst_num_holders', 0),
-                                                "Total Shares Held by Institutions": f"{res.get('inst_total_shares_held',0):,}",
-                                                "% Outstanding Held by Institutions": f"{res.get('inst_total_pct_out',0.0)*100:.2f}%",
-                                                "Institutional Holdings Signal": res.get("inst_holdings_signal", "N/A").upper()}
+                                                  "Total Shares Held by Institutions": f"{res.get('inst_total_shares_held',0):,}",
+                                                  "% Outstanding Held by Institutions": f"{res.get('inst_total_pct_out',0.0)*100:.2f}%",
+                                                  "Institutional Holdings Signal": res.get("inst_holdings_signal", "N/A").upper()}
                             st.dataframe(pd.Series(inst_data_display, name="Value"), use_container_width=True)
                             top_holders_display = res.get("inst_top_holders")
                             if top_holders_display:
