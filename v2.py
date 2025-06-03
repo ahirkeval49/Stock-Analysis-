@@ -740,22 +740,31 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
 # --------------------------------
 # Streamlit UI
 # --------------------------------
-st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
-st.title("🚀 AI Hedge Fund Simulator")
+# st.title("🚀 AI Hedge Fund Simulator") # This should come AFTER set_page_config
 
+# LLM Client Initialization (moved to be after set_page_config but before major UI elements)
 llm_client = None
 try:
     deepseek_key = getattr(st.secrets, "DEEPSEEK_API_KEY", None) if hasattr(st.secrets, "DEEPSEEK_API_KEY") else None
     openai_key = getattr(st.secrets, "OPENAI_API_KEY", None) if hasattr(st.secrets, "OPENAI_API_KEY") else None
+    # The st.sidebar calls are Streamlit commands and must come after set_page_config
+    # It's okay if they are inside a try/except block that's after set_page_config
     if deepseek_key:
         llm_client = ModelClient(api_key=deepseek_key, provider="deepseek")
         st.sidebar.caption("✅ LLM: DeepSeek Initialized")
     elif openai_key:
         llm_client = ModelClient(api_key=openai_key, provider="openai")
         st.sidebar.caption("✅ LLM: OpenAI Initialized")
-    else: st.sidebar.warning("LLM API key missing. Sentiment analysis disabled.")
-except ValueError as e: st.sidebar.error(f"LLM Init Error: {e}. Check API Key.")
-except Exception as e: st.sidebar.error(f"LLM Init Unexpected Error: {e}")
+    else:
+        st.sidebar.warning("LLM API key missing. Sentiment analysis disabled.")
+except ValueError as e:
+    st.sidebar.error(f"LLM Init Error: {e}. Check API Key.")
+except Exception as e:
+    st.sidebar.error(f"LLM Init Unexpected Error: {e}")
+
+st.title("🚀 AI Hedge Fund Simulator") # Now this is fine
+
+# ... (rest of your UI code: st.header("⚙️ Configuration"), etc.) ...
 
 st.header("⚙️ Configuration")
 config_container = st.container(border=True)
