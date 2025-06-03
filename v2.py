@@ -252,7 +252,7 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
                 value_estimate = 0
                 # Corrected line (removed potential problematic characters if any were there)
                 value_matches = re.findall(r'\<span class="math-inline">\(\[\\d,\]\+\)', value_range)
-if value\_matches\:
+if value_matches:
 try\:
 value\_estimate \= int\(value\_matches\[0\]\.replace\(',', ''\)\)
 except ValueError\:
