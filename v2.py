@@ -225,14 +225,37 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
 # --------------------------------
 # LLM Client
 # --------------------------------
+import os
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta, timezone
+import openai
+from openai import OpenAI # Ensure this is at the top of your script
+from dotenv import load_dotenv
+import requests
+from bs4 import BeautifulSoup
+import re
+from urllib.parse import urljoin
+
+# Load environment variables (if running locally)
+load_dotenv()
+
+# ... (All Data Fetcher functions remain the same) ...
+
+# --------------------------------
+# LLM Client
+# --------------------------------
 class ModelClient:
     def __init__(self, api_key: str, provider: str = "openai"):
         self.api_key = api_key
         self.provider = provider
-        self.model_name = "gpt-4o" # Default model
+        
+        OPENAI_DEFAULT_MODEL = "gpt-4o"
+        DEEPSEEK_DEFAULT_MODEL = "deepseek-reasoner" # As per your request
 
         if not api_key:
-            # This error will be caught by the UI section that initializes the client
             raise ValueError("API key required for ModelClient.")
 
         if provider == "deepseek":
@@ -240,54 +263,68 @@ class ModelClient:
                 api_key=self.api_key,
                 base_url="https://api.deepseek.com/v1"
             )
-            # Ensure you are using a model name compatible with DeepSeek's API
-            # Common models are "deepseek-chat" or "deepseek-coder"
-            self.model_name = "deepseek-reasoner" # Or st.secrets.get("DEEPSEEK_MODEL_NAME", "deepseek-chat")
+            self.model_name = DEEPSEEK_DEFAULT_MODEL
         elif provider == "openai":
             self.client = OpenAI(api_key=self.api_key)
-            # Default OpenAI model is fine, or you can specify e.g. "gpt-3.5-turbo"
-            self.model_name = "gpt-4o" # Or st.secrets.get("OPENAI_MODEL_NAME", "gpt-4o")
+            self.model_name = OPENAI_DEFAULT_MODEL
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")
 
     def embed(self, texts: list[str], model_id: str = "text-embedding-ada-002") -> list[list[float]]:
-        """
-        Generates embeddings for a list of texts.
-        Note: DeepSeek has its own embedding models, e.g., "deepseek-embedder".
-        This example uses OpenAI's default for simplicity if provider is OpenAI.
-        If using DeepSeek for embeddings, you'd need to specify their model and potentially adjust client init.
-        For now, this method will assume OpenAI's embedding model if not DeepSeek,
-        or would need specific DeepSeek embedding model logic.
-        """
+        actual_embedding_model = model_id
+        # if self.provider == "deepseek":
+        #     actual_embedding_model = "deepseek-embedder" # Example
         try:
-            # For DeepSeek, their embedding model might be different.
-            # This example defaults to OpenAI's model if not explicitly DeepSeek for embeddings.
-            # If your DeepSeek API key also supports their embedding models, you can use:
-            # if self.provider == "deepseek":
-            #    model_id = "deepseek-embedder" # Or their specific embedding model name
-            
-            resp = self.client.embeddings.create(input=texts, model=model_id)
+            resp = self.client.embeddings.create(input=texts, model=actual_embedding_model)
             return [e.embedding for e in resp.data]
         except Exception as e:
-            # Error will be propagated to the agent to display in context or handle
-            # print(f"Error creating embeddings with {self.provider} using model {model_id}: {e}")
-            raise Exception(f"Embedding Error ({self.provider}, {model_id}): {e}")
-
+            raise Exception(f"Embedding Error ({self.provider}, {actual_embedding_model}): {e}")
 
     def generate(self, prompt: str) -> str:
+        """
+        Generates a response from the LLM, handling streaming and reasoning_content
+        from models like deepseek-reasoner.
+        Returns the accumulated final content.
+        """
         try:
-            # The self.model_name is set during __init__ based on the provider
-            resp = self.client.chat.completions.create(
+            stream = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
+                stream=True
             )
-            return resp.choices[0].message.content
+            
+            final_content = ""
+            # reasoning_accumulator = "" # If you wanted to store reasoning
+
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta:
+                    delta = chunk.choices[0].delta
+                    
+                    # if delta.reasoning_content: # For deepseek-reasoner
+                    #     reasoning_accumulator += delta.reasoning_content
+                        # You could log this or store it if needed for other purposes
+                        # print(f"Reasoning chunk: {delta.reasoning_content}") # For debugging
+                    
+                    if delta.content:
+                        final_content += delta.content
+            
+            if not final_content and self.provider == "deepseek":
+                # This is a fallback. Some models might put the final answer in reasoning_content
+                # if the prompt structure leads to it, or if delta.content is unexpectedly empty.
+                # However, for a prompt asking "output only the number", the number should be in delta.content.
+                # For now, we prioritize delta.content for the SentimentAgent.
+                # If generate() is used for more general tasks, this logic might need adjustment
+                # or return a tuple (final_content, reasoning_accumulator).
+                pass
+
+            return final_content
+
         except Exception as e:
-            # Error will be propagated to the agent to display in context or handle
-            # print(f"Error generating text with {self.provider} using model {self.model_name}: {e}")
-            # Raise an exception so the agent can catch it and put it in its error field
+            # print(f"LLM Generation Exception: {e}") # For debugging
             raise Exception(f"LLM Generation Error ({self.provider}, {self.model_name}): {e}")
 
+# ... (Rest of your Agents, Orchestrator, UI code remains the same) ...
+# The SentimentAgent's try-except block for client.generate() will catch the Exception raised here.
 # --------------------------------
 # Agents
 # --------------------------------
