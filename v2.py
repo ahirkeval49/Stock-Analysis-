@@ -123,6 +123,7 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
         return [{"error": "NEWSAPI_KEY not found in secrets for NewsAPI.org.", "source_api": "NewsAPI.org"}]
 
     newsapi = NewsApiClient(api_key=api_key)
+    # Changed query parameters for get_everything to potentially retrieve more content
     query = f'("{company_name}" OR {ticker.upper()}) AND (stock OR shares OR business OR finance OR earnings OR "product launch" OR "analyst rating" OR "market sentiment")'
     to_date_dt = datetime.now(timezone.utc)
     from_date_dt = to_date_dt - timedelta(days=lookback_days)
@@ -133,7 +134,7 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
     try:
         all_articles_response = newsapi.get_everything(
             q=query, from_param=from_param_str, to=to_param_str,
-            language='en', sort_by='publishedAt', page_size=30
+            language='en', sort_by='publishedAt', page_size=100 # Increased page_size to max 100
         )
         if all_articles_response.get("status") == "ok" and "articles" in all_articles_response:
             for article in all_articles_response["articles"]:
@@ -148,7 +149,8 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
                     "publisher": article.get('source', {}).get('name', 'N/A'),
                     "link": article.get('url', '#'), "publish_datetime_utc": dt_object_utc,
                     "publish_time_readable": readable_time, "description": article.get('description'),
-                    "content_snippet": article.get('content'), "company_name": company_name,
+                    "content_snippet": article.get('content'), # This is the 'content' field, often truncated by NewsAPI
+                    "company_name": company_name,
                     "ticker": ticker, "source_api": "NewsAPI.org"
                 })
         elif all_articles_response.get("status") == "error":
@@ -436,8 +438,14 @@ class SentimentAgent:
         content_for_llm = []; company_name_overall = data.get("ticker_info",{}).get('longName', ticker)
         for item in valid_news_items[:7]:
             title = item.get('title', ''); publisher = item.get('publisher', ''); description = item.get('description', '')
+            content = item.get('content_snippet', '') # Use the content_snippet from NewsAPI
+            
             text_snippet = f"Headline: {title}"
-            if description and isinstance(description, str): text_snippet += f" | Snippet: {description[:200]}..."
+            if content and isinstance(content, str) and len(content) > 10: # Prefer content if available and substantial
+                text_snippet += f" | Content Snippet: {content.replace('[+... chars]', '').strip()}" # Remove common truncation markers
+            elif description and isinstance(description, str):
+                text_snippet += f" | Description: {description.strip()}"
+            
             if publisher and publisher != 'N/A': text_snippet += f" (Source: {publisher} via {item.get('source_api', 'Unknown')})"
             content_for_llm.append(text_snippet)
         if not content_for_llm: return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": "No processable news content for LLM."}
@@ -743,7 +751,11 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
         final_decision = PortfolioAgent().run(t, agent_results_list)
         current_result_dict = {"ticker": t, "current_price_display": current_price_for_ticker, "market_cap_display": ticker_info.get("marketCap"),
                                "industry_display": ticker_info.get("industry"), "sector_display": ticker_info.get("sector"), "ticker_info": ticker_info, 
-                               "news_headlines_for_popover": [f"{n.get('publish_time_readable','N/A')} - {n.get('title', 'N/A')} ({n.get('publisher','N/A')} via {n.get('source_api','Unknown')})" for n in deduplicated_news[:10]],
+                               "news_headlines_for_popover": [
+                                   f"{n.get('publish_time_readable','N/A')} - {n.get('title', 'N/A')} ({n.get('publisher','N/A')} via {n.get('source_api','Unknown')})"
+                                   f" - {n.get('content_snippet', n.get('description', ''))[:150]}..." # Show content_snippet or description, truncated
+                                   for n in deduplicated_news[:10]
+                               ],
                                "politician_trades_for_popover": [pt for pt in politician_trades_list[:5] if isinstance(pt, dict) and "error" not in pt],
                                "news_status_display": news_fetch_status_for_bundle }
         for res_dict in agent_results_list:
