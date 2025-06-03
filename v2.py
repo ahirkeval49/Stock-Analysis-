@@ -883,11 +883,11 @@ if app_mode == "Live Analysis":
                         dec = res.get("final_decision", "N/A").upper(); score = res.get("composite_score", float('nan')); price_disp = res.get("current_price_display")
                         card_color_map = {"BUY": "green", "SELL": "red", "HOLD": "#FFA500"}; card_color = card_color_map.get(dec, "#D3D3D3")
                         st.markdown(f"""<div style="border: 1px solid {card_color}; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: {card_color}20;">
-                                     <h3 style="margin-bottom: 5px; color: {card_color};">{t_symbol}</h3>
-                                     <p style="font-size: 1.6em; font-weight: bold; color: {card_color}; margin-bottom: 5px;">{dec}</p>
-                                     <p style="font-size: 0.9em; margin-bottom: 3px;">Composite Score: <strong style="color: {card_color};">{score:.2f}</strong></p>
-                                     {f'<p style="font-size: 0.9em;">Price: <strong>${price_disp:,.2f}</strong></p>' if price_disp is not None else ""}
-                                 </div>""", unsafe_allow_html=True)
+                                   <h3 style="margin-bottom: 5px; color: {card_color};">{t_symbol}</h3>
+                                   <p style="font-size: 1.6em; font-weight: bold; color: {card_color}; margin-bottom: 5px;">{dec}</p>
+                                   <p style="font-size: 0.9em; margin-bottom: 3px;">Composite Score: <strong style="color: {card_color};">{score:.2f}</strong></p>
+                                   {f'<p style="font-size: 0.9em;">Price: <strong>${price_disp:,.2f}</strong></p>' if price_disp is not None else ""}
+                               </div>""", unsafe_allow_html=True)
             st.markdown("---")
             for t_symbol in live_tickers_list_main:
                 res = st.session_state.live_output.get(t_symbol)
@@ -913,13 +913,13 @@ if app_mode == "Live Analysis":
                         business_summary = ticker_info_res.get("longBusinessSummary")
                         if business_summary:
                             with st.popover("View Business Summary"): st.markdown(business_summary)
-                     with tabs[2]:
+                    with tabs[2]:
                         st.subheader("Valuation Metrics (yfinance based)")
                         val_s = {
-                                 "Forward P/E": f"{res.get('forward_pe',0):.1f}",
-                                 "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(),
-                                 "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A",
-                                 "DCF Signal": res.get('dcf_signal', "N/A").upper()
+                                "Forward P/E": f"{res.get('forward_pe',0):.1f}",
+                                "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(),
+                                "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A",
+                                "DCF Signal": res.get('dcf_signal', "N/A").upper()
                                 }
                         st.dataframe(pd.Series(val_s, name="Value"), use_container_width=True)
 
@@ -929,11 +929,9 @@ if app_mode == "Live Analysis":
                             vi_full_text = res.get('vi_valuation_text_display')
 
                             if vi_full_text and not vi_error:
-                                # Display the complete sentence when available
                                 st.markdown(f"**Analysis from ValueInvesting.io:**")
                                 st.markdown(f"> *{vi_full_text}*")
                                 st.caption("This analysis is based on Peter Lynch's Fair Value formula as per ValueInvesting.io.")
-                                # You can optionally add key derived metrics here if still desired, but not in a table
                                 if res.get('vi_fair_value_estimate') is not None and res.get('vi_site_market_price') is not None:
                                     st.markdown(f"- **Fair Value:** ${res.get('vi_fair_value_estimate'):.2f} (Site's Market Price: ${res.get('vi_site_market_price'):.2f})")
                                 if res.get('vi_upside_percent') is not None:
@@ -941,11 +939,9 @@ if app_mode == "Live Analysis":
                                 st.markdown(f"- **VI.io Signal:** {res.get('vi_signal', 'N/A').upper()}")
 
                             elif vi_error:
-                                # Display only the error message if parsing failed
                                 st.warning(f"ValueInvesting.io Status: {vi_error}")
                                 st.caption("Could not retrieve or parse fair value details from ValueInvesting.io. This feature is experimental and may be unreliable.")
                             else:
-                                # Fallback if feature is enabled but no data/text found without explicit error
                                 st.info("ValueInvesting.io: No specific fair value analysis text found or parsed for this ticker.")
                                 st.caption("This feature is experimental and may be unreliable.")
                     with tabs[3]: # News & Filings Tab
@@ -960,16 +956,16 @@ if app_mode == "Live Analysis":
                                 with st.popover("View News Headlines (Top 10)"):
                                     for title_info in news_headlines: st.markdown(f"- {title_info}")
                             elif "Error" not in llm_status_message and "No news items" not in llm_status_message and "No valid news" not in llm_status_message :
-                                   st.caption("No news headlines available or processed.")
+                                st.caption("No news headlines available or processed.")
                         
                         if live_configs_main["use_filings"]:
                             st.subheader("SEC Insider Transactions (Form 4 - Past Year)")
                             sec_filings_error = res.get("sec_filings_error")
                             if sec_filings_error: st.caption(f"SEC Filings Status: {sec_filings_error}")
                             sec_data_display = {"Net Insider Shares (1Y)": f"{res.get('sec_net_insider_shares_1y',0):,}",
-                                                  "Total Buy Value (1Y Est.)": f"${res.get('sec_insider_buy_value_1y',0):,.0f}",
-                                                  "Total Sell Value (1Y Est.)": f"${res.get('sec_insider_sell_value_1y',0):,.0f}",
-                                                  "SEC Filings Signal": res.get("sec_filings_signal", "N/A").upper()}
+                                                 "Total Buy Value (1Y Est.)": f"${res.get('sec_insider_buy_value_1y',0):,.0f}",
+                                                 "Total Sell Value (1Y Est.)": f"${res.get('sec_insider_sell_value_1y',0):,.0f}",
+                                                 "SEC Filings Signal": res.get("sec_filings_signal", "N/A").upper()}
                             st.dataframe(pd.Series(sec_data_display, name="Value"), use_container_width=True)
                             recent_form4_txs = res.get("sec_recent_form4_transactions")
                             if recent_form4_txs:
@@ -978,8 +974,8 @@ if app_mode == "Live Analysis":
                                         direction = "Acquired" if tx.get('acq_disp_code') == 'A' else "Disposed"
                                         price_info = f"@ ${tx.get('price_per_share'):.2f}" if tx.get('price_per_share') is not None else "(price N/A)"
                                         st.markdown(f"- **{tx.get('transaction_date')}**: {tx.get('reporting_owner')} ({tx.get('owner_relationship', '')}) "
-                                                             f"{direction} {tx.get('shares'):,.0f} shares {price_info}. Code: {tx.get('transaction_code')}. "
-                                                             f"[Link]({tx.get('link_to_filing')})")
+                                                            f"{direction} {tx.get('shares'):,.0f} shares {price_info}. Code: {tx.get('transaction_code')}. "
+                                                            f"[Link]({tx.get('link_to_filing')})")
                             elif not sec_filings_error: st.caption("No recent Form 4 transactions parsed or found.")
 
                             other_filings_display = res.get("sec_other_recent_filings")
