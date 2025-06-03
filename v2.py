@@ -179,10 +179,10 @@ def get_cik_for_ticker(ticker: str) -> str | None:
     return TICKER_TO_CIK_MAP.get(ticker.upper())
 
 @st.cache_data(ttl=4*3600)
-def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]: # Changed lookback to 365
+def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]:
     cik = get_cik_for_ticker(ticker_symbol)
     
-    if not cik: # Fallback CIK lookup
+    if not cik: 
         try:
             headers = {'User-Agent': SEC_USER_AGENT}
             lookup_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={ticker_symbol.upper()}&owner=exclude&count=10"
@@ -197,7 +197,7 @@ def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 365) -> lis
                 cik_text_match = re.search(r"CIK:\s*(\d{10})", soup.get_text(), re.IGNORECASE)
                 if cik_text_match: cik = cik_text_match.group(1)
         except Exception:
-            pass # If fallback fails, cik remains None
+            pass 
     
     if not cik:
         return [{"error": f"SEC Filings: CIK could not be determined for {ticker_symbol}"}]
@@ -227,16 +227,11 @@ def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 365) -> lis
                         })
                 except ValueError: continue
             
-            # Limit number of XMLs to parse for performance, prioritizing Form 4s
-            form4_xml_fetches = 0
-            max_form4_xml_fetches = 20 
-            max_other_filings_to_list = 15 
+            form4_xml_fetches = 0; max_form4_xml_fetches = 20; max_other_filings_to_list = 15 
 
             for filing_info in filings_to_process_metadata:
-                form_type = filing_info["form_type"]
-                filing_date_str = filing_info["filing_date_str"]
-                accession_number = filing_info["accession_number"]
-                primary_document_name = filing_info["primary_document"]
+                form_type = filing_info["form_type"]; filing_date_str = filing_info["filing_date_str"]
+                accession_number = filing_info["accession_number"]; primary_document_name = filing_info["primary_document"]
                 accession_number_no_dashes = accession_number.replace('-', '')
                 sec_filing_link = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{accession_number}-index.html"
 
@@ -248,7 +243,6 @@ def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 365) -> lis
                         if filing_response.status_code != 200: continue
                         soup_xml = BeautifulSoup(filing_response.content, 'xml')
                         form4_xml_fetches +=1
-                        
                         reporting_owner_tag = soup_xml.find('reportingOwner')
                         owner_name = "N/A"; owner_relationship_str = "N/A"
                         if reporting_owner_tag:
@@ -262,7 +256,6 @@ def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 365) -> lis
                                     title_tag = rel_tag.find('officerTitle'); rels.append(f"Officer ({title_tag.text.strip() if title_tag and title_tag.text else ''})")
                                 if rel_tag.find('isTenPercentOwner') and rel_tag.find('isTenPercentOwner').text in ['1', 'true']: rels.append(">10% Owner")
                                 if rels: owner_relationship_str = ", ".join(filter(None,rels))
-
                         for transaction_table_name in ['nonDerivativeTable', 'derivativeTable']:
                             table = soup_xml.find(transaction_table_name)
                             if not table: continue
@@ -290,181 +283,64 @@ def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 365) -> lis
                                         "link_to_filing": xml_url.replace(primary_document_name, "FilingSummary.xml")})
                     except requests.exceptions.RequestException: pass
                     except Exception: pass
-                elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other_filings_to_list : # Limit other filings listed
+                elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other_filings_to_list :
                     filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": filing_date_str,
                                          "form_type": form_type, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{primary_document_name}",
                                          "summary_link": sec_filing_link })
-            if not filings_list: return [{"error": f"SEC: No relevant filings processed for {ticker_symbol} in last {lookback_days} days."}]
+            if not filings_list and form4_xml_fetches > 0 : return [{"error": f"SEC: Found {form4_xml_fetches} Form 4s for {ticker_symbol} but could not parse transaction details."}] # Corrected variable name
+            if not filings_list: return [{"error": f"SEC: No relevant filings found or parsable for {ticker_symbol} in the last {lookback_days} days."}]
         else: return [{"error": f"SEC: No recent filings data for {ticker_symbol} (CIK: {cik})"}]
     except requests.exceptions.HTTPError as e: return [{"error": f"SEC: HTTP error for {ticker_symbol}: {e}"}]
     except requests.exceptions.RequestException as e: return [{"error": f"SEC: Request error for {ticker_symbol}: {e}"}]
     except Exception as e: return [{"error": f"SEC: Unexpected error for {ticker_symbol}: {e}"}]
+    filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True)
     return filings_list
 
-
 @st.cache_data(ttl=3600)
-@st.cache_data(ttl=3600)
-def fetch_fair_value_from_value_trades(ticker: str, company_name: str) -> dict:
+def fetch_fair_value_from_valueinvesting_io(ticker: str) -> dict: # Renamed from fetch_fair_value_from_value_trades
     """
-    Enhanced scraper for value-trades.com that properly extracts fair value estimates
+    Fetches fair value data from valueinvesting.io for a given ticker.
     """
-    base_url = "https://www.value-trades.com"
-    search_url = f"{base_url}/search.php"
+    url = f"https://valueinvesting.io/{ticker.upper()}/valuation/fair-value"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Referer': f'{base_url}/'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36'
     }
-    
     try:
-        # Step 1: Search for the ticker
-        search_params = {'search': ticker}
-        search_response = requests.get(search_url, params=search_params, headers=headers, timeout=15)
-        search_response.raise_for_status()
-        
-        # Parse search results to find the stock page link
-        soup = BeautifulSoup(search_response.text, 'html.parser')
-        stock_link = None
-        
-        # Look for the specific stock link in search results
-        for link in soup.find_all('a', href=True):
-            if f"/stock/{ticker.lower()}" in link['href'].lower():
-                stock_link = urljoin(base_url, link['href'])
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        target_paragraph_text = None
+        paragraphs = soup.find_all('p')
+        for p in paragraphs:
+            text = p.get_text(strip=True)
+            if ticker.upper() in text and "Peter Lynch's Fair Value formula" in text and "Fair Value of" in text:
+                target_paragraph_text = text
                 break
-        
-        if not stock_link:
-            return {
-                "error": f"VT: Could not find stock page link for {ticker} in search results.",
-                "vt_fair_value": None,
-                "vt_current_price": None,
-                "vt_valuation_text": None,
-                "vt_valuation_status": None,
-                "vt_valuation_percentage": None,
-                "vt_assigned_pe_by_site": None,
-                "vt_eps_used_by_site": None
-            }
-        
-        # Step 2: Fetch the stock page
-        stock_response = requests.get(stock_link, headers=headers, timeout=15)
-        stock_response.raise_for_status()
-        stock_soup = BeautifulSoup(stock_response.text, 'html.parser')
-        
-        # Extract fair value information
-        fair_value_section = stock_soup.find('div', class_='fair-value-section')
-        if not fair_value_section:
-            return {
-                "error": f"VT: Fair value section not found on page for {ticker}.",
-                "vt_fair_value": None,
-                "vt_current_price": None,
-                "vt_valuation_text": None,
-                "vt_valuation_status": None,
-                "vt_valuation_percentage": None,
-                "vt_assigned_pe_by_site": None,
-                "vt_eps_used_by_site": None
-            }
-        
-        # Extract current price
-        current_price = None
-        price_element = stock_soup.find('span', class_='current-price')
-        if price_element:
-            try:
-                current_price = float(price_element.text.strip().replace('$', '').replace(',', ''))
-            except (ValueError, AttributeError):
-                pass
-        
-        # Extract fair value
-        fair_value = None
-        fair_value_element = fair_value_section.find('span', class_='fair-value-number')
-        if fair_value_element:
-            try:
-                fair_value = float(fair_value_element.text.strip().replace('$', '').replace(',', ''))
-            except (ValueError, AttributeError):
-                pass
-        
-        # Extract valuation status and percentage
-        valuation_status = None
-        valuation_percentage = None
-        status_element = fair_value_section.find('div', class_='valuation-status')
-        if status_element:
-            valuation_status = status_element.text.strip()
-            # Try to extract percentage from status text
-            percentage_match = re.search(r'([\d.]+)%', status_element.text)
-            if percentage_match:
-                try:
-                    valuation_percentage = float(percentage_match.group(1))
-                except ValueError:
-                    pass
-        
-        # Extract valuation text
-        valuation_text = None
-        text_element = fair_value_section.find('p', class_='valuation-text')
-        if text_element:
-            valuation_text = text_element.text.strip()
-        
-        # Extract assigned P/E and EPS used (if available)
-        assigned_pe = None
-        eps_used = None
-        details_section = stock_soup.find('div', class_='valuation-details')
-        if details_section:
-            # Look for P/E
-            pe_element = details_section.find('span', text=re.compile(r'Assigned P/E'))
-            if pe_element:
-                pe_value = pe_element.find_next('span')
-                if pe_value:
-                    try:
-                        assigned_pe = float(pe_value.text.strip())
-                    except (ValueError, AttributeError):
-                        pass
-            
-            # Look for EPS
-            eps_element = details_section.find('span', text=re.compile(r'EPS Used'))
-            if eps_element:
-                eps_value = eps_element.find_next('span')
-                if eps_value:
-                    try:
-                        eps_used = float(eps_value.text.strip().replace('$', ''))
-                    except (ValueError, AttributeError):
-                        pass
-        
-        return {
-            "error": None,
-            "vt_fair_value": fair_value,
-            "vt_current_price": current_price,
-            "vt_valuation_text": valuation_text,
-            "vt_valuation_status": valuation_status,
-            "vt_valuation_percentage": valuation_percentage,
-            "vt_assigned_pe_by_site": assigned_pe,
-            "vt_eps_used_by_site": eps_used
-        }
-        
-    except requests.exceptions.RequestException as e:
-        return {
-            "error": f"VT: Request failed for {ticker}: {str(e)}",
-            "vt_fair_value": None,
-            "vt_current_price": None,
-            "vt_valuation_text": None,
-            "vt_valuation_status": None,
-            "vt_valuation_percentage": None,
-            "vt_assigned_pe_by_site": None,
-            "vt_eps_used_by_site": None
-        }
-    except Exception as e:
-        return {
-            "error": f"VT: Unexpected error for {ticker}: {str(e)}",
-            "vt_fair_value": None,
-            "vt_current_price": None,
-            "vt_valuation_text": None,
-            "vt_valuation_status": None,
-            "vt_valuation_percentage": None,
-            "vt_assigned_pe_by_site": None,
-            "vt_eps_used_by_site": None
-        }
+        if not target_paragraph_text:
+            return {"error": f"VI.io: Target paragraph not found for {ticker} on {url}."}
+        pattern = re.compile(
+            r"As of (?P<date>[\d]{4}-[\d]{2}-[\d]{2}), the Fair Value of .*? \(.*?" + re.escape(ticker.upper()) + r".*?\) is (?P<fair_value>[\d\.]+) USD"
+            r".*?With the current market price of (?P<market_price>[\d\.]+) USD, the upside of .*? is (?P<upside_percent>[-+]?\d+\.?\d*)%."
+        )
+        match = pattern.search(target_paragraph_text)
+        if match:
+            data = match.groupdict()
+            return {"ticker": ticker, "vi_valuation_date": data.get("date"),
+                    "vi_fair_value": float(data.get("fair_value")) if data.get("fair_value") else None,
+                    "vi_site_market_price": float(data.get("market_price")) if data.get("market_price") else None,
+                    "vi_upside_percent": float(data.get("upside_percent")) if data.get("upside_percent") else None,
+                    "vi_full_text": target_paragraph_text, "vi_data_source_url": url, "error": None}
+        else: return {"error": f"VI.io: Could not parse details for {ticker}. Text: '{target_paragraph_text[:200]}...'"}
+    except requests.exceptions.HTTPError as http_err:
+        if http_err.response.status_code == 404: return {"error": f"VI.io: Page not found for {ticker} (404) at {url}."}
+        return {"error": f"VI.io: HTTP error for {ticker}: {http_err}"}
+    except requests.exceptions.RequestException as req_err: return {"error": f"VI.io: Request error for {ticker}: {req_err}"}
+    except Exception as e: return {"error": f"VI.io: Unexpected error for {ticker}: {e}"}
 
 @st.cache_data(ttl=3600)
 def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
     url = f"https://www.capitoltrades.com/trades?asset={ticker.upper()}&pageSize=100&perPage=100"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'}
+    headers = {'User-Agent': 'Mozilla/5.0 ...', 'Accept': 'text/html...', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'}
     politician_trades_list = []
     try:
         response = requests.get(url, headers=headers, timeout=20); response.raise_for_status()
@@ -628,21 +504,18 @@ class AnalystRatingAgent:
 
 class SECFilingAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        all_filings_raw = fetch_all_sec_filings(ticker, lookback_days=365) # Updated to 1 year
-
+        all_filings_raw = fetch_all_sec_filings(ticker, lookback_days=365)
         error_from_fetch = None
         if not all_filings_raw: 
             error_from_fetch = f"SEC Filings: No filings data returned for {ticker}."
         elif isinstance(all_filings_raw[0], dict) and "error" in all_filings_raw[0]:
             error_from_fetch = all_filings_raw[0].get("error")
         
-        if error_from_fetch: # If fetch_all_sec_filings itself returned an error dictionary
-            return {
-                "ticker": ticker, "sec_net_insider_shares_1y": 0,
-                "sec_insider_buy_value_1y": 0, "sec_insider_sell_value_1y": 0,
-                "sec_filings_signal": "hold", "sec_filings_error": error_from_fetch,
-                "sec_recent_form4_transactions": [], "sec_other_recent_filings": []
-            }
+        if error_from_fetch:
+            return {"ticker": ticker, "sec_net_insider_shares_1y": 0,
+                    "sec_insider_buy_value_1y": 0, "sec_insider_sell_value_1y": 0,
+                    "sec_filings_signal": "hold", "sec_filings_error": error_from_fetch,
+                    "sec_recent_form4_transactions": [], "sec_other_recent_filings": []}
 
         net_shares = 0; buy_value = 0; sell_value = 0
         form4_transactions_processed = []
@@ -666,16 +539,11 @@ class SECFilingAgent:
         if net_shares > 2000 or buy_value > 200000: signal = "buy" 
         elif net_shares < -2000 or sell_value > 200000: signal = "sell"
         
-        return {
-            "ticker": ticker, 
-            "sec_net_insider_shares_1y": int(net_shares),
-            "sec_insider_buy_value_1y": round(buy_value, 2), 
-            "sec_insider_sell_value_1y": round(sell_value, 2),
-            "sec_filings_signal": signal, 
-            "sec_filings_error": None, # Cleared if processing happened
-            "sec_recent_form4_transactions": form4_transactions_processed[:10], 
-            "sec_other_recent_filings": other_filings_metadata[:10] 
-        }
+        return {"ticker": ticker, "sec_net_insider_shares_1y": int(net_shares),
+                "sec_insider_buy_value_1y": round(buy_value, 2), "sec_insider_sell_value_1y": round(sell_value, 2),
+                "sec_filings_signal": signal, "sec_filings_error": None,
+                "sec_recent_form4_transactions": form4_transactions_processed[:10], 
+                "sec_other_recent_filings": other_filings_metadata[:10]}
 
 class PoliticianFilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
@@ -697,93 +565,39 @@ class PoliticianFilingsAgent:
                 "politician_buy_tx_count": buy_count, "politician_sell_tx_count": sell_count,
                 "politician_filings_signal": signal, "politician_data_error": error}
 
-class FairValueAgentVT:
+class ValueInvestingIOAgent: # Replaces FairValueAgentVT and VTInspiredFairValueAgent
     def run(self, ticker: str, data: dict) -> dict:
-        vt_data = data.get("value_trades_fair_value_data", {})
-        fair_value = vt_data.get("vt_fair_value"); error = vt_data.get("error")
-        current_price_data = data.get("ticker_info", {}); current_price = current_price_data.get("currentPrice")
-        if current_price is None and data.get("price_history") is not None and not data["price_history"].empty:
-            current_price = data["price_history"]["Close"].iloc[-1]
-        signal = "hold"; margin_of_safety = 0.15
-        error_fv_not_found_page = f"VT: FV not found on page for {ticker}."
-        error_specific_sentence_prefix = f"VT: Specific fair value sentence not found for {ticker} on page"
-        significant_error = False
-        if error:
-            is_ignorable_error = (error == error_fv_not_found_page or error.startswith(error_specific_sentence_prefix) or
-                                "VT Configuration incomplete in secrets." in error or "VT: Skipped by user config." in error or
-                                "VT: Could not find stock page link for" in error or "VT: Failed to fetch valid stock page for" in error)
-            if not is_ignorable_error: significant_error = True
-        if not significant_error and fair_value is not None and current_price is not None and current_price > 0:
-            if current_price < fair_value * (1 - margin_of_safety): signal = "buy"
-            elif current_price > fair_value * (1 + margin_of_safety): signal = "sell"
-        return {"ticker": ticker, "vt_fair_value_estimate": fair_value, "vt_fair_value_signal": signal, "vt_data_error": error,
-                "vt_site_current_price": vt_data.get("vt_current_price"), "vt_valuation_status": vt_data.get("vt_valuation_status"),
-                "vt_valuation_percentage": vt_data.get("vt_valuation_percentage"), "vt_valuation_text_display": vt_data.get("vt_valuation_text")}
+        vi_data = data.get("value_investing_io_data", {}) 
+        error = vi_data.get("error")
+        fair_value = vi_data.get("vi_fair_value")
+        site_market_price = vi_data.get("vi_site_market_price")
+        upside_percent = vi_data.get("vi_upside_percent")
+        valuation_date = vi_data.get("vi_valuation_date")
+        full_text = vi_data.get("vi_full_text")
+        signal = "hold"
+        current_price_yf = data.get("ticker_info", {}).get("currentPrice")
+        if current_price_yf is None and data.get("price_history") is not None and not data["price_history"].empty:
+            current_price_yf = data["price_history"]["Close"].iloc[-1]
 
-class VTInspiredFairValueAgent:
-    DEFAULT_ASSUMED_FAIR_PE = 20.0
-    DEFAULT_INDUSTRY_PE_LOOKUP = {"TECHNOLOGY": 25.0, "CONSUMER ELECTRONICS": 25.0, "HEALTHCARE": 20.0, "FINANCIAL SERVICES": 15.0, "CONSUMER CYCLICAL": 18.0, "INDUSTRIALS": 17.0, "DEFAULT": 18.0}
-    DEFAULT_HISTORICAL_AVG_PE = 20.0; DEFAULT_GROWTH_PE = 10.0
-    def get_eps(self, ticker_info: dict) -> float | None: return ticker_info.get('trailingEps')
-    def get_industry_pe(self, ticker_info: dict) -> float:
-        industry = str(ticker_info.get("industry", "")).upper(); sector = str(ticker_info.get("sector", "")).upper()
-        if industry in self.DEFAULT_INDUSTRY_PE_LOOKUP: return self.DEFAULT_INDUSTRY_PE_LOOKUP[industry]
-        if sector in self.DEFAULT_INDUSTRY_PE_LOOKUP: return self.DEFAULT_INDUSTRY_PE_LOOKUP[sector]
-        return self.DEFAULT_INDUSTRY_PE_LOOKUP["DEFAULT"]
-    def run(self, ticker: str, data: dict) -> dict:
-        ticker_info = data.get("ticker_info", {}); eps = self.get_eps(ticker_info)
-        historical_avg_pe = self.DEFAULT_HISTORICAL_AVG_PE; assumed_fair_pe = self.DEFAULT_ASSUMED_FAIR_PE
-        industry_pe = self.get_industry_pe(ticker_info); growth_pe_val = self.DEFAULT_GROWTH_PE
-        if eps is None: return {"error_vt_inspired_fv": "EPS not available.", "vt_inspired_fair_value": None, "vt_inspired_signal": "hold"}
-        pe_components = [historical_avg_pe, assumed_fair_pe, industry_pe, growth_pe_val]
-        valid_pe_components = [p for p in pe_components if p is not None]; our_assigned_pe = None
-        if valid_pe_components: our_assigned_pe = sum(valid_pe_components) / len(valid_pe_components)
-        vt_inspired_fair_value = None
-        if our_assigned_pe is not None: vt_inspired_fair_value = our_assigned_pe * eps
-        current_price = ticker_info.get("currentPrice"); signal = "hold"
-        if vt_inspired_fair_value is not None and current_price is not None and current_price > 0:
-            margin = 0.15
-            if current_price < vt_inspired_fair_value * (1 - margin): signal = "buy"
-            elif current_price > vt_inspired_fair_value * (1 + margin): signal = "sell"
-        return {"ticker": ticker, "vt_inspired_eps_used": eps, "vt_inspired_historical_avg_pe": historical_avg_pe,
-                "vt_inspired_assumed_fair_pe": assumed_fair_pe, "vt_inspired_industry_pe": industry_pe,
-                "vt_inspired_growth_pe": growth_pe_val, "vt_inspired_assigned_pe": our_assigned_pe,
-                "vt_inspired_fair_value": vt_inspired_fair_value, "vt_inspired_signal": signal,
-                "error_vt_inspired_fv": None if vt_inspired_fair_value is not None else "Could not calculate VT-Inspired Fair Value"}
-
-class InstitutionalHoldingsAgent:
-    def run(self, ticker: str, data: dict) -> dict:
-        inst_holdings_data = data.get("institutional_holdings", []) # This key is set in run_live_analysis
-        error_msg = None; top_holders = []
-        total_shares_held_by_institutions = 0; total_pct_outstanding_by_institutions = 0.0
-        num_institutions = 0; signal = "hold"
-
-        if inst_holdings_data and isinstance(inst_holdings_data[0], dict) and "error" in inst_holdings_data[0]:
-            error_msg = inst_holdings_data[0]["error"]
-        elif inst_holdings_data:
-            valid_holdings = [h for h in inst_holdings_data if isinstance(h, dict) and "error" not in h]
-            num_institutions = len(valid_holdings)
-            for holding in valid_holdings:
-                total_shares_held_by_institutions += holding.get("Shares", 0)
-                total_pct_outstanding_by_institutions += holding.get("% Out", 0.0)
-            try:
-                sorted_holdings = sorted(valid_holdings, key=lambda x: x.get("Shares", 0), reverse=True)
-                top_holders = sorted_holdings[:10]
-            except TypeError: top_holders = valid_holdings[:10]; error_msg = (error_msg or "") + " | Note: Could not sort holders."
-            if total_pct_outstanding_by_institutions > 0.60: signal = "buy"
-            elif total_pct_outstanding_by_institutions < 0.20 and num_institutions > 0: signal = "sell"
-        return {"ticker": ticker, "inst_num_holders": num_institutions,
-                "inst_total_shares_held": total_shares_held_by_institutions,
-                "inst_total_pct_out": total_pct_outstanding_by_institutions,
-                "inst_top_holders": top_holders, "inst_holdings_signal": signal,
-                "inst_holdings_error": error_msg}
+        if not error and fair_value is not None and current_price_yf is not None:
+            margin_of_safety = 0.15 
+            if upside_percent is not None:
+                if upside_percent > (margin_of_safety * 100 + 5): signal = "buy"
+                elif upside_percent < -(margin_of_safety * 100 + 5): signal = "sell"
+            elif current_price_yf > 0 :
+                if current_price_yf < fair_value * (1 - margin_of_safety): signal = "buy"
+                elif current_price_yf > fair_value * (1 + margin_of_safety): signal = "sell"
+        
+        return {"ticker": ticker, "vi_fair_value_estimate": fair_value, "vi_site_market_price": site_market_price,
+                "vi_upside_percent": upside_percent, "vi_valuation_date": valuation_date,
+                "vi_valuation_text_display": full_text, "vi_signal": signal, "vi_data_error": error}
 
 class PortfolioAgent:
     WEIGHTS = {"price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.6, "fund": 0.9,
                "valuation_dcf":0.5, "valuation_pe":0.5, "sec_filings": 0.6, 
-               "inst_holdings": 0.3, # Added weight for institutional holdings
-               "analyst": 0.7,
-               "politician_filings": 0.4, "vt_fair_value": 0.0, "vt_inspired": 0.7}
+               "inst_holdings": 0.3, "analyst": 0.7,
+               "politician_filings": 0.4, 
+               "vi": 0.8 } # Weight for ValueInvesting.io signal
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
         current_weights = agent_weights or self.WEIGHTS; total_weighted_score = 0; sum_of_weights_used = 0
         agg_signals = {};
@@ -792,9 +606,8 @@ class PortfolioAgent:
         signal_map = {"price_signal": "price", "momentum_signal": "momentum", "volatility_signal": "volatility",
                       "sentiment_signal": "sentiment", "fund_signal": "fund", "dcf_signal": "valuation_dcf",
                       "relative_pe_signal": "valuation_pe", "sec_filings_signal": "sec_filings", 
-                      "inst_holdings_signal": "inst_holdings", # Added signal key
-                      "analyst_signal": "analyst", "politician_filings_signal": "politician_filings",
-                      "vt_fair_value_signal": "vt_fair_value", "vt_inspired_signal": "vt_inspired"}
+                      "inst_holdings_signal": "inst_holdings", "analyst_signal": "analyst", 
+                      "politician_filings_signal": "politician_filings", "vi_signal": "vi"}
         for signal_key, weight_key in signal_map.items():
             signal_value = agg_signals.get(signal_key); weight = current_weights.get(weight_key, 0)
             if signal_value and weight > 0 and signal_value in ["buy", "hold", "sell"]:
@@ -820,7 +633,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             continue
 
         current_price_for_ticker = ticker_info.get("currentPrice") or (price_history_full["Close"].iloc[-1] if not price_history_full.empty else None)
-        company_name_for_news_and_vt = ticker_info.get('longName', ticker_info.get('shortName', t))
+        company_name_for_news = ticker_info.get('longName', ticker_info.get('shortName', t))
         combined_news_data_list = []; news_fetch_status_messages = []
 
         if configs["use_sentiment"]:
@@ -830,7 +643,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             elif yfinance_news and isinstance(yfinance_news[0], dict) and "error" in yfinance_news[0]:
                 news_fetch_status_messages.append(f"Yahoo News: {yfinance_news[0]['error']}")
             if llm_client and st.secrets.get("NEWSAPI_KEY"):
-                newsapi_articles = fetch_comprehensive_news_from_api(t, company_name_for_news_and_vt, lookback_days=30)
+                newsapi_articles = fetch_comprehensive_news_from_api(t, company_name_for_news, lookback_days=30)
                 if newsapi_articles and not (isinstance(newsapi_articles[0], dict) and "error" in newsapi_articles[0]):
                     combined_news_data_list.extend(newsapi_articles)
                 elif newsapi_articles and isinstance(newsapi_articles[0], dict) and "error" in newsapi_articles[0]:
@@ -853,19 +666,19 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             "price_history": price_history_full, "ticker_info": ticker_info, "news": deduplicated_news, 
             "news_fetch_status_error": news_fetch_status_for_bundle if "Error" in news_fetch_status_for_bundle or "failed" in news_fetch_status_for_bundle.lower() or "No news" in news_fetch_status_for_bundle else None,
             "politician_trades": politician_trades_list,
-            "value_trades_fair_value_data": fetch_fair_value_from_value_trades(t, company_name_for_news_and_vt) if configs["use_value_trades"] else {"vt_fair_value": None, "error": "VT: Skipped by user config."},
-            "institutional_holdings": fetch_inst_filings(t) if configs["use_filings"] else [] # Fetch inst holdings
+            "value_investing_io_data": fetch_value_investing_io_data(t) if configs["use_value_trades"] else \
+                                        {"error": "VI.io: Skipped by user config."}, # Updated key
+            "institutional_holdings": fetch_inst_filings(t) if configs["use_filings"] else []
         }
         
         all_agents_instances = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()]
         if configs["use_sentiment"] and llm_client: all_agents_instances.append(SentimentAgent(llm_client))
         if configs["use_filings"]: 
             all_agents_instances.append(SECFilingAgent())
-            all_agents_instances.append(InstitutionalHoldingsAgent()) # Add new agent
+            all_agents_instances.append(InstitutionalHoldingsAgent())
         if configs["use_politician_filings"]: all_agents_instances.append(PoliticianFilingsAgent())
         if configs["use_value_trades"]: 
-            all_agents_instances.append(FairValueAgentVT())
-            all_agents_instances.append(VTInspiredFairValueAgent())
+            all_agents_instances.append(ValueInvestingIOAgent()) # New agent
 
         agent_results_list = []
         for agent_instance in all_agents_instances:
@@ -938,7 +751,7 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
 # --------------------------------
 # Streamlit UI
 # --------------------------------
-llm_client = None 
+llm_client = None
 try:
     deepseek_key = getattr(st.secrets, "DEEPSEEK_API_KEY", None) if hasattr(st.secrets, "DEEPSEEK_API_KEY") else None
     openai_key = getattr(st.secrets, "OPENAI_API_KEY", None) if hasattr(st.secrets, "OPENAI_API_KEY") else None
@@ -968,10 +781,10 @@ with config_container:
         cols_features = st.columns(3)
         with cols_features[0]:
             use_sentiment_live_main = st.checkbox("News Sentiment (LLM)", value=True if llm_client else False, disabled=not llm_client, key="live_sentiment_cb_main", help="Uses LLM for news sentiment. Requires NewsAPI key if used, else Yahoo Finance.")
-            use_filings_live_main = st.checkbox("SEC & Institutional Filings", value=True, key="live_sec_filings_cb_main", help="Analyzes SEC Form 4 insider transactions and Institutional Holdings.") # Updated label
+            use_filings_live_main = st.checkbox("SEC & Institutional Filings", value=True, key="live_sec_filings_cb_main", help="Analyzes SEC Form 4 and Institutional Holdings.") # Updated label
         with cols_features[1]:
             use_politician_filings_main = st.checkbox("Politician Filings", value=False, key="live_politician_cb_main", help="EXPERIMENTAL: Attempts to scrape CapitolTrades.com. May be slow/unreliable.")
-            use_value_trades_main = st.checkbox("Value-Trades Analysis", value=False, key="live_vt_cb_main", help="EXPERIMENTAL: Includes placeholder for Value-Trades.com scraping & a VT-Inspired calculation.")
+            use_value_trades_main = st.checkbox("ValueInvesting.io Fair Value", value=False, key="live_vt_cb_main", help="EXPERIMENTAL: Scrapes fair value from ValueInvesting.io.") # Updated label
         st.markdown("")
         run_button_live_main = st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_btn_main")
     elif app_mode == "Backtesting":
@@ -993,7 +806,7 @@ with config_container:
         backtest_portfolio_weights_main = {"price": bt_weights_price_main, "momentum": bt_weights_momentum_main, "volatility": bt_weights_volatility_main,
                                       "sentiment": 0.0, "fund": 0.0, "valuation_dcf":0.0, "valuation_pe":0.0,
                                       "sec_filings": 0.0, "inst_holdings": 0.0, "analyst": 0.0, 
-                                      "politician_filings": 0.0, "vt_fair_value": 0.0, "vt_inspired":0.0}
+                                      "politician_filings": 0.0, "vi_signal": 0.0} # Changed vt_fair_value & vt_inspired to vi_signal
         st.markdown("")
         run_button_backtest_main = st.button("📈 Run Backtest", use_container_width=True, type="primary", key="run_bt_btn_main")
 
@@ -1052,36 +865,34 @@ if app_mode == "Live Analysis":
                         business_summary = ticker_info_res.get("longBusinessSummary")
                         if business_summary:
                             with st.popover("View Business Summary"): st.markdown(business_summary)
-                    with tabs[2]:
+                    with tabs[2]: # Valuation & Fair Value Tab
                         st.subheader("Valuation Metrics (yfinance based)")
                         val_s = {"Forward P/E": f"{res.get('forward_pe',0):.1f}", "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(), "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A", "DCF Signal": res.get('dcf_signal', "N/A").upper()}
                         st.dataframe(pd.Series(val_s, name="Value"), use_container_width=True)
-                        if live_configs_main["use_value_trades"]:
-                            st.subheader("Value-Trades Scraper (Experimental)")
-                            vt_scrape_status_msg = res.get('vt_data_error', "Status unknown") 
-                            if not res.get('vt_data_error') and res.get('vt_fair_value_estimate') is not None: vt_scrape_status_msg = "Success"
-                            elif not res.get('vt_data_error') and res.get('vt_fair_value_estimate') is None : vt_scrape_status_msg = "Data not found on page by scraper."
-                            vt_full_text_display = res.get('vt_valuation_text_display')
-                            if vt_full_text_display: st.markdown(f"""> *"{vt_full_text_display}"*""")
-                            vt_s_scraped = {"VT Scraped Fair Value": f"${res.get('vt_fair_value_estimate'):.2f}" if res.get('vt_fair_value_estimate') is not None else "N/A",
-                                            "VT Site Current Price": f"${res.get('vt_site_current_price'):.2f}" if res.get('vt_site_current_price') is not None else "N/A",
-                                            "VT Site Valuation Status": str(res.get('vt_valuation_status', "N/A")).title(),
-                                            "VT Site Valuation (%)": f"{res.get('vt_valuation_percentage'):.2f}%" if res.get('vt_valuation_percentage') is not None else "N/A",
-                                            "VT Scraper Signal": res.get('vt_fair_value_signal', "N/A").upper(), "VT Scraper Status": vt_scrape_status_msg}
-                            st.dataframe(pd.Series(vt_s_scraped, name="Value"), use_container_width=True)
-                            st.subheader("Value-Trades Inspired Calculation (Internal)")
-                            vt_inspired_error = res.get("error_vt_inspired_fv")
-                            if vt_inspired_error: st.caption(f"Calculation Status: {vt_inspired_error}")
-                            vt_inspired_data = {"EPS Used (Trailing)": f"${res.get('vt_inspired_eps_used'):.2f}" if res.get('vt_inspired_eps_used') is not None else "N/A",
-                                                "Component PE - Hist. Avg (Assumed)": f"{res.get('vt_inspired_historical_avg_pe'):.2f}" if res.get('vt_inspired_historical_avg_pe') is not None else "N/A",
-                                                "Component PE - Fair Val (Assumed)": f"{res.get('vt_inspired_assumed_fair_pe'):.2f}" if res.get('vt_inspired_assumed_fair_pe') is not None else "N/A",
-                                                "Component PE - Industry (Est.)": f"{res.get('vt_inspired_industry_pe'):.2f}" if res.get('vt_inspired_industry_pe') is not None else "N/A",
-                                                "Component PE - Growth (Assumed)": f"{res.get('vt_inspired_growth_pe'):.2f}" if res.get('vt_inspired_growth_pe') is not None else "N/A",
-                                                "Calculated Assigned P/E (Avg)": f"{res.get('vt_inspired_assigned_pe'):.2f}" if res.get('vt_inspired_assigned_pe') is not None else "N/A",
-                                                "VT-Inspired Fair Value": f"${res.get('vt_inspired_fair_value'):.2f}" if res.get('vt_inspired_fair_value') is not None else "N/A",
-                                                "VT-Inspired Signal": res.get('vt_inspired_signal', "N/A").upper()}
-                            st.dataframe(pd.Series(vt_inspired_data, name="Value"), use_container_width=True)
-                            st.caption("Note: 'Assumed' P/E components are placeholders.")
+                        
+                        if live_configs_main["use_value_trades"]: # This toggle now controls ValueInvesting.io
+                            st.subheader("ValueInvesting.io Fair Value Analysis")
+                            vi_error = res.get('vi_data_error')
+                            if vi_error:
+                                st.caption(f"ValueInvesting.io Status: {vi_error}")
+                            
+                            vi_full_text = res.get('vi_valuation_text_display')
+                            if vi_full_text and not vi_error :
+                                st.markdown(f"""> *"{vi_full_text}"*""")
+                            
+                            vi_data_display = {
+                                "VI.io Valuation Date": res.get('vi_valuation_date', "N/A"),
+                                "VI.io Fair Value (USD)": f"${res.get('vi_fair_value_estimate'):.2f}" if res.get('vi_fair_value_estimate') is not None else "N/A",
+                                "VI.io Site Market Price (USD)": f"${res.get('vi_site_market_price'):.2f}" if res.get('vi_site_market_price') is not None else "N/A",
+                                "VI.io Upside/Downside (%)": f"{res.get('vi_upside_percent'):.2f}%" if res.get('vi_upside_percent') is not None else "N/A",
+                                "VI.io Signal": res.get('vi_signal', "N/A").upper()
+                            }
+                            st.dataframe(pd.Series(vi_data_display, name="Value"), use_container_width=True)
+                            if not vi_error and res.get('vi_fair_value_estimate') is not None:
+                                st.caption("Based on Peter Lynch's Fair Value formula as per ValueInvesting.io.")
+                            elif not vi_error:
+                                st.caption("Data could not be fully parsed from ValueInvesting.io.")
+                    
                     with tabs[3]: # News & Filings Tab
                         if live_configs_main["use_sentiment"]:
                             st.subheader("News Sentiment (LLM)")
@@ -1095,13 +906,14 @@ if app_mode == "Live Analysis":
                                     for title_info in news_headlines: st.markdown(f"- {title_info}")
                             elif "Error" not in llm_status_message and "No news items" not in llm_status_message and "No valid news" not in llm_status_message :
                                  st.caption("No news headlines available or processed.")
+                        
                         if live_configs_main["use_filings"]:
-                            st.subheader("SEC Insider Transactions (Form 4 - Past Year)") # Updated title
+                            st.subheader("SEC Insider Transactions (Form 4 - Past Year)")
                             sec_filings_error = res.get("sec_filings_error")
                             if sec_filings_error: st.caption(f"SEC Filings Status: {sec_filings_error}")
-                            sec_data_display = {"Net Insider Shares (1Y)": f"{res.get('sec_net_insider_shares_1y',0):,}", # Updated key
-                                                "Total Buy Value (1Y Est.)": f"${res.get('sec_insider_buy_value_1y',0):,.0f}", # Updated key
-                                                "Total Sell Value (1Y Est.)": f"${res.get('sec_insider_sell_value_1y',0):,.0f}", # Updated key
+                            sec_data_display = {"Net Insider Shares (1Y)": f"{res.get('sec_net_insider_shares_1y',0):,}",
+                                                "Total Buy Value (1Y Est.)": f"${res.get('sec_insider_buy_value_1y',0):,.0f}",
+                                                "Total Sell Value (1Y Est.)": f"${res.get('sec_insider_sell_value_1y',0):,.0f}",
                                                 "SEC Filings Signal": res.get("sec_filings_signal", "N/A").upper()}
                             st.dataframe(pd.Series(sec_data_display, name="Value"), use_container_width=True)
                             recent_form4_txs = res.get("sec_recent_form4_transactions")
@@ -1115,7 +927,7 @@ if app_mode == "Live Analysis":
                                                     f"[Link]({tx.get('link_to_filing')})")
                             elif not sec_filings_error: st.caption("No recent Form 4 transactions parsed or found.")
 
-                            other_filings_display = res.get("sec_other_recent_filings") # New display section
+                            other_filings_display = res.get("sec_other_recent_filings")
                             if other_filings_display:
                                 st.subheader("Other Recent SEC Filings (Past Year - Max 10)")
                                 for filing_item in other_filings_display:
@@ -1123,20 +935,14 @@ if app_mode == "Live Analysis":
                             elif not sec_filings_error: 
                                 st.caption("No other recent SEC filings found.")
                             
-                            # Institutional Holdings Display
                             st.subheader("Institutional Holdings (via yfinance)")
                             inst_holdings_error = res.get("inst_holdings_error")
-                            if inst_holdings_error:
-                                st.caption(f"Institutional Holdings Status: {inst_holdings_error}")
-                            
-                            inst_data_display = {
-                                "Number of Institutions": res.get('inst_num_holders', 0),
-                                "Total Shares Held by Institutions": f"{res.get('inst_total_shares_held',0):,}",
-                                "% Outstanding Held by Institutions": f"{res.get('inst_total_pct_out',0.0)*100:.2f}%",
-                                "Institutional Holdings Signal": res.get("inst_holdings_signal", "N/A").upper()
-                            }
+                            if inst_holdings_error: st.caption(f"Institutional Holdings Status: {inst_holdings_error}")
+                            inst_data_display = {"Number of Institutions": res.get('inst_num_holders', 0),
+                                                "Total Shares Held by Institutions": f"{res.get('inst_total_shares_held',0):,}",
+                                                "% Outstanding Held by Institutions": f"{res.get('inst_total_pct_out',0.0)*100:.2f}%",
+                                                "Institutional Holdings Signal": res.get("inst_holdings_signal", "N/A").upper()}
                             st.dataframe(pd.Series(inst_data_display, name="Value"), use_container_width=True)
-
                             top_holders_display = res.get("inst_top_holders")
                             if top_holders_display:
                                 with st.popover("View Top Institutional Holders (Max 10 from yfinance)"):
@@ -1144,9 +950,10 @@ if app_mode == "Live Analysis":
                                         shares_display = f"{holder.get('Shares',0):,}" if isinstance(holder.get('Shares'), (int,float)) else holder.get('Shares', 'N/A')
                                         pct_out_display = f"{holder.get('% Out',0.0)*100:.2f}%" if isinstance(holder.get('% Out'), (int,float)) else holder.get('% Out', 'N/A')
                                         st.markdown(f"{i+1}. **{holder.get('Holder')}**: Shares: {shares_display} (% Out: {pct_out_display}) - Reported: {holder.get('Date Reported')}")
-                            elif not inst_holdings_error:
-                                st.caption("No institutional holder data processed or found.")
-                        # Politician Filings display has been removed from this specific tab location.
+                            elif not inst_holdings_error: st.caption("No institutional holder data processed or found.")
+                        
+                        # Politician filings display removed from this specific tab.
+                        # Its data is still used by PortfolioAgent if the feature is enabled.
                     with tabs[4]: # All Signals
                         st.subheader("All Agent Signals & Final Decision")
                         all_s_keys = [k for k in res if k.endswith("_signal")]; all_s_table = {k.replace("_signal","").replace("_"," ").title(): str(res[k]).upper() for k in all_s_keys}
