@@ -65,7 +65,7 @@ def fetch_ticker_info(ticker: str) -> dict:
         return {}
 
 @st.cache_data
-def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]: # Accepts ticker_info_data
+def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
     """
     Fetches news for a ticker from yfinance and enriches it.
     Uses pre-fetched ticker_info_data for company name.
@@ -77,9 +77,9 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]: # Ac
         try:
             raw_news = ticker_obj.news
         except TypeError as te:
-             return [{"error": f"yfinance .news call failed for {ticker} with TypeError: {te}"}]
+             return [{"error": f"yfinance .news call failed for {ticker} with TypeError: {te}", "source_api": "Yahoo Finance"}]
         except Exception as news_exc:
-             return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}"}]
+             return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
 
         enriched_news_list = []
         if not raw_news:
@@ -87,13 +87,13 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]: # Ac
 
         for news_item in raw_news:
             if not isinstance(news_item, dict):
-                continue 
+                continue
 
             enriched_item = news_item.copy()
             enriched_item['ticker'] = ticker
             enriched_item['company_name'] = company_name
             enriched_item['source_api'] = 'Yahoo Finance'
-            
+
             if 'providerPublishTime' in news_item and news_item['providerPublishTime'] is not None:
                 try:
                     timestamp = int(news_item['providerPublishTime'])
@@ -107,26 +107,31 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]: # Ac
             else:
                 enriched_item['publish_datetime_utc'] = None
                 enriched_item['publish_time_readable'] = "N/A"
-            
+
             enriched_item.setdefault('title', 'No Title')
             enriched_item.setdefault('publisher', 'N/A')
             enriched_item.setdefault('link', '#')
             enriched_item.setdefault('type', 'N/A')
             enriched_news_list.append(enriched_item)
-            
+
         enriched_news_list.sort(key=lambda x: x.get('publish_datetime_utc', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
         return enriched_news_list
     except Exception as e:
-        return [{"error": f"Failed to process Yahoo Finance news for {ticker}: {e}"}]
+        return [{"error": f"Failed to process Yahoo Finance news for {ticker}: {e}", "source_api": "Yahoo Finance"}]
 
 @st.cache_data(ttl=1800) # Cache NewsAPI results for 30 minutes
 def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_days: int = 30) -> list[dict]:
+    """
+    Fetches news articles from NewsAPI.org for the specified lookback period
+    related to the ticker and company name.
+    """
     api_key = st.secrets.get("NEWSAPI_KEY")
     if not api_key:
-        return [{"error": "NEWSAPI_KEY not found in secrets for NewsAPI.org."}]
+        return [{"error": "NEWSAPI_KEY not found in secrets for NewsAPI.org.", "source_api": "NewsAPI.org"}]
 
     newsapi = NewsApiClient(api_key=api_key)
     query = f'("{company_name}" OR {ticker.upper()}) AND (stock OR shares OR business OR finance OR earnings OR "product launch" OR "analyst rating" OR "market sentiment")'
+
     to_date_dt = datetime.now(timezone.utc)
     from_date_dt = to_date_dt - timedelta(days=lookback_days)
     from_param_str = from_date_dt.strftime('%Y-%m-%d')
@@ -135,8 +140,12 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
     articles_list = []
     try:
         all_articles_response = newsapi.get_everything(
-            q=query, from_param=from_param_str, to=to_param_str,
-            language='en', sort_by='publishedAt', page_size=30
+            q=query,
+            from_param=from_param_str,
+            to=to_param_str,
+            language='en',
+            sort_by='publishedAt',
+            page_size=30
         )
         if all_articles_response.get("status") == "ok" and "articles" in all_articles_response:
             for article in all_articles_response["articles"]:
@@ -155,13 +164,13 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
                     "ticker": ticker, "source_api": "NewsAPI.org"
                 })
         elif all_articles_response.get("status") == "error":
-            return [{"error": f"NewsAPI Error ({ticker}): {all_articles_response.get('code')} - {all_articles_response.get('message')}"}]
+            return [{"error": f"NewsAPI Error ({ticker}): {all_articles_response.get('code')} - {all_articles_response.get('message')}", "source_api": "NewsAPI.org"}]
         else:
-            return [{"error": f"NewsAPI ({ticker}): No articles found or unexpected data structure."}]
+            return [{"error": f"NewsAPI ({ticker}): No articles found or unexpected data structure.", "source_api": "NewsAPI.org"}]
     except requests.exceptions.RequestException as e:
-        return [{"error": f"NewsAPI request failed for {ticker}: {e}"}]
+        return [{"error": f"NewsAPI request failed for {ticker}: {e}", "source_api": "NewsAPI.org"}]
     except Exception as e:
-        return [{"error": f"Unexpected error fetching news from NewsAPI for {ticker}: {e}"}]
+        return [{"error": f"Unexpected error fetching news from NewsAPI for {ticker}: {e}", "source_api": "NewsAPI.org"}]
     return articles_list
 
 
@@ -188,7 +197,7 @@ def fetch_insider_filings(ticker: str) -> list[dict]:
     except Exception as e: return []
 
 @st.cache_data(ttl=3600)
-def fetch_fair_value_from_value_trades(ticker: str, company_name: str) -> dict: # Added company_name
+def fetch_fair_value_from_value_trades(ticker: str, company_name: str) -> dict:
     """
     Placeholder for fetching fair value from value-trades.com.
     The site uses dynamic search (likely via search.php).
@@ -275,6 +284,7 @@ class ModelClient:
 
     def embed(self, texts: list[str], model_id: str = "text-embedding-ada-002") -> list[list[float]]:
         actual_embedding_model = model_id
+        # if self.provider == "deepseek": actual_embedding_model = "deepseek-embedder" # Example
         try:
             resp = self.client.embeddings.create(input=texts, model=actual_embedding_model)
             return [e.embedding for e in resp.data]
@@ -340,7 +350,6 @@ class SentimentAgent:
         valid_news_items = [item for item in news_items_from_bundle if isinstance(item, dict) and "error" not in item]
 
         if not valid_news_items:
-             # Check if the original list was not empty but only contained errors (e.g. from a single failed source)
             if news_items_from_bundle and isinstance(news_items_from_bundle[0], dict) and "error" in news_items_from_bundle[0]:
                 return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold",
                         "sentiment_error": news_items_from_bundle[0].get("error")}
@@ -349,7 +358,7 @@ class SentimentAgent:
         content_for_llm = []
         company_name_overall = data.get("ticker_info",{}).get('longName', ticker)
 
-        for item in valid_news_items[:7]: # Process top 7 valid articles
+        for item in valid_news_items[:7]:
             title = item.get('title', '')
             publisher = item.get('publisher', '')
             description = item.get('description', '')
@@ -365,7 +374,7 @@ class SentimentAgent:
         score = 0.0; llm_error_msg = None
         try:
             response_text = self.client.generate(prompt).strip()
-            if response_text.startswith("Error:"): llm_error_msg = response_text 
+            if response_text.startswith("Error:"): llm_error_msg = response_text
             else:
                 match = re.search(r"[-+]?\d*\.\d+|\d+", response_text)
                 if match: score = float(match.group(0)); score = max(-1.0, min(1.0, score))
@@ -373,10 +382,13 @@ class SentimentAgent:
         except Exception as e: llm_error_msg = f"LLM call failed: {str(e)[:150]}"
             
         final_error_message_for_sentiment = llm_error_msg
-        if overall_news_fetch_error and llm_error_msg: # Unlikely to hit if overall_news_fetch_error already returned
-            final_error_message_for_sentiment = f"{overall_news_fetch_error} | LLM: {llm_error_msg}"
-        elif overall_news_fetch_error:
-            final_error_message_for_sentiment = overall_news_fetch_error
+        # This logic for combining overall_news_fetch_error and llm_error_msg might be redundant
+        # if overall_news_fetch_error already led to an early return.
+        # However, keeping it in case overall_news_fetch_error was just a warning but not a complete failure.
+        if overall_news_fetch_error and "Error" in overall_news_fetch_error and llm_error_msg :
+             final_error_message_for_sentiment = f"News: {overall_news_fetch_error} | LLM: {llm_error_msg}"
+        elif overall_news_fetch_error and "Error" in overall_news_fetch_error:
+             final_error_message_for_sentiment = overall_news_fetch_error
         
         sig = "buy" if score > 0.25 and not llm_error_msg else ("sell" if score < -0.25 and not llm_error_msg else "hold")
         return {"ticker":ticker, "sentiment_score":score, "sentiment_signal":sig, "sentiment_error": final_error_message_for_sentiment}
@@ -614,7 +626,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             "ticker_info": ticker_info, 
             "news_headlines_for_popover": [
                 f"{n.get('publish_time_readable','N/A')} - {n.get('title', 'N/A')} ({n.get('publisher','N/A')} via {n.get('source_api','Unknown')})" 
-                for n in deduplicated_news[:10]
+                for n in deduplicated_news[:10] # Use the combined, sorted, de-duplicated list
             ],
             "politician_trades_for_popover": [pt for pt in politician_trades_list[:5] if isinstance(pt, dict) and "error" not in pt],
             "news_status_display": news_fetch_status_for_bundle 
@@ -701,7 +713,7 @@ except Exception as e: st.sidebar.error(f"LLM Init Unexpected Error: {e}")
 # --- Configuration Moved to Main Area ---
 st.header("⚙️ Configuration")
 config_container = st.container(border=True)
-app_mode = "Live Analysis"
+app_mode = "Live Analysis" # Default value
 
 with config_container:
     app_mode = st.radio("Select Mode:", ["Live Analysis", "Backtesting"], key="app_mode_select_main", horizontal=True, index=0)
@@ -834,8 +846,7 @@ if app_mode == "Live Analysis":
                     with tabs[3]: # News & Filings Tab
                         if live_configs_main["use_sentiment"]:
                             st.subheader("News Sentiment (LLM)")
-                            # Use the news_status_display from the main result dictionary
-                            llm_status_message = res.get("news_status_display", "Status: OK") 
+                            llm_status_message = res.get("news_status_display", "Status: OK")
                             if res.get("sentiment_error"):
                                 llm_status_message += f" | LLM: {res.get('sentiment_error')}"
                             
