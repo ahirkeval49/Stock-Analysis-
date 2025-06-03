@@ -17,6 +17,7 @@ praw
 transformers
 vaderSentiment
 openai
+newsapi
 
 # Visualization
 matplotlib
