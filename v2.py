@@ -181,8 +181,7 @@ def get_cik_for_ticker(ticker: str) -> str | None:
 @st.cache_data(ttl=4*3600)
 def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]:
     cik = get_cik_for_ticker(ticker_symbol)
-    
-    if not cik: 
+    if not cik:
         try:
             headers = {'User-Agent': SEC_USER_AGENT}
             lookup_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={ticker_symbol.upper()}&owner=exclude&count=10"
@@ -196,11 +195,8 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
             if not cik:
                 cik_text_match = re.search(r"CIK:\s*(\d{10})", soup.get_text(), re.IGNORECASE)
                 if cik_text_match: cik = cik_text_match.group(1)
-        except Exception:
-            pass 
-    
-    if not cik:
-        return [{"error": f"SEC Filings: CIK could not be determined for {ticker_symbol}"}]
+        except Exception: pass
+    if not cik: return [{"error": f"SEC Filings: CIK could not be determined for {ticker_symbol}"}]
 
     cik_padded = str(cik).zfill(10)
     submissions_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
@@ -210,39 +206,31 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
         response = requests.get(submissions_url, headers=headers, timeout=20)
         response.raise_for_status(); submissions_data = response.json()
         today = datetime.now(timezone.utc); date_limit = today - timedelta(days=lookback_days)
-
         if 'filings' in submissions_data and 'recent' in submissions_data['filings']:
             recent_filings = submissions_data['filings']['recent']
             forms=recent_filings.get('form',[]); filing_dates=recent_filings.get('filingDate',[])
             accession_numbers=recent_filings.get('accessionNumber',[]); primary_documents=recent_filings.get('primaryDocument',[])
-            
             filings_to_process_metadata = []
             for i in range(len(forms)):
                 try:
                     filing_date = datetime.strptime(filing_dates[i], '%Y-%m-%d').replace(tzinfo=timezone.utc)
                     if filing_date >= date_limit:
-                        filings_to_process_metadata.append({
-                            "form_type": forms[i], "filing_date_str": filing_dates[i],
-                            "accession_number": accession_numbers[i], "primary_document": primary_documents[i]
-                        })
+                        filings_to_process_metadata.append({"form_type": forms[i], "filing_date_str": filing_dates[i],
+                                                            "accession_number": accession_numbers[i], "primary_document": primary_documents[i]})
                 except ValueError: continue
-            
-            form4_xml_fetches = 0; max_form4_xml_fetches = 20; max_other_filings_to_list = 15 
-
+            form4_xml_fetches = 0; max_form4_xml_fetches = 20; max_other_filings_to_list = 15
             for filing_info in filings_to_process_metadata:
                 form_type = filing_info["form_type"]; filing_date_str = filing_info["filing_date_str"]
                 accession_number = filing_info["accession_number"]; primary_document_name = filing_info["primary_document"]
                 accession_number_no_dashes = accession_number.replace('-', '')
                 sec_filing_link = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{accession_number}-index.html"
-
                 if form_type == '4' and primary_document_name.lower().endswith(('.xml', '.xsd')):
                     if form4_xml_fetches >= max_form4_xml_fetches: continue
                     xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{primary_document_name}"
                     try:
                         filing_response = requests.get(xml_url, headers=headers, timeout=10)
                         if filing_response.status_code != 200: continue
-                        soup_xml = BeautifulSoup(filing_response.content, 'xml')
-                        form4_xml_fetches +=1
+                        soup_xml = BeautifulSoup(filing_response.content, 'xml'); form4_xml_fetches +=1
                         reporting_owner_tag = soup_xml.find('reportingOwner')
                         owner_name = "N/A"; owner_relationship_str = "N/A"
                         if reporting_owner_tag:
@@ -287,8 +275,8 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                     filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": filing_date_str,
                                          "form_type": form_type, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{primary_document_name}",
                                          "summary_link": sec_filing_link })
-            if not filings_list and form4_xml_fetches > 0 : return [{"error": f"SEC: Found {form4_xml_fetches} Form 4s for {ticker_symbol} but could not parse transaction details."}] # Corrected variable name
-            if not filings_list: return [{"error": f"SEC: No relevant filings found or parsable for {ticker_symbol} in the last {lookback_days} days."}]
+            if not filings_list and form4_xml_fetches > 0 : return [{"error": f"SEC: Found {form4_xml_fetches} Form 4s for {ticker_symbol} but failed to parse tx details."}]
+            if not filings_list: return [{"error": f"SEC: No relevant filings found or parsable for {ticker_symbol} in last {lookback_days} days."}]
         else: return [{"error": f"SEC: No recent filings data for {ticker_symbol} (CIK: {cik})"}]
     except requests.exceptions.HTTPError as e: return [{"error": f"SEC: HTTP error for {ticker_symbol}: {e}"}]
     except requests.exceptions.RequestException as e: return [{"error": f"SEC: Request error for {ticker_symbol}: {e}"}]
@@ -296,15 +284,26 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
     filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True)
     return filings_list
 
-@st.cache_data(ttl=3600)
-def fetch_fair_value_from_valueinvesting_io(ticker: str) -> dict: # Renamed from fetch_fair_value_from_value_trades
-    """
-    Fetches fair value data from valueinvesting.io for a given ticker.
-    """
+@st.cache_data(ttl=6*3600)
+def fetch_inst_filings(ticker: str) -> list[dict]:
+    """Fetches institutional holder data from yfinance."""
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        df_holders = ticker_obj.institutional_holders
+        if df_holders is not None and not df_holders.empty:
+            if 'Shares' in df_holders.columns:
+                df_holders['Shares'] = pd.to_numeric(df_holders['Shares'], errors='coerce').fillna(0)
+            if '% Out' in df_holders.columns:
+                df_holders['% Out'] = pd.to_numeric(df_holders['% Out'], errors='coerce').fillna(0.0)
+            return df_holders.to_dict("records")
+        return [{"error": f"No institutional holder data found for {ticker} via yfinance."}]
+    except Exception as e:
+        return [{"error": f"Failed to fetch institutional holders for {ticker} via yfinance: {e}"}]
+
+@st.cache_data(ttl=4 * 3600)
+def fetch_value_investing_io_data(ticker: str) -> dict:
     url = f"https://valueinvesting.io/{ticker.upper()}/valuation/fair-value"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
@@ -314,14 +313,10 @@ def fetch_fair_value_from_valueinvesting_io(ticker: str) -> dict: # Renamed from
         for p in paragraphs:
             text = p.get_text(strip=True)
             if ticker.upper() in text and "Peter Lynch's Fair Value formula" in text and "Fair Value of" in text:
-                target_paragraph_text = text
-                break
+                target_paragraph_text = text; break
         if not target_paragraph_text:
             return {"error": f"VI.io: Target paragraph not found for {ticker} on {url}."}
-        pattern = re.compile(
-            r"As of (?P<date>[\d]{4}-[\d]{2}-[\d]{2}), the Fair Value of .*? \(.*?" + re.escape(ticker.upper()) + r".*?\) is (?P<fair_value>[\d\.]+) USD"
-            r".*?With the current market price of (?P<market_price>[\d\.]+) USD, the upside of .*? is (?P<upside_percent>[-+]?\d+\.?\d*)%."
-        )
+        pattern = re.compile(r"As of (?P<date>[\d]{4}-[\d]{2}-[\d]{2}), the Fair Value of .*?\(.*?" + re.escape(ticker.upper()) + r".*?\) is (?P<fair_value>[\d\.]+) USD.*?With the current market price of (?P<market_price>[\d\.]+) USD, the upside of .*? is (?P<upside_percent>[-+]?\d+\.?\d*)%.")
         match = pattern.search(target_paragraph_text)
         if match:
             data = match.groupdict()
@@ -340,7 +335,7 @@ def fetch_fair_value_from_valueinvesting_io(ticker: str) -> dict: # Renamed from
 @st.cache_data(ttl=3600)
 def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
     url = f"https://www.capitoltrades.com/trades?asset={ticker.upper()}&pageSize=100&perPage=100"
-    headers = {'User-Agent': 'Mozilla/5.0 ...', 'Accept': 'text/html...', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'}
     politician_trades_list = []
     try:
         response = requests.get(url, headers=headers, timeout=20); response.raise_for_status()
@@ -510,6 +505,7 @@ class SECFilingAgent:
             error_from_fetch = f"SEC Filings: No filings data returned for {ticker}."
         elif isinstance(all_filings_raw[0], dict) and "error" in all_filings_raw[0]:
             error_from_fetch = all_filings_raw[0].get("error")
+            # Do not clear all_filings_raw here, as it might contain a single error dict
         
         if error_from_fetch:
             return {"ticker": ticker, "sec_net_insider_shares_1y": 0,
@@ -522,6 +518,8 @@ class SECFilingAgent:
         other_filings_metadata = []
 
         for filing in all_filings_raw:
+            if not isinstance(filing, dict) or "error" in filing : continue # Skip non-dicts or error dicts
+
             if filing.get("is_form4_transaction"):
                 form4_transactions_processed.append(filing)
                 if filing.get("transaction_code") == "P" and filing.get("acq_disp_code") == "A":
@@ -565,7 +563,7 @@ class PoliticianFilingsAgent:
                 "politician_buy_tx_count": buy_count, "politician_sell_tx_count": sell_count,
                 "politician_filings_signal": signal, "politician_data_error": error}
 
-class ValueInvestingIOAgent: # Replaces FairValueAgentVT and VTInspiredFairValueAgent
+class ValueInvestingIOAgent:
     def run(self, ticker: str, data: dict) -> dict:
         vi_data = data.get("value_investing_io_data", {}) 
         error = vi_data.get("error")
@@ -596,8 +594,7 @@ class PortfolioAgent:
     WEIGHTS = {"price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.6, "fund": 0.9,
                "valuation_dcf":0.5, "valuation_pe":0.5, "sec_filings": 0.6, 
                "inst_holdings": 0.3, "analyst": 0.7,
-               "politician_filings": 0.4, 
-               "vi": 0.8 } # Weight for ValueInvesting.io signal
+               "politician_filings": 0.4, "vi_signal": 0.8 } # Updated from vt_inspired to vi_signal
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
         current_weights = agent_weights or self.WEIGHTS; total_weighted_score = 0; sum_of_weights_used = 0
         agg_signals = {};
@@ -667,7 +664,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             "news_fetch_status_error": news_fetch_status_for_bundle if "Error" in news_fetch_status_for_bundle or "failed" in news_fetch_status_for_bundle.lower() or "No news" in news_fetch_status_for_bundle else None,
             "politician_trades": politician_trades_list,
             "value_investing_io_data": fetch_value_investing_io_data(t) if configs["use_value_trades"] else \
-                                        {"error": "VI.io: Skipped by user config."}, # Updated key
+                                        {"error": "VI.io: Skipped by user config."},
             "institutional_holdings": fetch_inst_filings(t) if configs["use_filings"] else []
         }
         
@@ -678,7 +675,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             all_agents_instances.append(InstitutionalHoldingsAgent())
         if configs["use_politician_filings"]: all_agents_instances.append(PoliticianFilingsAgent())
         if configs["use_value_trades"]: 
-            all_agents_instances.append(ValueInvestingIOAgent()) # New agent
+            all_agents_instances.append(ValueInvestingIOAgent())
 
         agent_results_list = []
         for agent_instance in all_agents_instances:
@@ -781,7 +778,7 @@ with config_container:
         cols_features = st.columns(3)
         with cols_features[0]:
             use_sentiment_live_main = st.checkbox("News Sentiment (LLM)", value=True if llm_client else False, disabled=not llm_client, key="live_sentiment_cb_main", help="Uses LLM for news sentiment. Requires NewsAPI key if used, else Yahoo Finance.")
-            use_filings_live_main = st.checkbox("SEC & Institutional Filings", value=True, key="live_sec_filings_cb_main", help="Analyzes SEC Form 4 and Institutional Holdings.") # Updated label
+            use_filings_live_main = st.checkbox("SEC & Institutional Filings", value=True, key="live_sec_filings_cb_main", help="Analyzes SEC Form 4 and Institutional Holdings.")
         with cols_features[1]:
             use_politician_filings_main = st.checkbox("Politician Filings", value=False, key="live_politician_cb_main", help="EXPERIMENTAL: Attempts to scrape CapitolTrades.com. May be slow/unreliable.")
             use_value_trades_main = st.checkbox("ValueInvesting.io Fair Value", value=False, key="live_vt_cb_main", help="EXPERIMENTAL: Scrapes fair value from ValueInvesting.io.") # Updated label
@@ -806,7 +803,7 @@ with config_container:
         backtest_portfolio_weights_main = {"price": bt_weights_price_main, "momentum": bt_weights_momentum_main, "volatility": bt_weights_volatility_main,
                                       "sentiment": 0.0, "fund": 0.0, "valuation_dcf":0.0, "valuation_pe":0.0,
                                       "sec_filings": 0.0, "inst_holdings": 0.0, "analyst": 0.0, 
-                                      "politician_filings": 0.0, "vi_signal": 0.0} # Changed vt_fair_value & vt_inspired to vi_signal
+                                      "politician_filings": 0.0, "vi_signal": 0.0}
         st.markdown("")
         run_button_backtest_main = st.button("📈 Run Backtest", use_container_width=True, type="primary", key="run_bt_btn_main")
 
@@ -865,21 +862,18 @@ if app_mode == "Live Analysis":
                         business_summary = ticker_info_res.get("longBusinessSummary")
                         if business_summary:
                             with st.popover("View Business Summary"): st.markdown(business_summary)
-                    with tabs[2]: # Valuation & Fair Value Tab
+                    with tabs[2]:
                         st.subheader("Valuation Metrics (yfinance based)")
                         val_s = {"Forward P/E": f"{res.get('forward_pe',0):.1f}", "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(), "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A", "DCF Signal": res.get('dcf_signal', "N/A").upper()}
                         st.dataframe(pd.Series(val_s, name="Value"), use_container_width=True)
-                        
-                        if live_configs_main["use_value_trades"]: # This toggle now controls ValueInvesting.io
-                            st.subheader("ValueInvesting.io Fair Value Analysis")
+                        if live_configs_main["use_value_trades"]:
+                            st.subheader("ValueInvesting.io Fair Value Analysis") # Updated Subheader
                             vi_error = res.get('vi_data_error')
                             if vi_error:
                                 st.caption(f"ValueInvesting.io Status: {vi_error}")
-                            
                             vi_full_text = res.get('vi_valuation_text_display')
                             if vi_full_text and not vi_error :
                                 st.markdown(f"""> *"{vi_full_text}"*""")
-                            
                             vi_data_display = {
                                 "VI.io Valuation Date": res.get('vi_valuation_date', "N/A"),
                                 "VI.io Fair Value (USD)": f"${res.get('vi_fair_value_estimate'):.2f}" if res.get('vi_fair_value_estimate') is not None else "N/A",
@@ -892,7 +886,6 @@ if app_mode == "Live Analysis":
                                 st.caption("Based on Peter Lynch's Fair Value formula as per ValueInvesting.io.")
                             elif not vi_error:
                                 st.caption("Data could not be fully parsed from ValueInvesting.io.")
-                    
                     with tabs[3]: # News & Filings Tab
                         if live_configs_main["use_sentiment"]:
                             st.subheader("News Sentiment (LLM)")
@@ -951,9 +944,6 @@ if app_mode == "Live Analysis":
                                         pct_out_display = f"{holder.get('% Out',0.0)*100:.2f}%" if isinstance(holder.get('% Out'), (int,float)) else holder.get('% Out', 'N/A')
                                         st.markdown(f"{i+1}. **{holder.get('Holder')}**: Shares: {shares_display} (% Out: {pct_out_display}) - Reported: {holder.get('Date Reported')}")
                             elif not inst_holdings_error: st.caption("No institutional holder data processed or found.")
-                        
-                        # Politician filings display removed from this specific tab.
-                        # Its data is still used by PortfolioAgent if the feature is enabled.
                     with tabs[4]: # All Signals
                         st.subheader("All Agent Signals & Final Decision")
                         all_s_keys = [k for k in res if k.endswith("_signal")]; all_s_table = {k.replace("_signal","").replace("_"," ").title(): str(res[k]).upper() for k in all_s_keys}
