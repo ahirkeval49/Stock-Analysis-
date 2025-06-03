@@ -228,22 +228,64 @@ class ModelClient:
     def __init__(self, api_key: str, provider: str = "openai"):
         self.api_key = api_key
         self.provider = provider
+        self.model_name = "gpt-4o" # Default model
+
         if not api_key:
-            raise ValueError("API key required.")
-        openai.api_key = self.api_key
+            # This error will be caught by the UI section that initializes the client
+            raise ValueError("API key required for ModelClient.")
+
         if provider == "deepseek":
-            openai.api_base = "https://api.deepseek.com/v1"
-            self.model = "deepseek-chat"
+            self.client = OpenAI(
+                api_key=self.api_key,
+                base_url="https://api.deepseek.com/v1"
+            )
+            # Ensure you are using a model name compatible with DeepSeek's API
+            # Common models are "deepseek-chat" or "deepseek-coder"
+            self.model_name = "deepseek-reasoner" # Or st.secrets.get("DEEPSEEK_MODEL_NAME", "deepseek-chat")
+        elif provider == "openai":
+            self.client = OpenAI(api_key=self.api_key)
+            # Default OpenAI model is fine, or you can specify e.g. "gpt-3.5-turbo"
+            self.model_name = "gpt-4o" # Or st.secrets.get("OPENAI_MODEL_NAME", "gpt-4o")
         else:
-            openai.api_base = "https://api.openai.com/v1"
-            self.model = "gpt-4o"
+            raise ValueError(f"Unsupported LLM provider: {provider}")
+
+    def embed(self, texts: list[str], model_id: str = "text-embedding-ada-002") -> list[list[float]]:
+        """
+        Generates embeddings for a list of texts.
+        Note: DeepSeek has its own embedding models, e.g., "deepseek-embedder".
+        This example uses OpenAI's default for simplicity if provider is OpenAI.
+        If using DeepSeek for embeddings, you'd need to specify their model and potentially adjust client init.
+        For now, this method will assume OpenAI's embedding model if not DeepSeek,
+        or would need specific DeepSeek embedding model logic.
+        """
+        try:
+            # For DeepSeek, their embedding model might be different.
+            # This example defaults to OpenAI's model if not explicitly DeepSeek for embeddings.
+            # If your DeepSeek API key also supports their embedding models, you can use:
+            # if self.provider == "deepseek":
+            #    model_id = "deepseek-embedder" # Or their specific embedding model name
+            
+            resp = self.client.embeddings.create(input=texts, model=model_id)
+            return [e.embedding for e in resp.data]
+        except Exception as e:
+            # Error will be propagated to the agent to display in context or handle
+            # print(f"Error creating embeddings with {self.provider} using model {model_id}: {e}")
+            raise Exception(f"Embedding Error ({self.provider}, {model_id}): {e}")
+
 
     def generate(self, prompt: str) -> str:
         try:
-            resp = openai.ChatCompletion.create(model=self.model, messages=[{"role": "user", "content": prompt}])
-            return resp.choices[0].message["content"]
+            # The self.model_name is set during __init__ based on the provider
+            resp = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.choices[0].message.content
         except Exception as e:
-            return f"Error: Could not generate LLM response. Detail: {str(e)[:100]}"
+            # Error will be propagated to the agent to display in context or handle
+            # print(f"Error generating text with {self.provider} using model {self.model_name}: {e}")
+            # Raise an exception so the agent can catch it and put it in its error field
+            raise Exception(f"LLM Generation Error ({self.provider}, {self.model_name}): {e}")
 
 # --------------------------------
 # Agents
