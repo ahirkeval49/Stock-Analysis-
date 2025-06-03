@@ -6,6 +6,7 @@ import numpy as np
 # from dateutil.relativedelta import relativedelta # Unused, pd.DateOffset is used
 from datetime import datetime, timedelta, timezone # Added timezone
 import openai
+from openai import OpenAI # Ensure this is at the top of your script
 from dotenv import load_dotenv
 import requests # For web scraping
 from bs4 import BeautifulSoup # For web scraping
