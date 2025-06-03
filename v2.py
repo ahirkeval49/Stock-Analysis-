@@ -14,6 +14,9 @@ from urllib.parse import urljoin
 from newsapi import NewsApiClient
 import json # For CIK mapping
 
+# --- THIS IS THE CORRECT PLACEMENT ---
+st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
+# --- END CORRECT PLACEMENT ---
 # Load environment variables (if running locally)
 load_dotenv()
 
