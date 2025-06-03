@@ -913,30 +913,41 @@ if app_mode == "Live Analysis":
                         business_summary = ticker_info_res.get("longBusinessSummary")
                         if business_summary:
                             with st.popover("View Business Summary"): st.markdown(business_summary)
-                    with tabs[2]:
+                   with tabs[2]:
                         st.subheader("Valuation Metrics (yfinance based)")
-                        val_s = {"Forward P/E": f"{res.get('forward_pe',0):.1f}", "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(), "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A", "DCF Signal": res.get('dcf_signal', "N/A").upper()}
+                        val_s = {
+                            "Forward P/E": f"{res.get('forward_pe',0):.1f}",
+                            "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(),
+                            "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A",
+                            "DCF Signal": res.get('dcf_signal', "N/A").upper()
+                        }
                         st.dataframe(pd.Series(val_s, name="Value"), use_container_width=True)
+
                         if live_configs_main["use_value_trades"]:
-                            st.subheader("ValueInvesting.io Fair Value Analysis") # Updated Subheader
+                            st.subheader("ValueInvesting.io Fair Value Analysis")
                             vi_error = res.get('vi_data_error')
-                            if vi_error:
-                                st.caption(f"ValueInvesting.io Status: {vi_error}")
                             vi_full_text = res.get('vi_valuation_text_display')
-                            if vi_full_text and not vi_error :
-                                st.markdown(f"""> *"{vi_full_text}"*""")
-                            vi_data_display = {
-                                "VI.io Valuation Date": res.get('vi_valuation_date', "N/A"),
-                                "VI.io Fair Value (USD)": f"${res.get('vi_fair_value_estimate'):.2f}" if res.get('vi_fair_value_estimate') is not None else "N/A",
-                                "VI.io Site Market Price (USD)": f"${res.get('vi_site_market_price'):.2f}" if res.get('vi_site_market_price') is not None else "N/A",
-                                "VI.io Upside/Downside (%)": f"{res.get('vi_upside_percent'):.2f}%" if res.get('vi_upside_percent') is not None else "N/A",
-                                "VI.io Signal": res.get('vi_signal', "N/A").upper()
-                            }
-                            st.dataframe(pd.Series(vi_data_display, name="Value"), use_container_width=True)
-                            if not vi_error and res.get('vi_fair_value_estimate') is not None:
-                                st.caption("Based on Peter Lynch's Fair Value formula as per ValueInvesting.io.")
-                            elif not vi_error:
-                                st.caption("Data could not be fully parsed from ValueInvesting.io.")
+
+                            if vi_full_text and not vi_error:
+                                # Display the complete sentence when available
+                                st.markdown(f"**Analysis from ValueInvesting.io:**")
+                                st.markdown(f"> *{vi_full_text}*")
+                                st.caption("This analysis is based on Peter Lynch's Fair Value formula as per ValueInvesting.io.")
+                                # You can optionally add key derived metrics here if still desired, but not in a table
+                                if res.get('vi_fair_value_estimate') is not None and res.get('vi_site_market_price') is not None:
+                                    st.markdown(f"- **Fair Value:** ${res.get('vi_fair_value_estimate'):.2f} (Site's Market Price: ${res.get('vi_site_market_price'):.2f})")
+                                if res.get('vi_upside_percent') is not None:
+                                    st.markdown(f"- **Upside/Downside:** {res.get('vi_upside_percent'):.2f}%")
+                                st.markdown(f"- **VI.io Signal:** {res.get('vi_signal', 'N/A').upper()}")
+
+                            elif vi_error:
+                                # Display only the error message if parsing failed
+                                st.warning(f"ValueInvesting.io Status: {vi_error}")
+                                st.caption("Could not retrieve or parse fair value details from ValueInvesting.io. This feature is experimental and may be unreliable.")
+                            else:
+                                # Fallback if feature is enabled but no data/text found without explicit error
+                                st.info("ValueInvesting.io: No specific fair value analysis text found or parsed for this ticker.")
+                                st.caption("This feature is experimental and may be unreliable.")
                     with tabs[3]: # News & Filings Tab
                         if live_configs_main["use_sentiment"]:
                             st.subheader("News Sentiment (LLM)")
