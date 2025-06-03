@@ -46,13 +46,18 @@ def fetch_ticker_info(ticker: str) -> dict:
         info = yf.Ticker(ticker).info
         if not info or info.get('regularMarketPrice') is None and info.get('currentPrice') is None :
             return {}
-        # Simplified return dictionary
-        return {key: info.get(key) for key in [
-            "marketCap", "freeCashflow", "forwardPE", "trailingPE", "priceToBook",
-            "enterpriseToRevenue", "enterpriseToEbitda", "returnOnEquity", "debtToEquity",
-            "beta", "targetMeanPrice", "recommendationKey", "numberOfAnalystOpinions",
-            "industry", "sector", "longName", "shortName", "longBusinessSummary"
-        ]} | {"currentPrice": info.get("currentPrice") or info.get("regularMarketPrice")}
+        return {
+            "marketCap": info.get("marketCap"), "freeCashflow": info.get("freeCashflow"),
+            "forwardPE": info.get("forwardPE"), "trailingPE": info.get("trailingPE"),
+            "priceToBook": info.get("priceToBook"), "enterpriseToRevenue": info.get("enterpriseToRevenue"),
+            "enterpriseToEbitda": info.get("enterpriseToEbitda"), "returnOnEquity": info.get("returnOnEquity"),
+            "debtToEquity": info.get("debtToEquity"), "beta": info.get("beta"),
+            "targetMeanPrice": info.get("targetMeanPrice"), "recommendationKey":info.get("recommendationKey"),
+            "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"), "industry": info.get("industry"),
+            "sector": info.get("sector"), "longName": info.get("longName"), "shortName": info.get("shortName"),
+            "longBusinessSummary": info.get("longBusinessSummary"),
+            "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
+        }
     except Exception as e:
         return {}
 
@@ -174,53 +179,90 @@ def get_cik_for_ticker(ticker: str) -> str | None:
     return TICKER_TO_CIK_MAP.get(ticker.upper())
 
 @st.cache_data(ttl=4*3600)
-def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 180) -> list[dict]:
+def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]: # Changed lookback to 365
     cik = get_cik_for_ticker(ticker_symbol)
-    if not cik: return [{"error": f"SEC Filings: CIK not found for {ticker_symbol}"}]
+    
+    if not cik: # Fallback CIK lookup
+        try:
+            headers = {'User-Agent': SEC_USER_AGENT}
+            lookup_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={ticker_symbol.upper()}&owner=exclude&count=10"
+            response = requests.get(lookup_url, headers=headers, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, 'html.parser')
+            cik_anchor = soup.find('a', href=re.compile(r"CIK=(\d{10})"))
+            if cik_anchor:
+                match = re.search(r"CIK=(\d{10})", cik_anchor['href'])
+                if match: cik = match.group(1)
+            if not cik:
+                cik_text_match = re.search(r"CIK:\s*(\d{10})", soup.get_text(), re.IGNORECASE)
+                if cik_text_match: cik = cik_text_match.group(1)
+        except Exception:
+            pass # If fallback fails, cik remains None
+    
+    if not cik:
+        return [{"error": f"SEC Filings: CIK could not be determined for {ticker_symbol}"}]
+
     cik_padded = str(cik).zfill(10)
     submissions_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
     headers = {'User-Agent': SEC_USER_AGENT}
-    transactions_list = []
+    filings_list = []
     try:
         response = requests.get(submissions_url, headers=headers, timeout=20)
         response.raise_for_status(); submissions_data = response.json()
         today = datetime.now(timezone.utc); date_limit = today - timedelta(days=lookback_days)
+
         if 'filings' in submissions_data and 'recent' in submissions_data['filings']:
             recent_filings = submissions_data['filings']['recent']
             forms=recent_filings.get('form',[]); filing_dates=recent_filings.get('filingDate',[])
             accession_numbers=recent_filings.get('accessionNumber',[]); primary_documents=recent_filings.get('primaryDocument',[])
-            form4_processed_count = 0
+            
+            filings_to_process_metadata = []
             for i in range(len(forms)):
-                if forms[i] == '4':
-                    try:
-                        filing_date = datetime.strptime(filing_dates[i], '%Y-%m-%d').replace(tzinfo=timezone.utc)
-                        if filing_date < date_limit: continue
-                    except ValueError: continue
-                    if form4_processed_count >= 20: break
-                    accession_number_no_dashes = accession_numbers[i].replace('-', '')
-                    primary_document_xml = primary_documents[i]
-                    if not primary_document_xml.lower().endswith(('.xml', '.xsd')): continue
-                    xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{primary_document_xml}"
+                try:
+                    filing_date = datetime.strptime(filing_dates[i], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                    if filing_date >= date_limit:
+                        filings_to_process_metadata.append({
+                            "form_type": forms[i], "filing_date_str": filing_dates[i],
+                            "accession_number": accession_numbers[i], "primary_document": primary_documents[i]
+                        })
+                except ValueError: continue
+            
+            # Limit number of XMLs to parse for performance, prioritizing Form 4s
+            form4_xml_fetches = 0
+            max_form4_xml_fetches = 20 
+            max_other_filings_to_list = 15 
+
+            for filing_info in filings_to_process_metadata:
+                form_type = filing_info["form_type"]
+                filing_date_str = filing_info["filing_date_str"]
+                accession_number = filing_info["accession_number"]
+                primary_document_name = filing_info["primary_document"]
+                accession_number_no_dashes = accession_number.replace('-', '')
+                sec_filing_link = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{accession_number}-index.html"
+
+                if form_type == '4' and primary_document_name.lower().endswith(('.xml', '.xsd')):
+                    if form4_xml_fetches >= max_form4_xml_fetches: continue
+                    xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{primary_document_name}"
                     try:
                         filing_response = requests.get(xml_url, headers=headers, timeout=10)
                         if filing_response.status_code != 200: continue
                         soup_xml = BeautifulSoup(filing_response.content, 'xml')
-                        form4_processed_count +=1
+                        form4_xml_fetches +=1
+                        
                         reporting_owner_tag = soup_xml.find('reportingOwner')
                         owner_name = "N/A"; owner_relationship_str = "N/A"
                         if reporting_owner_tag:
                             owner_id_tag = reporting_owner_tag.find('reportingOwnerId')
-                            if owner_id_tag and owner_id_tag.find('rptOwnerName'):
-                                owner_name = owner_id_tag.find('rptOwnerName').text.strip()
+                            if owner_id_tag and owner_id_tag.find('rptOwnerName'): owner_name = owner_id_tag.find('rptOwnerName').text.strip()
                             rel_tag = reporting_owner_tag.find('reportingOwnerRelationship')
                             if rel_tag:
                                 rels = []
                                 if rel_tag.find('isDirector') and rel_tag.find('isDirector').text in ['1', 'true']: rels.append("Director")
                                 if rel_tag.find('isOfficer') and rel_tag.find('isOfficer').text in ['1', 'true']: 
-                                    title_tag = rel_tag.find('officerTitle')
-                                    rels.append(f"Officer ({title_tag.text.strip() if title_tag and title_tag.text else ''})")
+                                    title_tag = rel_tag.find('officerTitle'); rels.append(f"Officer ({title_tag.text.strip() if title_tag and title_tag.text else ''})")
                                 if rel_tag.find('isTenPercentOwner') and rel_tag.find('isTenPercentOwner').text in ['1', 'true']: rels.append(">10% Owner")
-                                if rels: owner_relationship_str = ", ".join(filter(None, rels))
+                                if rels: owner_relationship_str = ", ".join(filter(None,rels))
+
                         for transaction_table_name in ['nonDerivativeTable', 'derivativeTable']:
                             table = soup_xml.find(transaction_table_name)
                             if not table: continue
@@ -228,9 +270,7 @@ def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 180) -> lis
                                 trans_date_tag = transaction.find('transactionDate')
                                 trans_date = trans_date_tag.find('value').text.strip() if trans_date_tag and trans_date_tag.find('value') else "N/A"
                                 trans_coding_tag = transaction.find('transactionCoding')
-                                trans_code = "N/A"
-                                if trans_coding_tag and trans_coding_tag.find('transactionCode'):
-                                    trans_code = trans_coding_tag.find('transactionCode').text.strip().upper()
+                                trans_code = trans_coding_tag.find('transactionCode').text.strip().upper() if trans_coding_tag and trans_coding_tag.find('transactionCode') else "N/A"
                                 shares_val = 0.0; price_val = None
                                 amounts_tag = transaction.find('transactionAmounts')
                                 if amounts_tag and amounts_tag.find('transactionShares') and amounts_tag.find('transactionShares').find('value'):
@@ -243,36 +283,40 @@ def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 180) -> lis
                                 acq_disp_node = transaction.find('transactionAcquiredDisposedCode')
                                 acq_disp_code = acq_disp_node.find('value').text.strip().upper() if acq_disp_node and acq_disp_node.find('value') else "N/A"
                                 if shares_val != 0:
-                                    transactions_list.append({"ticker": ticker_symbol, "filing_date": filing_dates[i],
+                                    filings_list.append({"is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": filing_date_str,
                                         "transaction_date": trans_date, "reporting_owner": owner_name,
                                         "owner_relationship": owner_relationship_str, "transaction_code": trans_code,
                                         "acq_disp_code": acq_disp_code, "shares": shares_val, "price_per_share": price_val,
-                                        "link_to_filing": xml_url.replace(primary_document_xml, "FilingSummary.xml")})
+                                        "link_to_filing": xml_url.replace(primary_document_name, "FilingSummary.xml")})
                     except requests.exceptions.RequestException: pass
-                    except Exception: pass 
-            if not transactions_list and form4_processed_count > 0 : return [{"error": f"SEC: Found {form4_processed_count} Form 4s for {ticker_symbol} but failed to parse tx details."}]
-            if not transactions_list: return [{"error": f"SEC: No Form 4 tx found for {ticker_symbol} in last {lookback_days} days.", "cik": cik}]
+                    except Exception: pass
+                elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other_filings_to_list : # Limit other filings listed
+                    filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": filing_date_str,
+                                         "form_type": form_type, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{primary_document_name}",
+                                         "summary_link": sec_filing_link })
+            if not filings_list: return [{"error": f"SEC: No relevant filings processed for {ticker_symbol} in last {lookback_days} days."}]
         else: return [{"error": f"SEC: No recent filings data for {ticker_symbol} (CIK: {cik})"}]
     except requests.exceptions.HTTPError as e: return [{"error": f"SEC: HTTP error for {ticker_symbol}: {e}"}]
     except requests.exceptions.RequestException as e: return [{"error": f"SEC: Request error for {ticker_symbol}: {e}"}]
     except Exception as e: return [{"error": f"SEC: Unexpected error for {ticker_symbol}: {e}"}]
-    return transactions_list
+    return filings_list
+
 
 @st.cache_data(ttl=3600)
 def fetch_fair_value_from_value_trades(ticker: str, company_name: str) -> dict:
-    error_message = (f"VT ({ticker}): Scraping value-trades.com is complex due to its dynamic search. This is a placeholder.")
+    error_message = (f"VT ({ticker}): Scraping value-trades.com is complex due to its dynamic search. This function is a placeholder.")
     return {"error": error_message, "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None,
             "vt_valuation_status": None, "vt_valuation_percentage": None, "vt_assigned_pe_by_site": None, "vt_eps_used_by_site": None}
 
 @st.cache_data(ttl=3600)
 def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
     url = f"https://www.capitoltrades.com/trades?asset={ticker.upper()}&pageSize=100&perPage=100"
-    headers = {'User-Agent': 'Mozilla/5.0 ...', 'Accept': 'text/html...', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'}
     politician_trades_list = []
     try:
         response = requests.get(url, headers=headers, timeout=20); response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-        trade_rows = soup.select("a[href^='/trades/'][class*='trade-row']")
+        trade_rows = soup.select("a[href^='/trades/'][class*='trade-row']");
         if not trade_rows: trade_rows = soup.find_all('a', href=lambda href: href and href.startswith('/trades/'))
         if not trade_rows: return [{"error": f"CT: No trade rows found for {ticker}."}]
         for row_link_tag in trade_rows[:20]:
@@ -319,7 +363,7 @@ class ModelClient:
         except Exception as e: raise Exception(f"LLM Generation Error ({self.provider}, {self.model_name}): {e}")
 
 # --------------------------------
-# Agents (Class definitions should come before they are instantiated)
+# Agents
 # --------------------------------
 class PriceAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
@@ -411,7 +455,7 @@ class ValuationAgent:
         elif fair_price < price * 0.85: dcf_sig = "sell"
         return {"ticker": ticker, "forward_pe": pe, "relative_pe_signal": rel_sig, "dcf_fair_price": float(fair_price), "dcf_signal": dcf_sig}
 
-class AnalystRatingAgent: # Definition was missing, now added
+class AnalystRatingAgent:
     def run(self, ticker: str, data: dict) -> dict:
         ticker_info_res = data.get("ticker_info", {}); price_history_df = data.get("price_history")
         current_price = ticker_info_res.get("currentPrice") or (price_history_df["Close"].iloc[-1] if price_history_df is not None and not price_history_df.empty else None)
@@ -431,38 +475,54 @@ class AnalystRatingAgent: # Definition was missing, now added
 
 class SECFilingAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        form4_transactions = fetch_sec_form4_filings(ticker, lookback_days=180)
+        all_filings_raw = fetch_all_sec_filings(ticker, lookback_days=365) # Updated to 1 year
+
         error_from_fetch = None
-        if not form4_transactions: 
-            error_from_fetch = f"SEC Filings: No Form 4 transactions data returned for {ticker}."
-        elif isinstance(form4_transactions[0], dict) and "error" in form4_transactions[0]:
-            error_from_fetch = form4_transactions[0].get("error")
-            form4_transactions = [] 
-        if error_from_fetch:
-            return {"ticker": ticker, "sec_net_insider_shares_6m": 0, "sec_insider_buy_value_6m": 0, 
-                    "sec_insider_sell_value_6m": 0, "sec_filings_signal": "hold", 
-                    "sec_filings_error": error_from_fetch, "sec_recent_form4_transactions": []}
+        if not all_filings_raw: 
+            error_from_fetch = f"SEC Filings: No filings data returned for {ticker}."
+        elif isinstance(all_filings_raw[0], dict) and "error" in all_filings_raw[0]:
+            error_from_fetch = all_filings_raw[0].get("error")
+        
+        if error_from_fetch: # If fetch_all_sec_filings itself returned an error dictionary
+            return {
+                "ticker": ticker, "sec_net_insider_shares_1y": 0,
+                "sec_insider_buy_value_1y": 0, "sec_insider_sell_value_1y": 0,
+                "sec_filings_signal": "hold", "sec_filings_error": error_from_fetch,
+                "sec_recent_form4_transactions": [], "sec_other_recent_filings": []
+            }
 
         net_shares = 0; buy_value = 0; sell_value = 0
-        processed_transactions = []
-        for tx in form4_transactions:
-            if tx.get("transaction_code") == "P" and tx.get("acq_disp_code") == "A":
-                shares = tx.get("shares", 0.0); price = tx.get("price_per_share")
-                net_shares += shares
-                if price is not None and shares != 0: buy_value += shares * price
-                processed_transactions.append(tx)
-            elif tx.get("transaction_code") == "S" and tx.get("acq_disp_code") == "D":
-                shares = tx.get("shares", 0.0); price = tx.get("price_per_share")
-                net_shares -= shares
-                if price is not None and shares != 0: sell_value += shares * price
-                processed_transactions.append(tx)
+        form4_transactions_processed = []
+        other_filings_metadata = []
+
+        for filing in all_filings_raw:
+            if filing.get("is_form4_transaction"):
+                form4_transactions_processed.append(filing)
+                if filing.get("transaction_code") == "P" and filing.get("acq_disp_code") == "A":
+                    shares = filing.get("shares", 0.0); price = filing.get("price_per_share")
+                    net_shares += shares
+                    if price is not None and shares != 0: buy_value += shares * price
+                elif filing.get("transaction_code") == "S" and filing.get("acq_disp_code") == "D":
+                    shares = filing.get("shares", 0.0); price = filing.get("price_per_share")
+                    net_shares -= shares
+                    if price is not None and shares != 0: sell_value += shares * price
+            else: 
+                other_filings_metadata.append(filing)
+        
         signal = "hold"
-        if net_shares > 1000 or buy_value > 100000: signal = "buy" 
-        elif net_shares < -1000 or sell_value > 100000: signal = "sell"
-        return {"ticker": ticker, "sec_net_insider_shares_6m": int(net_shares),
-                "sec_insider_buy_value_6m": round(buy_value, 2), "sec_insider_sell_value_6m": round(sell_value, 2),
-                "sec_filings_signal": signal, "sec_filings_error": None,
-                "sec_recent_form4_transactions": processed_transactions[:10]}
+        if net_shares > 2000 or buy_value > 200000: signal = "buy" 
+        elif net_shares < -2000 or sell_value > 200000: signal = "sell"
+        
+        return {
+            "ticker": ticker, 
+            "sec_net_insider_shares_1y": int(net_shares),
+            "sec_insider_buy_value_1y": round(buy_value, 2), 
+            "sec_insider_sell_value_1y": round(sell_value, 2),
+            "sec_filings_signal": signal, 
+            "sec_filings_error": None, # Cleared if processing happened
+            "sec_recent_form4_transactions": form4_transactions_processed[:10], 
+            "sec_other_recent_filings": other_filings_metadata[:10] 
+        }
 
 class PoliticianFilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
@@ -538,9 +598,38 @@ class VTInspiredFairValueAgent:
                 "vt_inspired_fair_value": vt_inspired_fair_value, "vt_inspired_signal": signal,
                 "error_vt_inspired_fv": None if vt_inspired_fair_value is not None else "Could not calculate VT-Inspired Fair Value"}
 
+class InstitutionalHoldingsAgent:
+    def run(self, ticker: str, data: dict) -> dict:
+        inst_holdings_data = data.get("institutional_holdings", []) # This key is set in run_live_analysis
+        error_msg = None; top_holders = []
+        total_shares_held_by_institutions = 0; total_pct_outstanding_by_institutions = 0.0
+        num_institutions = 0; signal = "hold"
+
+        if inst_holdings_data and isinstance(inst_holdings_data[0], dict) and "error" in inst_holdings_data[0]:
+            error_msg = inst_holdings_data[0]["error"]
+        elif inst_holdings_data:
+            valid_holdings = [h for h in inst_holdings_data if isinstance(h, dict) and "error" not in h]
+            num_institutions = len(valid_holdings)
+            for holding in valid_holdings:
+                total_shares_held_by_institutions += holding.get("Shares", 0)
+                total_pct_outstanding_by_institutions += holding.get("% Out", 0.0)
+            try:
+                sorted_holdings = sorted(valid_holdings, key=lambda x: x.get("Shares", 0), reverse=True)
+                top_holders = sorted_holdings[:10]
+            except TypeError: top_holders = valid_holdings[:10]; error_msg = (error_msg or "") + " | Note: Could not sort holders."
+            if total_pct_outstanding_by_institutions > 0.60: signal = "buy"
+            elif total_pct_outstanding_by_institutions < 0.20 and num_institutions > 0: signal = "sell"
+        return {"ticker": ticker, "inst_num_holders": num_institutions,
+                "inst_total_shares_held": total_shares_held_by_institutions,
+                "inst_total_pct_out": total_pct_outstanding_by_institutions,
+                "inst_top_holders": top_holders, "inst_holdings_signal": signal,
+                "inst_holdings_error": error_msg}
+
 class PortfolioAgent:
     WEIGHTS = {"price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.6, "fund": 0.9,
-               "valuation_dcf":0.5, "valuation_pe":0.5, "sec_filings": 0.6, "analyst": 0.7,
+               "valuation_dcf":0.5, "valuation_pe":0.5, "sec_filings": 0.6, 
+               "inst_holdings": 0.3, # Added weight for institutional holdings
+               "analyst": 0.7,
                "politician_filings": 0.4, "vt_fair_value": 0.0, "vt_inspired": 0.7}
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
         current_weights = agent_weights or self.WEIGHTS; total_weighted_score = 0; sum_of_weights_used = 0
@@ -550,6 +639,7 @@ class PortfolioAgent:
         signal_map = {"price_signal": "price", "momentum_signal": "momentum", "volatility_signal": "volatility",
                       "sentiment_signal": "sentiment", "fund_signal": "fund", "dcf_signal": "valuation_dcf",
                       "relative_pe_signal": "valuation_pe", "sec_filings_signal": "sec_filings", 
+                      "inst_holdings_signal": "inst_holdings", # Added signal key
                       "analyst_signal": "analyst", "politician_filings_signal": "politician_filings",
                       "vt_fair_value_signal": "vt_fair_value", "vt_inspired_signal": "vt_inspired"}
         for signal_key, weight_key in signal_map.items():
@@ -586,7 +676,6 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
                 combined_news_data_list.extend(yfinance_news)
             elif yfinance_news and isinstance(yfinance_news[0], dict) and "error" in yfinance_news[0]:
                 news_fetch_status_messages.append(f"Yahoo News: {yfinance_news[0]['error']}")
-
             if llm_client and st.secrets.get("NEWSAPI_KEY"):
                 newsapi_articles = fetch_comprehensive_news_from_api(t, company_name_for_news_and_vt, lookback_days=30)
                 if newsapi_articles and not (isinstance(newsapi_articles[0], dict) and "error" in newsapi_articles[0]):
@@ -611,12 +700,15 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             "price_history": price_history_full, "ticker_info": ticker_info, "news": deduplicated_news, 
             "news_fetch_status_error": news_fetch_status_for_bundle if "Error" in news_fetch_status_for_bundle or "failed" in news_fetch_status_for_bundle.lower() or "No news" in news_fetch_status_for_bundle else None,
             "politician_trades": politician_trades_list,
-            "value_trades_fair_value_data": fetch_fair_value_from_value_trades(t, company_name_for_news_and_vt) if configs["use_value_trades"] else {"vt_fair_value": None, "error": "VT: Skipped by user config."}
+            "value_trades_fair_value_data": fetch_fair_value_from_value_trades(t, company_name_for_news_and_vt) if configs["use_value_trades"] else {"vt_fair_value": None, "error": "VT: Skipped by user config."},
+            "institutional_holdings": fetch_inst_filings(t) if configs["use_filings"] else [] # Fetch inst holdings
         }
         
-        all_agents_instances = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()] # AnalystRatingAgent is here
+        all_agents_instances = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()]
         if configs["use_sentiment"] and llm_client: all_agents_instances.append(SentimentAgent(llm_client))
-        if configs["use_filings"]: all_agents_instances.append(SECFilingAgent())
+        if configs["use_filings"]: 
+            all_agents_instances.append(SECFilingAgent())
+            all_agents_instances.append(InstitutionalHoldingsAgent()) # Add new agent
         if configs["use_politician_filings"]: all_agents_instances.append(PoliticianFilingsAgent())
         if configs["use_value_trades"]: 
             all_agents_instances.append(FairValueAgentVT())
@@ -651,7 +743,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
 # --------------------------------
 def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_placeholder, backtest_agent_weights):
     s_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
-    fetch_start_date = (s_date_obj - pd.DateOffset(months=18)).strftime("%Y-%m-%d") # pd.DateOffset should be fine
+    fetch_start_date = (s_date_obj - pd.DateOffset(months=18)).strftime("%Y-%m-%d")
     full_price_history = fetch_price_history(ticker, period=None, interval="1d")
     if full_price_history.empty: return {"error": "Backtest failed: Price history empty."}, pd.DataFrame()
     price_history = full_price_history[(full_price_history.index >= pd.to_datetime(fetch_start_date)) & (full_price_history.index <= pd.to_datetime(end_date))].copy()
@@ -693,7 +785,7 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
 # --------------------------------
 # Streamlit UI
 # --------------------------------
-llm_client = None # Define llm_client in the global scope first
+llm_client = None 
 try:
     deepseek_key = getattr(st.secrets, "DEEPSEEK_API_KEY", None) if hasattr(st.secrets, "DEEPSEEK_API_KEY") else None
     openai_key = getattr(st.secrets, "OPENAI_API_KEY", None) if hasattr(st.secrets, "OPENAI_API_KEY") else None
@@ -703,18 +795,15 @@ try:
     elif openai_key:
         llm_client = ModelClient(api_key=openai_key, provider="openai")
         st.sidebar.caption("✅ LLM: OpenAI Initialized")
-    else:
-        st.sidebar.warning("LLM API key missing. Sentiment analysis disabled.")
-except ValueError as e:
-    st.sidebar.error(f"LLM Init Error: {e}. Check API Key.")
-except Exception as e:
-    st.sidebar.error(f"LLM Init Unexpected Error: {e}")
+    else: st.sidebar.warning("LLM API key missing. Sentiment analysis disabled.")
+except ValueError as e: st.sidebar.error(f"LLM Init Error: {e}. Check API Key.")
+except Exception as e: st.sidebar.error(f"LLM Init Unexpected Error: {e}")
 
 st.title("🚀 AI Hedge Fund Simulator")
 
 st.header("⚙️ Configuration")
 config_container = st.container(border=True)
-app_mode = "Live Analysis" # Default value
+app_mode = "Live Analysis"
 with config_container:
     app_mode = st.radio("Select Mode:", ["Live Analysis", "Backtesting"], key="app_mode_select_main", horizontal=True, index=0)
     st.markdown("---")
@@ -726,7 +815,7 @@ with config_container:
         cols_features = st.columns(3)
         with cols_features[0]:
             use_sentiment_live_main = st.checkbox("News Sentiment (LLM)", value=True if llm_client else False, disabled=not llm_client, key="live_sentiment_cb_main", help="Uses LLM for news sentiment. Requires NewsAPI key if used, else Yahoo Finance.")
-            use_filings_live_main = st.checkbox("SEC Insider Filings (Form 4)", value=True, key="live_sec_filings_cb_main", help="Analyzes SEC Form 4 insider transactions.")
+            use_filings_live_main = st.checkbox("SEC & Institutional Filings", value=True, key="live_sec_filings_cb_main", help="Analyzes SEC Form 4 insider transactions and Institutional Holdings.") # Updated label
         with cols_features[1]:
             use_politician_filings_main = st.checkbox("Politician Filings", value=False, key="live_politician_cb_main", help="EXPERIMENTAL: Attempts to scrape CapitolTrades.com. May be slow/unreliable.")
             use_value_trades_main = st.checkbox("Value-Trades Analysis", value=False, key="live_vt_cb_main", help="EXPERIMENTAL: Includes placeholder for Value-Trades.com scraping & a VT-Inspired calculation.")
@@ -750,7 +839,8 @@ with config_container:
             bt_weights_volatility_main = st.slider("Volatility Signal Weight:", 0.0, 2.0, 0.2, 0.1, key="bt_w_vol_main")
         backtest_portfolio_weights_main = {"price": bt_weights_price_main, "momentum": bt_weights_momentum_main, "volatility": bt_weights_volatility_main,
                                       "sentiment": 0.0, "fund": 0.0, "valuation_dcf":0.0, "valuation_pe":0.0,
-                                      "sec_filings": 0.0, "analyst": 0.0, "politician_filings": 0.0, "vt_fair_value": 0.0, "vt_inspired":0.0}
+                                      "sec_filings": 0.0, "inst_holdings": 0.0, "analyst": 0.0, 
+                                      "politician_filings": 0.0, "vt_fair_value": 0.0, "vt_inspired":0.0}
         st.markdown("")
         run_button_backtest_main = st.button("📈 Run Backtest", use_container_width=True, type="primary", key="run_bt_btn_main")
 
@@ -853,25 +943,57 @@ if app_mode == "Live Analysis":
                             elif "Error" not in llm_status_message and "No news items" not in llm_status_message and "No valid news" not in llm_status_message :
                                  st.caption("No news headlines available or processed.")
                         if live_configs_main["use_filings"]:
-                            st.subheader("SEC Insider Transactions (Form 4 - Last 6 Months)")
+                            st.subheader("SEC Insider Transactions (Form 4 - Past Year)") # Updated title
                             sec_filings_error = res.get("sec_filings_error")
                             if sec_filings_error: st.caption(f"SEC Filings Status: {sec_filings_error}")
-                            sec_data_display = {"Net Insider Shares (6M)": f"{res.get('sec_net_insider_shares_6m',0):,}",
-                                                "Total Buy Value (6M Est.)": f"${res.get('sec_insider_buy_value_6m',0):,.0f}",
-                                                "Total Sell Value (6M Est.)": f"${res.get('sec_insider_sell_value_6m',0):,.0f}",
+                            sec_data_display = {"Net Insider Shares (1Y)": f"{res.get('sec_net_insider_shares_1y',0):,}", # Updated key
+                                                "Total Buy Value (1Y Est.)": f"${res.get('sec_insider_buy_value_1y',0):,.0f}", # Updated key
+                                                "Total Sell Value (1Y Est.)": f"${res.get('sec_insider_sell_value_1y',0):,.0f}", # Updated key
                                                 "SEC Filings Signal": res.get("sec_filings_signal", "N/A").upper()}
                             st.dataframe(pd.Series(sec_data_display, name="Value"), use_container_width=True)
-                            recent_txs_display = res.get("sec_recent_form4_transactions")
-                            if recent_txs_display:
+                            recent_form4_txs = res.get("sec_recent_form4_transactions")
+                            if recent_form4_txs:
                                 with st.popover("View Recent SEC Form 4 Transactions (Max 10)"):
-                                    for tx in recent_txs_display:
+                                    for tx in recent_form4_txs:
                                         direction = "Acquired" if tx.get('acq_disp_code') == 'A' else "Disposed"
                                         price_info = f"@ ${tx.get('price_per_share'):.2f}" if tx.get('price_per_share') is not None else "(price N/A)"
                                         st.markdown(f"- **{tx.get('transaction_date')}**: {tx.get('reporting_owner')} ({tx.get('owner_relationship', '')}) "
                                                     f"{direction} {tx.get('shares'):,.0f} shares {price_info}. Code: {tx.get('transaction_code')}. "
                                                     f"[Link]({tx.get('link_to_filing')})")
-                            elif not sec_filings_error: st.caption("No recent Form 4 transactions found or processed.")
-                        # Politician Filings display removed from this tab.
+                            elif not sec_filings_error: st.caption("No recent Form 4 transactions parsed or found.")
+
+                            other_filings_display = res.get("sec_other_recent_filings") # New display section
+                            if other_filings_display:
+                                st.subheader("Other Recent SEC Filings (Past Year - Max 10)")
+                                for filing_item in other_filings_display:
+                                    st.markdown(f"- **{filing_item.get('filing_date')}**: Form {filing_item.get('form_type')} - [View Filing]({filing_item.get('summary_link')})")
+                            elif not sec_filings_error: 
+                                st.caption("No other recent SEC filings found.")
+                            
+                            # Institutional Holdings Display
+                            st.subheader("Institutional Holdings (via yfinance)")
+                            inst_holdings_error = res.get("inst_holdings_error")
+                            if inst_holdings_error:
+                                st.caption(f"Institutional Holdings Status: {inst_holdings_error}")
+                            
+                            inst_data_display = {
+                                "Number of Institutions": res.get('inst_num_holders', 0),
+                                "Total Shares Held by Institutions": f"{res.get('inst_total_shares_held',0):,}",
+                                "% Outstanding Held by Institutions": f"{res.get('inst_total_pct_out',0.0)*100:.2f}%",
+                                "Institutional Holdings Signal": res.get("inst_holdings_signal", "N/A").upper()
+                            }
+                            st.dataframe(pd.Series(inst_data_display, name="Value"), use_container_width=True)
+
+                            top_holders_display = res.get("inst_top_holders")
+                            if top_holders_display:
+                                with st.popover("View Top Institutional Holders (Max 10 from yfinance)"):
+                                    for i, holder in enumerate(top_holders_display):
+                                        shares_display = f"{holder.get('Shares',0):,}" if isinstance(holder.get('Shares'), (int,float)) else holder.get('Shares', 'N/A')
+                                        pct_out_display = f"{holder.get('% Out',0.0)*100:.2f}%" if isinstance(holder.get('% Out'), (int,float)) else holder.get('% Out', 'N/A')
+                                        st.markdown(f"{i+1}. **{holder.get('Holder')}**: Shares: {shares_display} (% Out: {pct_out_display}) - Reported: {holder.get('Date Reported')}")
+                            elif not inst_holdings_error:
+                                st.caption("No institutional holder data processed or found.")
+                        # Politician Filings display has been removed from this specific tab location.
                     with tabs[4]: # All Signals
                         st.subheader("All Agent Signals & Final Decision")
                         all_s_keys = [k for k in res if k.endswith("_signal")]; all_s_table = {k.replace("_signal","").replace("_"," ").title(): str(res[k]).upper() for k in all_s_keys}
