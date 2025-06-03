@@ -223,13 +223,15 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://www.capitoltrades.com/'
     }
     politician_trades_list = []
-    try:
+    try: # Outer try block
         response = requests.get(url, headers=headers, timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
+        
         trade_rows = soup.select("a[href^='/trades/'][class*='trade-row']")
         if not trade_rows:
             trade_rows = soup.find_all('a', href=lambda href: href and href.startswith('/trades/'))
@@ -250,25 +252,31 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
                 value_range = value_range_tag.text.strip()
                 date_str = date_tag.text.strip()
                 value_estimate = 0
-                # Corrected line (removed potential problematic characters if any were there)
-                value_matches = re.findall(r'\<span class="math-inline">\(\[\\d,\]\+\)', value_range)
-if value_matches:
-try\:
-value\_estimate \= int\(value\_matches\[0\]\.replace\(',', ''\)\)
-except ValueError\:
-pass
-politician\_trades\_list\.append\(\{
-"politician\_name"\: name, "transaction\_type"\: tx\_type,
-"value\_range"\: value\_range, "value\_estimate\_lower"\: value\_estimate,
-"date\_str"\: date\_str, "source\_url"\: "https\://www\.capitoltrades\.com" \+ row\_link\_tag\['href'\]
-\}\)
-if not politician\_trades\_list and trade\_rows\:
-return \[\{"error"\: f"CT\: Found trade rows for \{ticker\} but failed to parse individual fields\. Selectors need update\."\}\]
-return politician\_trades\_list
-except requests\.exceptions\.Timeout\: return \[\{"error"\: f"CT\: Timeout accessing CapitolTrades for \{ticker\}"\}\]
-except requests\.exceptions\.HTTPError as http\_err\: return \[\{"error"\: f"CT HTTP error for \{ticker\}\: \{http\_err\}"\}\]
-except Exception as e\: return \[\{"error"\: f"CT Parsing error for \{ticker\}\: \{e\}"\}\]
-\# \-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-
+                value_matches = re.findall(r'\$([\d,]+)', value_range) # This was your line 253
+                
+                if value_matches: # This was your line 254
+                    try: # Inner try block for parsing value_estimate
+                        value_estimate = int(value_matches[0].replace(',', ''))
+                    except ValueError:
+                        pass # Keep value_estimate as 0 if parsing fails
+                
+                politician_trades_list.append({
+                    "politician_name": name, "transaction_type": tx_type,
+                    "value_range": value_range, "value_estimate_lower": value_estimate,
+                    "date_str": date_str, "source_url": "https://www.capitoltrades.com" + row_link_tag['href']
+                })
+        
+        if not politician_trades_list and trade_rows:
+             return [{"error": f"CT: Found trade rows for {ticker} but failed to parse individual fields. Selectors need update."}]
+        return politician_trades_list
+        
+    except requests.exceptions.Timeout:
+        return [{"error": f"CT: Timeout accessing CapitolTrades for {ticker}"}]
+    except requests.exceptions.HTTPError as http_err:
+        return [{"error": f"CT HTTP error for {ticker}: {http_err}"}]
+    except Exception as e: # General exception for the outer try block
+        return [{"error": f"CT Parsing error for {ticker}: {e}"}]
+    # No finally needed here if there's no cleanup required after every execution path\# \-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-
 \# LLM Client
 \# \-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-
 class ModelClient\:
