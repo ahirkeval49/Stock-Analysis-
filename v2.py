@@ -77,9 +77,9 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
         try:
             raw_news = ticker_obj.news
         except TypeError as te:
-             return [{"error": f"yfinance .news call failed for {ticker} with TypeError: {te}", "source_api": "Yahoo Finance"}]
+            return [{"error": f"yfinance .news call failed for {ticker} with TypeError: {te}", "source_api": "Yahoo Finance"}]
         except Exception as news_exc:
-             return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
+            return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
 
         enriched_news_list = []
         if not raw_news:
@@ -121,10 +121,6 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
 
 @st.cache_data(ttl=1800) # Cache NewsAPI results for 30 minutes
 def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_days: int = 30) -> list[dict]:
-    """
-    Fetches news articles from NewsAPI.org for the specified lookback period
-    related to the ticker and company name.
-    """
     api_key = st.secrets.get("NEWSAPI_KEY")
     if not api_key:
         return [{"error": "NEWSAPI_KEY not found in secrets for NewsAPI.org.", "source_api": "NewsAPI.org"}]
@@ -197,7 +193,7 @@ def fetch_insider_filings(ticker: str) -> list[dict]:
     except Exception as e: return []
 
 @st.cache_data(ttl=3600)
-def fetch_fair_value_from_value_trades(ticker: str, company_name: str) -> dict: # Added company_name
+def fetch_fair_value_from_value_trades(ticker: str, company_name: str) -> dict:
     """
     Placeholder for fetching fair value from value-trades.com.
     The site uses dynamic search (likely via search.php).
@@ -235,14 +231,18 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         trade_rows = soup.select("a[href^='/trades/'][class*='trade-row']")
-        if not trade_rows: trade_rows = soup.find_all('a', href=lambda href: href and href.startswith('/trades/'))
-        if not trade_rows: return [{"error": f"CT: No trade rows found for {ticker}. Site structure might have changed."}]
+        if not trade_rows:
+            trade_rows = soup.find_all('a', href=lambda href: href and href.startswith('/trades/'))
+
+        if not trade_rows:
+            return [{"error": f"CT: No trade rows found for {ticker}. Site structure might have changed."}]
 
         for row_link_tag in trade_rows[:20]:
             politician_name_tag = row_link_tag.find(['div','span'], class_=lambda x: x and 'politician-name' in x)
             tx_type_tag = row_link_tag.find(['div','span'], class_=lambda x: x and 'tx-type' in x)
             value_range_tag = row_link_tag.find(['div','span'], class_=lambda x: x and 'tx-value' in x)
             date_tag = row_link_tag.find(['div','span'], class_=lambda x: x and 'tx-date' in x)
+
             if all([politician_name_tag, tx_type_tag, value_range_tag, date_tag]):
                 name = politician_name_tag.text.strip()
                 tx_type_text = tx_type_tag.text.strip().lower()
@@ -250,10 +250,13 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
                 value_range = value_range_tag.text.strip()
                 date_str = date_tag.text.strip()
                 value_estimate = 0
-                value_matches = re.findall(r'\$([\d,]+)', value_range)
+                # Corrected line (removed potential problematic characters if any were there)
+                value_matches = re.findall(r'\<span class="math-inline">\(\[\\d,\]\+\)', value\_range\)
 if value\_matches\:
-try\: value\_estimate \= int\(value\_matches\[0\]\.replace\(',', ''\)\)
-except ValueError\: pass
+try\:
+value\_estimate \= int\(value\_matches\[0\]\.replace\(',', ''\)\)
+except ValueError\:
+pass
 politician\_trades\_list\.append\(\{
 "politician\_name"\: name, "transaction\_type"\: tx\_type,
 "value\_range"\: value\_range, "value\_estimate\_lower"\: value\_estimate,
@@ -339,7 +342,7 @@ if overall\_news\_fetch\_error\:
 return \{"ticker"\: ticker, "sentiment\_score"\: 0\.0, "sentiment\_signal"\: "hold", "sentiment\_error"\: overall\_news\_fetch\_error\}
 valid\_news\_items \= \[item for item in news\_items\_from\_bundle if isinstance\(item, dict\) and "error" not in item\]
 if not valid\_news\_items\:
-if news\_items\_from\_bundle and isinstance\(news\_items\_from\_bundle\[0\], dict\) and "error" in news\_items\_from\_bundle\[0\]\:
+if news\_items\_from\_bundle and isinstance\(news\_items\_from\_bundle, list\) and len\(news\_items\_from\_bundle\) \> 0 and isinstance\(news\_items\_from\_bundle\[0\], dict\) and "error" in news\_items\_from\_bundle\[0\]\:
 return \{"ticker"\: ticker, "sentiment\_score"\: 0\.0, "sentiment\_signal"\: "hold",
 "sentiment\_error"\: news\_items\_from\_bundle\[0\]\.get\("error"\)\}
 return \{"ticker"\: ticker, "sentiment\_score"\: 0\.0, "sentiment\_signal"\: "hold", "sentiment\_error"\: "No valid news articles to process\."\}
@@ -359,14 +362,14 @@ prompt \= \(f"Analyze sentiment for \{company\_name\_overall\} \(\{ticker\}\) ba
 score \= 0\.0; llm\_error\_msg \= None
 try\:
 response\_text \= self\.client\.generate\(prompt\)\.strip\(\)
-if response\_text\.startswith\("Error\:"\)\: llm\_error\_msg \= response\_text 
+if response\_text\.startswith\("Error\:"\)\: llm\_error\_msg \= response\_text
 else\:
 match \= re\.search\(r"\[\-\+\]?\\d\*\\\.\\d\+\|\\d\+", response\_text\)
 if match\: score \= float\(match\.group\(0\)\); score \= max\(\-1\.0, min\(1\.0, score\)\)
 else\: llm\_error\_msg \= "LLM did not return a parsable number\."
 except Exception as e\: llm\_error\_msg \= f"LLM call failed\: \{str\(e\)\[\:150\]\}"
 final\_error\_message\_for\_sentiment \= llm\_error\_msg
-if overall\_news\_fetch\_error and "Error" in overall\_news\_fetch\_error and llm\_error\_msg \: \# Check if overall\_news\_fetch\_error contains "Error"
+if overall\_news\_fetch\_error and "Error" in overall\_news\_fetch\_error and llm\_error\_msg \:
 final\_error\_message\_for\_sentiment \= f"News\: \{overall\_news\_fetch\_error\} \| LLM\: \{llm\_error\_msg\}"
 elif overall\_news\_fetch\_error and "Error" in overall\_news\_fetch\_error\:
 final\_error\_message\_for\_sentiment \= overall\_news\_fetch\_error
@@ -459,8 +462,8 @@ error \=\= error\_fv\_not\_found\_page or
 error\.startswith\(error\_specific\_sentence\_prefix\) or
 "VT Configuration incomplete in secrets\." in error or
 "VT\: Skipped by user config\." in error or
-"VT\: Could not find stock page link for" in error or \# This is to catch earlier navigation errors
-"VT\: Failed to fetch valid stock page for" in error \# Also for navigation errors
+"VT\: Could not find stock page link for" in error or
+"VT\: Failed to fetch valid stock page for" in error
 \)
 if not is\_ignorable\_error\:
 significant\_error \= True
@@ -516,7 +519,7 @@ company\_name\_for\_news \= ticker\_info\.get\('longName', ticker\_info\.get\('s
 combined\_news\_data\_list \= \[\]
 news\_fetch\_status\_messages \= \[\]
 if configs\["use\_sentiment"\]\:
-yfinance\_news \= fetch\_enriched\_news\(t, ticker\_info\)
+yfinance\_news \= fetch\_enriched\_news\(t, ticker\_info\) \# Pass ticker\_info
 if yfinance\_news and not \(isinstance\(yfinance\_news\[0\], dict\) and "error" in yfinance\_news\[0\]\)\:
 for item in yfinance\_news\: item\['source\_api'\] \= 'Yahoo Finance'
 combined\_news\_data\_list\.extend\(yfinance\_news\)
@@ -528,12 +531,12 @@ if newsapi\_articles and not \(isinstance\(newsapi\_articles\[0\], dict\) and "e
 combined\_news\_data\_list\.extend\(newsapi\_articles\)
 elif newsapi\_articles and isinstance\(newsapi\_articles\[0\], dict\) and "error" in newsapi\_articles\[0\]\:
 news\_fetch\_status\_messages\.append\(f"NewsAPI\: \{newsapi\_articles\[0\]\['error'\]\}"\)
-elif configs\["use\_sentiment"\]\:
-news\_fetch\_status\_messages\.append\("NewsAPI Key not configured; only Yahoo Finance news will be used if available\."\)
+elif configs\["use\_sentiment"\]\: \# Only add this message if sentiment is on but NewsAPI key is the issue
+news\_fetch\_status\_messages\.append\("NewsAPI Key not configured; consider adding for broader news coverage\."\)
 seen\_urls \= set\(\)
 deduplicated\_news \= \[\]
 for news\_item in combined\_news\_data\_list\:
-if isinstance\(news\_item, dict\) and "error" not in news\_item\: \# Ensure it's a valid news dict
+if isinstance\(news\_item, dict\) and "error" not in news\_item\:
 url \= news\_item\.get\('link'\) or news\_item\.get\('url'\)
 if url and url not in seen\_urls\:
 deduplicated\_news\.append\(news\_item\)
@@ -541,7 +544,7 @@ seen\_urls\.add\(url\)
 if deduplicated\_news\:
 deduplicated\_news\.sort\(key\=lambda x\: x\.get\('publish\_datetime\_utc', datetime\.min\.replace\(tzinfo\=timezone\.utc\)\), reverse\=True\)
 news\_fetch\_status\_for\_bundle \= " \| "\.join\(news\_fetch\_status\_messages\) if news\_fetch\_status\_messages else "News fetch OK"
-if not deduplicated\_news and not news\_fetch\_status\_messages\: \# No actual news and no specific errors reported by fetchers
+if not deduplicated\_news and not news\_fetch\_status\_messages and configs\["use\_sentiment"\]\: \# If sentiment was desired but no news and no errors
 news\_fetch\_status\_for\_bundle \= "No news articles found from enabled sources\."
 politician\_trades\_list \= fetch\_politician\_trades\(t\) if configs\["use\_politician\_filings"\] else \[\]
 data\_bundle \= \{
@@ -660,7 +663,7 @@ except Exception as e\: st\.sidebar\.error\(f"LLM Init Unexpected Error\: \{e\}"
 \# \-\-\- Configuration Moved to Main Area \-\-\-
 st\.header\("⚙️ Configuration"\)
 config\_container \= st\.container\(border\=True\)
-app\_mode \= "Live Analysis" \# Default value
+app\_mode \= "Live Analysis"
 with config\_container\:
 app\_mode \= st\.radio\("Select Mode\:", \["Live Analysis", "Backtesting"\], key\="app\_mode\_select\_main", horizontal\=True, index\=0\)
 st\.markdown\("\-\-\-"\)
