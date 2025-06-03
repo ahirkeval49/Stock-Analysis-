@@ -3,20 +3,23 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta, timezone
+# from dateutil.relativedelta import relativedelta # Unused, pd.DateOffset is used
+from datetime import datetime, timedelta, timezone # Added timezone
 import openai
-from openai import OpenAI
+from openai import OpenAI # Ensure this is at the top of your script
 from dotenv import load_dotenv
-import requests
-from bs4 import BeautifulSoup
-import re
-from urllib.parse import urljoin
-from newsapi import NewsApiClient
+import requests # For web scraping
+from bs4 import BeautifulSoup # For web scraping
+import re # For parsing text more effectively
+from urllib.parse import urljoin # For handling relative URLs from scraping
+from newsapi import NewsApiClient # For NewsAPI.org
 import json # For CIK mapping
+
 
 # --- THIS IS THE CORRECT PLACEMENT ---
 st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
 # --- END CORRECT PLACEMENT ---
+
 # Load environment variables (if running locally)
 load_dotenv()
 
@@ -116,7 +119,7 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
     except Exception as e:
         return [{"error": f"Failed to process Yahoo Finance news for {ticker}: {e}", "source_api": "Yahoo Finance"}]
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=1800) # Cache NewsAPI results for 30 minutes
 def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_days: int = 30) -> list[dict]:
     api_key = st.secrets.get("NEWSAPI_KEY")
     if not api_key:
@@ -216,8 +219,8 @@ def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 180) -> lis
                         if filing_date < date_limit:
                             continue
                     except ValueError:
-                        continue 
-                    if form4_processed_count >= 20: break 
+                        continue
+                    if form4_processed_count >= 20: break
 
                     accession_number_no_dashes = accession_numbers[i].replace('-', '')
                     primary_document_xml = primary_documents[i]
@@ -229,7 +232,7 @@ def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 180) -> lis
                     
                     try:
                         filing_response = requests.get(xml_url, headers=headers, timeout=10)
-                        if filing_response.status_code != 200: continue 
+                        if filing_response.status_code != 200: continue
                         soup_xml = BeautifulSoup(filing_response.content, 'xml')
                         form4_processed_count +=1
                         
@@ -356,7 +359,7 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
              return [{"error": f"CT: Found trade rows for {ticker} but failed to parse individual fields. Selectors need update."}]
         return politician_trades_list
     except requests.exceptions.Timeout: return [{"error": f"CT: Timeout accessing CapitolTrades for {ticker}"}]
-    except requests.exceptions.HTTPError as http_err: return [{"error": f"CT HTTP error for {ticker}: {http_err}"}]
+    except requests.exceptions.RequestException as e: return [{"error": f"CT Error for {ticker}: {e}"}] # Changed from HTTPError for broader catch
     except Exception as e: return [{"error": f"CT Parsing error for {ticker}: {e}"}]
 
 # --------------------------------
@@ -461,7 +464,7 @@ class FundamentalsAgent:
         sig  = "buy" if piotroski_score >= 2 else ("sell" if piotroski_score == 0 else "hold")
         return {"ticker": ticker, "fcf_yield": float(fcy), "piotroski_score": piotroski_score, "fund_signal": sig}
 
-class ValuationAgent: # Standard yfinance based valuation
+class ValuationAgent:
     def run(self, ticker: str, data: dict) -> dict:
         stats = data.get("ticker_info", {}); price_history_df = data.get("price_history")
         price = stats.get("currentPrice") or (price_history_df["Close"].iloc[-1] if price_history_df is not None and not price_history_df.empty else None)
@@ -634,7 +637,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
                 news_fetch_status_messages.append(f"Yahoo News: {yfinance_news[0]['error']}")
 
             if llm_client and st.secrets.get("NEWSAPI_KEY"):
-                newsapi_articles = fetch_comprehensive_news_from_api(t, company_name_for_news, lookback_days=30)
+                newsapi_articles = fetch_comprehensive_news_from_api(t, company_name_for_news_and_vt, lookback_days=30)
                 if newsapi_articles and not (isinstance(newsapi_articles[0], dict) and "error" in newsapi_articles[0]):
                     combined_news_data_list.extend(newsapi_articles)
                 elif newsapi_articles and isinstance(newsapi_articles[0], dict) and "error" in newsapi_articles[0]:
@@ -662,7 +665,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
         
         all_agents_instances = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()]
         if configs["use_sentiment"] and llm_client: all_agents_instances.append(SentimentAgent(llm_client))
-        if configs["use_filings"]: all_agents_instances.append(SECFilingAgent()) # Using SECFilingAgent
+        if configs["use_filings"]: all_agents_instances.append(SECFilingAgent())
         if configs["use_politician_filings"]: all_agents_instances.append(PoliticianFilingsAgent())
         if configs["use_value_trades"]: 
             all_agents_instances.append(FairValueAgentVT())
@@ -694,7 +697,6 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
 
 # --------------------------------
 # Backtesting Engine 
-# (No changes made to backtesting engine in this update)
 # --------------------------------
 def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_placeholder, backtest_agent_weights):
     s_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
@@ -740,31 +742,21 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
 # --------------------------------
 # Streamlit UI
 # --------------------------------
-# st.title("🚀 AI Hedge Fund Simulator") # This should come AFTER set_page_config
-
-# LLM Client Initialization (moved to be after set_page_config but before major UI elements)
 llm_client = None
 try:
     deepseek_key = getattr(st.secrets, "DEEPSEEK_API_KEY", None) if hasattr(st.secrets, "DEEPSEEK_API_KEY") else None
     openai_key = getattr(st.secrets, "OPENAI_API_KEY", None) if hasattr(st.secrets, "OPENAI_API_KEY") else None
-    # The st.sidebar calls are Streamlit commands and must come after set_page_config
-    # It's okay if they are inside a try/except block that's after set_page_config
     if deepseek_key:
         llm_client = ModelClient(api_key=deepseek_key, provider="deepseek")
         st.sidebar.caption("✅ LLM: DeepSeek Initialized")
     elif openai_key:
         llm_client = ModelClient(api_key=openai_key, provider="openai")
         st.sidebar.caption("✅ LLM: OpenAI Initialized")
-    else:
-        st.sidebar.warning("LLM API key missing. Sentiment analysis disabled.")
-except ValueError as e:
-    st.sidebar.error(f"LLM Init Error: {e}. Check API Key.")
-except Exception as e:
-    st.sidebar.error(f"LLM Init Unexpected Error: {e}")
+    else: st.sidebar.warning("LLM API key missing. Sentiment analysis disabled.")
+except ValueError as e: st.sidebar.error(f"LLM Init Error: {e}. Check API Key.")
+except Exception as e: st.sidebar.error(f"LLM Init Unexpected Error: {e}")
 
-st.title("🚀 AI Hedge Fund Simulator") # Now this is fine
-
-# ... (rest of your UI code: st.header("⚙️ Configuration"), etc.) ...
+st.title("🚀 AI Hedge Fund Simulator")
 
 st.header("⚙️ Configuration")
 config_container = st.container(border=True)
@@ -780,7 +772,7 @@ with config_container:
         cols_features = st.columns(3)
         with cols_features[0]:
             use_sentiment_live_main = st.checkbox("News Sentiment (LLM)", value=True if llm_client else False, disabled=not llm_client, key="live_sentiment_cb_main", help="Uses LLM for news sentiment. Requires NewsAPI key if used, else Yahoo Finance.")
-            use_filings_live_main = st.checkbox("SEC Insider Filings (Form 4)", value=True, key="live_sec_filings_cb_main", help="Analyzes SEC Form 4 insider transactions.") # Updated label
+            use_filings_live_main = st.checkbox("SEC Insider Filings (Form 4)", value=True, key="live_sec_filings_cb_main", help="Analyzes SEC Form 4 insider transactions.")
         with cols_features[1]:
             use_politician_filings_main = st.checkbox("Politician Filings", value=False, key="live_politician_cb_main", help="EXPERIMENTAL: Attempts to scrape CapitolTrades.com. May be slow/unreliable.")
             use_value_trades_main = st.checkbox("Value-Trades Analysis", value=False, key="live_vt_cb_main", help="EXPERIMENTAL: Includes placeholder for Value-Trades.com scraping & a VT-Inspired calculation.")
@@ -925,8 +917,7 @@ if app_mode == "Live Analysis":
                                                     f"{direction} {tx.get('shares'):,.0f} shares {price_info}. Code: {tx.get('transaction_code')}. "
                                                     f"[Link]({tx.get('link_to_filing')})")
                             elif not sec_filings_error: st.caption("No recent Form 4 transactions found or processed.")
-                        # Politician Filings display is removed from this tab as per user request.
-                        # Data is still fetched if toggle is on and used by PortfolioAgent.
+                        # Politician Filings display is REMOVED from this tab.
                     with tabs[4]: # All Signals
                         st.subheader("All Agent Signals & Final Decision")
                         all_s_keys = [k for k in res if k.endswith("_signal")]; all_s_table = {k.replace("_signal","").replace("_"," ").title(): str(res[k]).upper() for k in all_s_keys}
