@@ -914,13 +914,13 @@ if app_mode == "Live Analysis":
                         if business_summary:
                             with st.popover("View Business Summary"): st.markdown(business_summary)
                      with tabs[2]:
-                          st.subheader("Valuation Metrics (yfinance based)")
-                          val_s = {
-                            "Forward P/E": f"{res.get('forward_pe',0):.1f}",
-                            "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(),
-                            "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A",
-                            "DCF Signal": res.get('dcf_signal', "N/A").upper()
-                        }
+                        st.subheader("Valuation Metrics (yfinance based)")
+                        val_s = {
+                                 "Forward P/E": f"{res.get('forward_pe',0):.1f}",
+                                 "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(),
+                                 "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A",
+                                 "DCF Signal": res.get('dcf_signal', "N/A").upper()
+                                }
                         st.dataframe(pd.Series(val_s, name="Value"), use_container_width=True)
 
                         if live_configs_main["use_value_trades"]:
