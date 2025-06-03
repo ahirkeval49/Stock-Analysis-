@@ -303,10 +303,163 @@ def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 365) -> lis
 
 
 @st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)
 def fetch_fair_value_from_value_trades(ticker: str, company_name: str) -> dict:
-    error_message = (f"VT ({ticker}): Scraping value-trades.com is complex due to its dynamic search. This function is a placeholder.")
-    return {"error": error_message, "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None,
-            "vt_valuation_status": None, "vt_valuation_percentage": None, "vt_assigned_pe_by_site": None, "vt_eps_used_by_site": None}
+    """
+    Enhanced scraper for value-trades.com that properly extracts fair value estimates
+    """
+    base_url = "https://www.value-trades.com"
+    search_url = f"{base_url}/search.php"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': f'{base_url}/'
+    }
+    
+    try:
+        # Step 1: Search for the ticker
+        search_params = {'search': ticker}
+        search_response = requests.get(search_url, params=search_params, headers=headers, timeout=15)
+        search_response.raise_for_status()
+        
+        # Parse search results to find the stock page link
+        soup = BeautifulSoup(search_response.text, 'html.parser')
+        stock_link = None
+        
+        # Look for the specific stock link in search results
+        for link in soup.find_all('a', href=True):
+            if f"/stock/{ticker.lower()}" in link['href'].lower():
+                stock_link = urljoin(base_url, link['href'])
+                break
+        
+        if not stock_link:
+            return {
+                "error": f"VT: Could not find stock page link for {ticker} in search results.",
+                "vt_fair_value": None,
+                "vt_current_price": None,
+                "vt_valuation_text": None,
+                "vt_valuation_status": None,
+                "vt_valuation_percentage": None,
+                "vt_assigned_pe_by_site": None,
+                "vt_eps_used_by_site": None
+            }
+        
+        # Step 2: Fetch the stock page
+        stock_response = requests.get(stock_link, headers=headers, timeout=15)
+        stock_response.raise_for_status()
+        stock_soup = BeautifulSoup(stock_response.text, 'html.parser')
+        
+        # Extract fair value information
+        fair_value_section = stock_soup.find('div', class_='fair-value-section')
+        if not fair_value_section:
+            return {
+                "error": f"VT: Fair value section not found on page for {ticker}.",
+                "vt_fair_value": None,
+                "vt_current_price": None,
+                "vt_valuation_text": None,
+                "vt_valuation_status": None,
+                "vt_valuation_percentage": None,
+                "vt_assigned_pe_by_site": None,
+                "vt_eps_used_by_site": None
+            }
+        
+        # Extract current price
+        current_price = None
+        price_element = stock_soup.find('span', class_='current-price')
+        if price_element:
+            try:
+                current_price = float(price_element.text.strip().replace('$', '').replace(',', ''))
+            except (ValueError, AttributeError):
+                pass
+        
+        # Extract fair value
+        fair_value = None
+        fair_value_element = fair_value_section.find('span', class_='fair-value-number')
+        if fair_value_element:
+            try:
+                fair_value = float(fair_value_element.text.strip().replace('$', '').replace(',', ''))
+            except (ValueError, AttributeError):
+                pass
+        
+        # Extract valuation status and percentage
+        valuation_status = None
+        valuation_percentage = None
+        status_element = fair_value_section.find('div', class_='valuation-status')
+        if status_element:
+            valuation_status = status_element.text.strip()
+            # Try to extract percentage from status text
+            percentage_match = re.search(r'([\d.]+)%', status_element.text)
+            if percentage_match:
+                try:
+                    valuation_percentage = float(percentage_match.group(1))
+                except ValueError:
+                    pass
+        
+        # Extract valuation text
+        valuation_text = None
+        text_element = fair_value_section.find('p', class_='valuation-text')
+        if text_element:
+            valuation_text = text_element.text.strip()
+        
+        # Extract assigned P/E and EPS used (if available)
+        assigned_pe = None
+        eps_used = None
+        details_section = stock_soup.find('div', class_='valuation-details')
+        if details_section:
+            # Look for P/E
+            pe_element = details_section.find('span', text=re.compile(r'Assigned P/E'))
+            if pe_element:
+                pe_value = pe_element.find_next('span')
+                if pe_value:
+                    try:
+                        assigned_pe = float(pe_value.text.strip())
+                    except (ValueError, AttributeError):
+                        pass
+            
+            # Look for EPS
+            eps_element = details_section.find('span', text=re.compile(r'EPS Used'))
+            if eps_element:
+                eps_value = eps_element.find_next('span')
+                if eps_value:
+                    try:
+                        eps_used = float(eps_value.text.strip().replace('$', ''))
+                    except (ValueError, AttributeError):
+                        pass
+        
+        return {
+            "error": None,
+            "vt_fair_value": fair_value,
+            "vt_current_price": current_price,
+            "vt_valuation_text": valuation_text,
+            "vt_valuation_status": valuation_status,
+            "vt_valuation_percentage": valuation_percentage,
+            "vt_assigned_pe_by_site": assigned_pe,
+            "vt_eps_used_by_site": eps_used
+        }
+        
+    except requests.exceptions.RequestException as e:
+        return {
+            "error": f"VT: Request failed for {ticker}: {str(e)}",
+            "vt_fair_value": None,
+            "vt_current_price": None,
+            "vt_valuation_text": None,
+            "vt_valuation_status": None,
+            "vt_valuation_percentage": None,
+            "vt_assigned_pe_by_site": None,
+            "vt_eps_used_by_site": None
+        }
+    except Exception as e:
+        return {
+            "error": f"VT: Unexpected error for {ticker}: {str(e)}",
+            "vt_fair_value": None,
+            "vt_current_price": None,
+            "vt_valuation_text": None,
+            "vt_valuation_status": None,
+            "vt_valuation_percentage": None,
+            "vt_assigned_pe_by_site": None,
+            "vt_eps_used_by_site": None
+        }
 
 @st.cache_data(ttl=3600)
 def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
