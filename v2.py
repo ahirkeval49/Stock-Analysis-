@@ -74,9 +74,9 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
         try:
             raw_news = ticker_obj.news
         except TypeError as te:
-             return [{"error": f"yfinance .news call failed for {ticker} with TypeError: {te}", "source_api": "Yahoo Finance"}]
+            return [{"error": f"yfinance .news call failed for {ticker} with TypeError: {te}", "source_api": "Yahoo Finance"}]
         except Exception as news_exc:
-             return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
+            return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
 
         enriched_news_list = []
         if not raw_news:
@@ -111,7 +111,8 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
             enriched_item.setdefault('type', 'N/A')
             enriched_news_list.append(enriched_item)
 
-        enriched_news_list.sort(key=lambda x: x.get('publish_datetime_utc', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+        # Handle None in sorting key gracefully
+        enriched_news_list.sort(key=lambda x: x.get('publish_datetime_utc') or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return enriched_news_list
     except Exception as e:
         return [{"error": f"Failed to process Yahoo Finance news for {ticker}: {e}", "source_api": "Yahoo Finance"}]
@@ -123,7 +124,6 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
         return [{"error": "NEWSAPI_KEY not found in secrets for NewsAPI.org.", "source_api": "NewsAPI.org"}]
 
     newsapi = NewsApiClient(api_key=api_key)
-    # Changed query parameters for get_everything to potentially retrieve more content
     query = f'("{company_name}" OR {ticker.upper()}) AND (stock OR shares OR business OR finance OR earnings OR "product launch" OR "analyst rating" OR "market sentiment")'
     to_date_dt = datetime.now(timezone.utc)
     from_date_dt = to_date_dt - timedelta(days=lookback_days)
@@ -134,7 +134,7 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
     try:
         all_articles_response = newsapi.get_everything(
             q=query, from_param=from_param_str, to=to_param_str,
-            language='en', sort_by='publishedAt', page_size=100 # Increased page_size to max 100
+            language='en', sort_by='publishedAt', page_size=100
         )
         if all_articles_response.get("status") == "ok" and "articles" in all_articles_response:
             for article in all_articles_response["articles"]:
@@ -149,7 +149,7 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
                     "publisher": article.get('source', {}).get('name', 'N/A'),
                     "link": article.get('url', '#'), "publish_datetime_utc": dt_object_utc,
                     "publish_time_readable": readable_time, "description": article.get('description'),
-                    "content_snippet": article.get('content'), # This is the 'content' field, often truncated by NewsAPI
+                    "content_snippet": article.get('content'),
                     "company_name": company_name,
                     "ticker": ticker, "source_api": "NewsAPI.org"
                 })
@@ -267,10 +267,10 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                                 acq_disp_code = acq_disp_node.find('value').text.strip().upper() if acq_disp_node and acq_disp_node.find('value') else "N/A"
                                 if shares_val != 0:
                                     filings_list.append({"is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": filing_date_str,
-                                            "transaction_date": trans_date, "reporting_owner": owner_name,
-                                            "owner_relationship": owner_relationship_str, "transaction_code": trans_code,
-                                            "acq_disp_code": acq_disp_code, "shares": shares_val, "price_per_share": price_val,
-                                            "link_to_filing": xml_url.replace(primary_document_name, "FilingSummary.xml")})
+                                        "transaction_date": trans_date, "reporting_owner": owner_name,
+                                        "owner_relationship": owner_relationship_str, "transaction_code": trans_code,
+                                        "acq_disp_code": acq_disp_code, "shares": shares_val, "price_per_share": price_val,
+                                        "link_to_filing": xml_url.replace(primary_document_name, "FilingSummary.xml")})
                     except requests.exceptions.RequestException: pass
                     except Exception: pass
                 elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other_filings_to_list :
@@ -314,11 +314,16 @@ def fetch_value_investing_io_data(ticker: str) -> dict:
         paragraphs = soup.find_all('p')
         for p in paragraphs:
             text = p.get_text(strip=True)
-            if ticker.upper() in text and "Peter Lynch's Fair Value formula" in text and "Fair Value of" in text:
-                target_paragraph_text = text; break
+            # Make the regex more robust to variations in surrounding text
+            if ticker.upper() in text and "Fair Value" in text and ("Peter Lynch" in text or "based on" in text):
+                target_paragraph_text = text
+                break
+
         if not target_paragraph_text:
-            return {"error": f"VI.io: Target paragraph not found for {ticker} on {url}."}
-        pattern = re.compile(r"As of (?P<date>[\d]{4}-[\d]{2}-[\d]{2}), the Fair Value of .*?\(.*?" + re.escape(ticker.upper()) + r".*?\) is (?P<fair_value>[\d\.]+) USD.*?With the current market price of (?P<market_price>[\d\.]+) USD, the upside of .*? is (?P<upside_percent>[-+]?\d+\.?\d*)%.")
+            return {"error": f"VI.io: Target paragraph not found for {ticker} on {url}. No specific Peter Lynch Fair Value found."}
+
+        # More flexible pattern
+        pattern = re.compile(r"As of (?P<date>[\d]{4}-[\d]{2}-[\d]{2}), the Fair Value of .*?\(.*?" + re.escape(ticker.upper()) + r".*?\) is (?P<fair_value>[\d\.]+) USD.*?With the current market price of (?P<market_price>[\d\.]+) USD, the upside of .*? is (?P<upside_percent>[-+]?\d+\.?\d*)%.?")
         match = pattern.search(target_paragraph_text)
         if match:
             data = match.groupdict()
@@ -396,6 +401,7 @@ class PriceAgent:
         if price_data_slice.empty or len(price_data_slice) < 200: return {"ticker": ticker, "price_signal": "hold", "sma50": np.nan, "sma200": np.nan, "rsi14": np.nan}
         df = price_data_slice.copy(); df["SMA50"]=df["Close"].rolling(50).mean(); df["SMA200"]=df["Close"].rolling(200).mean()
         delta = df["Close"].diff(); gain=delta.clip(lower=0).rolling(14).mean(); loss=(-delta.clip(upper=0)).rolling(14).mean()
+        # Avoid division by zero for RS calculation
         rs = gain / loss.replace(0, np.nan); df["RSI14"] = 100 - (100 / (1 + rs)); latest = df.iloc[-1]; signal = "hold"
         if pd.isna(latest.SMA50) or pd.isna(latest.SMA200) or pd.isna(latest.RSI14): signal = "hold"
         elif latest.SMA50 > latest.SMA200 and latest.RSI14 < 70: signal = "buy"
@@ -438,11 +444,11 @@ class SentimentAgent:
         content_for_llm = []; company_name_overall = data.get("ticker_info",{}).get('longName', ticker)
         for item in valid_news_items[:7]:
             title = item.get('title', ''); publisher = item.get('publisher', ''); description = item.get('description', '')
-            content = item.get('content_snippet', '') # Use the content_snippet from NewsAPI
+            content = item.get('content_snippet', '')
             
             text_snippet = f"Headline: {title}"
-            if content and isinstance(content, str) and len(content) > 10: # Prefer content if available and substantial
-                text_snippet += f" | Content Snippet: {content.replace('[+... chars]', '').strip()}" # Remove common truncation markers
+            if content and isinstance(content, str) and len(content) > 10:
+                text_snippet += f" | Content Snippet: {content.replace('[+... chars]', '').strip()}"
             elif description and isinstance(description, str):
                 text_snippet += f" | Description: {description.strip()}"
             
@@ -464,6 +470,67 @@ class SentimentAgent:
             final_error_message_for_sentiment = f"News: {overall_news_fetch_error}" + (f" | LLM: {llm_error_msg}" if llm_error_msg else "")
         sig = "buy" if score > 0.25 and not llm_error_msg else ("sell" if score < -0.25 and not llm_error_msg else "hold")
         return {"ticker":ticker, "sentiment_score":score, "sentiment_signal":sig, "sentiment_error": final_error_message_for_sentiment}
+
+class NewsSummaryAgent:
+    def __init__(self, client): self.client = client
+    def run(self, ticker: str, data: dict) -> dict:
+        news_items = data.get("news", [])
+        company_name = data.get("ticker_info", {}).get('longName', ticker)
+        
+        if not news_items or (isinstance(news_items[0], dict) and "error" in news_items[0]):
+            return {"ticker": ticker, "news_summary": "No news available for summary.", "news_summary_error": data.get("news_fetch_status_error", "No news fetched.")}
+
+        # Take up to 5 articles from Yahoo and up to 5 from NewsAPI for summary
+        yahoo_news_for_summary = [item for item in news_items if item.get('source_api') == 'Yahoo Finance' and "error" not in item][:5]
+        newsapi_news_for_summary = [item for item in news_items if item.get('source_api') == 'NewsAPI.org' and "error" not in item][:5]
+        
+        selected_news_for_summary = []
+        # Alternate picking from each list to get a mix
+        for i in range(max(len(yahoo_news_for_summary), len(newsapi_news_for_summary))):
+            if i < len(yahoo_news_for_summary):
+                selected_news_for_summary.append(yahoo_news_for_summary[i])
+            if i < len(newsapi_news_for_summary):
+                selected_news_for_summary.append(newsapi_news_for_summary[i])
+        
+        # Limit to top 7 unique articles for the LLM prompt to manage token limits
+        final_news_snippets = []
+        seen_titles = set()
+        for item in selected_news_for_summary:
+            if len(final_news_snippets) >= 7:
+                break
+            title = item.get('title', '')
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+            
+            description = item.get('description', '')
+            content_snippet = item.get('content_snippet', '').replace('[+... chars]', '').strip()
+            
+            text_to_add = f"Title: {title}"
+            if content_snippet:
+                text_to_add += f" | Content: {content_snippet}"
+            elif description:
+                text_to_add += f" | Description: {description}"
+            
+            final_news_snippets.append(text_to_add)
+
+        if not final_news_snippets:
+            return {"ticker": ticker, "news_summary": "No sufficient news content for summary.", "news_summary_error": "No articles with content/description for summary."}
+
+        prompt = (f"Provide a concise summary paragraph (max 200 words) about what is happening with {company_name} ({ticker}) based on the following recent news articles. Focus on key events, trends, and impacts. If no significant events, state that.\n\nNews Articles:\n" + "\n".join(f"- {s}" for s in final_news_snippets))
+        
+        summary = "Could not generate news summary."
+        error_msg = None
+        try:
+            response_text = self.client.generate(prompt).strip()
+            if response_text.startswith("Error:"):
+                error_msg = response_text
+            else:
+                summary = response_text
+        except Exception as e:
+            error_msg = f"LLM call for news summary failed: {str(e)[:150]}"
+        
+        return {"ticker": ticker, "news_summary": summary, "news_summary_error": error_msg}
 
 class FundamentalsAgent:
     def run(self, ticker: str, data: dict) -> dict:
@@ -513,8 +580,7 @@ class SECFilingAgent:
             error_from_fetch = f"SEC Filings: No filings data returned for {ticker}."
         elif isinstance(all_filings_raw[0], dict) and "error" in all_filings_raw[0]:
             error_from_fetch = all_filings_raw[0].get("error")
-            # Do not clear all_filings_raw here, as it might contain a single error dict
-        
+            
         if error_from_fetch:
             return {"ticker": ticker, "sec_net_insider_shares_1y": 0,
                     "sec_insider_buy_value_1y": 0, "sec_insider_sell_value_1y": 0,
@@ -526,7 +592,7 @@ class SECFilingAgent:
         other_filings_metadata = []
 
         for filing in all_filings_raw:
-            if not isinstance(filing, dict) or "error" in filing : continue # Skip non-dicts or error dicts
+            if not isinstance(filing, dict) or "error" in filing : continue
 
             if filing.get("is_form4_transaction"):
                 form4_transactions_processed.append(filing)
@@ -540,11 +606,11 @@ class SECFilingAgent:
                     if price is not None and shares != 0: sell_value += shares * price
             else: 
                 other_filings_metadata.append(filing)
-        
+            
         signal = "hold"
         if net_shares > 2000 or buy_value > 200000: signal = "buy" 
         elif net_shares < -2000 or sell_value > 200000: signal = "sell"
-        
+            
         return {"ticker": ticker, "sec_net_insider_shares_1y": int(net_shares),
                 "sec_insider_buy_value_1y": round(buy_value, 2), "sec_insider_sell_value_1y": round(sell_value, 2),
                 "sec_filings_signal": signal, "sec_filings_error": None,
@@ -555,7 +621,6 @@ class InstitutionalHoldingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
         institutional_holdings_data = data.get("institutional_holdings", [])
         
-        # Check for errors from the fetcher
         error = None
         if institutional_holdings_data and isinstance(institutional_holdings_data[0], dict) and "error" in institutional_holdings_data[0]:
             error = institutional_holdings_data[0]["error"]
@@ -653,7 +718,7 @@ class PortfolioAgent:
     WEIGHTS = {"price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.6, "fund": 0.9,
                "valuation_dcf":0.5, "valuation_pe":0.5, "sec_filings": 0.6, 
                "inst_holdings": 0.3, "analyst": 0.7,
-               "politician_filings": 0.4, "vi_signal": 0.8 } # Updated from vt_inspired to vi_signal
+               "politician_filings": 0.4, "vi_signal": 0.8 }
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
         current_weights = agent_weights or self.WEIGHTS; total_weighted_score = 0; sum_of_weights_used = 0
         agg_signals = {};
@@ -698,6 +763,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
                 combined_news_data_list.extend(yfinance_news)
             elif yfinance_news and isinstance(yfinance_news[0], dict) and "error" in yfinance_news[0]:
                 news_fetch_status_messages.append(f"Yahoo News: {yfinance_news[0]['error']}")
+            
             if llm_client and st.secrets.get("NEWSAPI_KEY"):
                 newsapi_articles = fetch_comprehensive_news_from_api(t, company_name_for_news, lookback_days=30)
                 if newsapi_articles and not (isinstance(newsapi_articles[0], dict) and "error" in newsapi_articles[0]):
@@ -711,7 +777,7 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             if isinstance(news_item, dict) and "error" not in news_item:
                 url = news_item.get('link') or news_item.get('url')
                 if url and url not in seen_urls: deduplicated_news.append(news_item); seen_urls.add(url)
-        if deduplicated_news: deduplicated_news.sort(key=lambda x: x.get('publish_datetime_utc', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+        if deduplicated_news: deduplicated_news.sort(key=lambda x: x.get('publish_datetime_utc') or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         
         news_fetch_status_for_bundle = " | ".join(news_fetch_status_messages) if news_fetch_status_messages else "News fetch OK"
         if not deduplicated_news and not news_fetch_status_messages and configs["use_sentiment"]: news_fetch_status_for_bundle = "No news articles found from enabled sources."
@@ -728,7 +794,9 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
         }
         
         all_agents_instances = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()]
-        if configs["use_sentiment"] and llm_client: all_agents_instances.append(SentimentAgent(llm_client))
+        if configs["use_sentiment"] and llm_client:
+            all_agents_instances.append(SentimentAgent(llm_client))
+            all_agents_instances.append(NewsSummaryAgent(llm_client)) # Add NewsSummaryAgent
         if configs["use_filings"]: 
             all_agents_instances.append(SECFilingAgent())
             all_agents_instances.append(InstitutionalHoldingsAgent())
@@ -752,8 +820,8 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
         current_result_dict = {"ticker": t, "current_price_display": current_price_for_ticker, "market_cap_display": ticker_info.get("marketCap"),
                                "industry_display": ticker_info.get("industry"), "sector_display": ticker_info.get("sector"), "ticker_info": ticker_info, 
                                "news_headlines_for_popover": [
-                                   f"{n.get('publish_time_readable','N/A')} - {n.get('title', 'N/A')} ({n.get('publisher','N/A')} via {n.get('source_api','Unknown')})"
-                                   f" - {n.get('content_snippet', n.get('description', ''))[:150]}..." # Show content_snippet or description, truncated
+                                   f"{n.get('publish_time_readable','N/A')} - {n.get('title', 'N/A')} ({n.get('publisher','N/A')} via {n.get('source_api','Unknown')}) [Link]({n.get('link','#')})"
+                                   f" - {n.get('content_snippet', n.get('description', ''))[:150]}..."
                                    for n in deduplicated_news[:10]
                                ],
                                "politician_trades_for_popover": [pt for pt in politician_trades_list[:5] if isinstance(pt, dict) and "error" not in pt],
@@ -821,7 +889,7 @@ try:
     elif openai_key:
         llm_client = ModelClient(api_key=openai_key, provider="openai")
         st.sidebar.caption("✅ LLM: OpenAI Initialized")
-    else: st.sidebar.warning("LLM API key missing. Sentiment analysis disabled.")
+    else: st.sidebar.warning("LLM API key missing. Sentiment analysis and News Summary disabled.")
 except ValueError as e: st.sidebar.error(f"LLM Init Error: {e}. Check API Key.")
 except Exception as e: st.sidebar.error(f"LLM Init Unexpected Error: {e}")
 
@@ -895,11 +963,11 @@ if app_mode == "Live Analysis":
                         dec = res.get("final_decision", "N/A").upper(); score = res.get("composite_score", float('nan')); price_disp = res.get("current_price_display")
                         card_color_map = {"BUY": "green", "SELL": "red", "HOLD": "#FFA500"}; card_color = card_color_map.get(dec, "#D3D3D3")
                         st.markdown(f"""<div style="border: 1px solid {card_color}; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: {card_color}20;">
-                                   <h3 style="margin-bottom: 5px; color: {card_color};">{t_symbol}</h3>
-                                   <p style="font-size: 1.6em; font-weight: bold; color: {card_color}; margin-bottom: 5px;">{dec}</p>
-                                   <p style="font-size: 0.9em; margin-bottom: 3px;">Composite Score: <strong style="color: {card_color};">{score:.2f}</strong></p>
-                                   {f'<p style="font-size: 0.9em;">Price: <strong>${price_disp:,.2f}</strong></p>' if price_disp is not None else ""}
-                               </div>""", unsafe_allow_html=True)
+                                        <h3 style="margin-bottom: 5px; color: {card_color};">{t_symbol}</h3>
+                                        <p style="font-size: 1.6em; font-weight: bold; color: {card_color}; margin-bottom: 5px;">{dec}</p>
+                                        <p style="font-size: 0.9em; margin-bottom: 3px;">Composite Score: <strong style="color: {card_color};">{score:.2f}</strong></p>
+                                        {f'<p style="font-size: 0.9em;">Price: <strong>${price_disp:,.2f}</strong></p>' if price_disp is not None else ""}
+                                    </div>""", unsafe_allow_html=True)
             st.markdown("---")
             for t_symbol in live_tickers_list_main:
                 res = st.session_state.live_output.get(t_symbol)
@@ -928,11 +996,11 @@ if app_mode == "Live Analysis":
                     with tabs[2]:
                         st.subheader("Valuation Metrics (yfinance based)")
                         val_s = {
-                                "Forward P/E": f"{res.get('forward_pe',0):.1f}",
-                                "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(),
-                                "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A",
-                                "DCF Signal": res.get('dcf_signal', "N/A").upper()
-                                }
+                                 "Forward P/E": f"{res.get('forward_pe',0):.1f}",
+                                 "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(),
+                                 "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A",
+                                 "DCF Signal": res.get('dcf_signal', "N/A").upper()
+                                 }
                         st.dataframe(pd.Series(val_s, name="Value"), use_container_width=True)
 
                         if live_configs_main["use_value_trades"]:
@@ -940,14 +1008,20 @@ if app_mode == "Live Analysis":
                             vi_error = res.get('vi_data_error')
                             vi_full_text = res.get('vi_valuation_text_display')
 
-                            if vi_full_text and not vi_error:
+                            if not vi_error and (res.get('vi_fair_value_estimate') is not None or vi_full_text):
                                 st.markdown(f"**Analysis from ValueInvesting.io:**")
-                                st.markdown(f"> *{vi_full_text}*")
+                                if vi_full_text:
+                                    st.markdown(f"> *{vi_full_text}*")
                                 st.caption("This analysis is based on Peter Lynch's Fair Value formula as per ValueInvesting.io.")
-                                if res.get('vi_fair_value_estimate') is not None and res.get('vi_site_market_price') is not None:
-                                    st.markdown(f"- **Fair Value:** ${res.get('vi_fair_value_estimate'):.2f} (Site's Market Price: ${res.get('vi_site_market_price'):.2f})")
+                                
+                                if res.get('vi_fair_value_estimate') is not None:
+                                    st.markdown(f"- **Fair Value (VI.io):** ${res.get('vi_fair_value_estimate'):,.2f}")
+                                if res.get('vi_site_market_price') is not None:
+                                    st.markdown(f"- **Market Price (VI.io Site):** ${res.get('vi_site_market_price'):,.2f}")
+                                if res.get('current_price_display') is not None:
+                                     st.markdown(f"- **Current Yahoo Price:** ${res.get('current_price_display'):,.2f}")
                                 if res.get('vi_upside_percent') is not None:
-                                    st.markdown(f"- **Upside/Downside:** {res.get('vi_upside_percent'):.2f}%")
+                                    st.markdown(f"- **Upside/Downside (VI.io):** {res.get('vi_upside_percent'):.2f}%")
                                 st.markdown(f"- **VI.io Signal:** {res.get('vi_signal', 'N/A').upper()}")
 
                             elif vi_error:
@@ -963,6 +1037,14 @@ if app_mode == "Live Analysis":
                             if res.get("sentiment_error"): llm_status_message += f" | LLM: {res.get('sentiment_error')}"
                             sent_s = {"Sentiment Score": f"{res.get('sentiment_score',0):.2f}", "Sentiment Signal": res.get("sentiment_signal", "N/A").upper(), "Processing Status": llm_status_message}
                             st.dataframe(pd.Series(sent_s, name="Value"), use_container_width=True)
+                            
+                            st.subheader("News Summary (Generated by LLM)")
+                            news_summary_text = res.get("news_summary", "No news summary generated.")
+                            news_summary_error = res.get("news_summary_error")
+                            if news_summary_error:
+                                st.error(f"News Summary Error: {news_summary_error}")
+                            st.markdown(f"*{news_summary_text}*")
+
                             news_headlines = res.get("news_headlines_for_popover")
                             if news_headlines:
                                 with st.popover("View News Headlines (Top 10)"):
@@ -1002,9 +1084,9 @@ if app_mode == "Live Analysis":
                             inst_holdings_error = res.get("inst_holdings_error")
                             if inst_holdings_error: st.caption(f"Institutional Holdings Status: {inst_holdings_error}")
                             inst_data_display = {"Number of Institutions": res.get('inst_num_holders', 0),
-                                                  "Total Shares Held by Institutions": f"{res.get('inst_total_shares_held',0):,}",
-                                                  "% Outstanding Held by Institutions": f"{res.get('inst_total_pct_out',0.0)*100:.2f}%",
-                                                  "Institutional Holdings Signal": res.get("inst_holdings_signal", "N/A").upper()}
+                                                 "Total Shares Held by Institutions": f"{res.get('inst_total_shares_held',0):,}",
+                                                 "% Outstanding Held by Institutions": f"{res.get('inst_total_pct_out',0.0)*100:.2f}%",
+                                                 "Institutional Holdings Signal": res.get("inst_holdings_signal", "N/A").upper()}
                             st.dataframe(pd.Series(inst_data_display, name="Value"), use_container_width=True)
                             top_holders_display = res.get("inst_top_holders")
                             if top_holders_display:
