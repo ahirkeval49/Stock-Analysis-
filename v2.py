@@ -3,19 +3,23 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-# from dateutil.relativedelta import relativedelta # Unused, pd.DateOffset is used
-from datetime import datetime, timedelta, timezone # Added timezone
+from datetime import datetime, timedelta, timezone
 import openai
-from openai import OpenAI # Ensure this is at the top of your script
+from openai import OpenAI
 from dotenv import load_dotenv
-import requests # For web scraping
-from bs4 import BeautifulSoup # For web scraping
-import re # For parsing text more effectively
-from urllib.parse import urljoin # For handling relative URLs from scraping
-from newsapi import NewsApiClient # For NewsAPI.org
+import requests
+from bs4 import BeautifulSoup
+import re
+from urllib.parse import urljoin
+from newsapi import NewsApiClient
+import json # For CIK mapping
 
 # Load environment variables (if running locally)
 load_dotenv()
+
+# SEC EDGAR User-Agent - IMPORTANT: As per SEC guidelines
+# SEC_USER_AGENT = "Your Name or Company Name YourEmail@example.com"
+SEC_USER_AGENT = "KevalAhirApp/1.0 keval.ahir2019@gmail.com"
 
 # --------------------------------
 # Data Fetchers
@@ -77,9 +81,9 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
         try:
             raw_news = ticker_obj.news
         except TypeError as te:
-            return [{"error": f"yfinance .news call failed for {ticker} with TypeError: {te}", "source_api": "Yahoo Finance"}]
+             return [{"error": f"yfinance .news call failed for {ticker} with TypeError: {te}", "source_api": "Yahoo Finance"}]
         except Exception as news_exc:
-            return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
+             return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
 
         enriched_news_list = []
         if not raw_news:
@@ -127,7 +131,6 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
 
     newsapi = NewsApiClient(api_key=api_key)
     query = f'("{company_name}" OR {ticker.upper()}) AND (stock OR shares OR business OR finance OR earnings OR "product launch" OR "analyst rating" OR "market sentiment")'
-
     to_date_dt = datetime.now(timezone.utc)
     from_date_dt = to_date_dt - timedelta(days=lookback_days)
     from_param_str = from_date_dt.strftime('%Y-%m-%d')
@@ -169,36 +172,140 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
         return [{"error": f"Unexpected error fetching news from NewsAPI for {ticker}: {e}", "source_api": "NewsAPI.org"}]
     return articles_list
 
-
-@st.cache_data
-def fetch_inst_filings(ticker: str) -> list[dict]:
+# --- SEC EDGAR Filings Functions ---
+@st.cache_data(ttl=24*3600) # Cache CIK mapping for a day
+def get_all_cik_ticker_mappings():
+    """Fetches and processes the CIK to Ticker mapping from SEC."""
     try:
-        df = yf.Ticker(ticker).institutional_holders
-        if df is not None: return df.to_dict("records")
-        return []
-    except Exception as e: return []
+        url = "https://www.sec.gov/files/company_tickers.json"
+        response = requests.get(url, headers={'User-Agent': SEC_USER_AGENT})
+        response.raise_for_status()
+        data = response.json()
+        ticker_to_cik = {item['ticker']: str(item['cik_str']).zfill(10) for item in data if 'ticker' in item and 'cik_str' in item}
+        return ticker_to_cik
+    except Exception as e:
+        # st.warning(f"Failed to fetch or process CIK ticker mappings: {e}") # Optional warning
+        return {}
 
-@st.cache_data
-def fetch_insider_filings(ticker: str) -> list[dict]:
+TICKER_TO_CIK_MAP = get_all_cik_ticker_mappings()
+
+def get_cik_for_ticker(ticker: str) -> str | None:
+    """Gets the CIK for a given ticker symbol using the pre-fetched map."""
+    return TICKER_TO_CIK_MAP.get(ticker.upper())
+
+@st.cache_data(ttl=4*3600) # Cache SEC filings for 4 hours
+def fetch_sec_form4_filings(ticker_symbol: str, lookback_days: int = 180) -> list[dict]:
+    cik = get_cik_for_ticker(ticker_symbol)
+    if not cik:
+        return [{"error": f"SEC Filings: CIK not found for {ticker_symbol}"}]
+
+    cik_padded = str(cik).zfill(10)
+    submissions_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+    headers = {'User-Agent': SEC_USER_AGENT}
+    transactions_list = []
+
     try:
-        df = yf.Ticker(ticker).get_insider_transactions()
-        if df is None or df.empty: return []
-        recs = df.to_dict("records")
-        for r in recs:
-            tx = r.get("Transaction", "").lower()
-            if "purchase" in tx or "buy" in tx: r["type"] = "buy"
-            elif "sale" in tx or "sell" in tx: r["type"] = "sell"
-            else: r["type"] = "other"
-        return recs
-    except Exception as e: return []
+        response = requests.get(submissions_url, headers=headers, timeout=20)
+        response.raise_for_status()
+        submissions_data = response.json()
+
+        today = datetime.now(timezone.utc)
+        date_limit = today - timedelta(days=lookback_days)
+
+        if 'filings' in submissions_data and 'recent' in submissions_data['filings']:
+            recent_filings = submissions_data['filings']['recent']
+            forms = recent_filings.get('form', [])
+            filing_dates = recent_filings.get('filingDate', [])
+            accession_numbers = recent_filings.get('accessionNumber', [])
+            primary_documents = recent_filings.get('primaryDocument', [])
+
+            for i in range(len(forms)):
+                if forms[i] == '4':
+                    filing_date_str = filing_dates[i]
+                    try:
+                        filing_date = datetime.strptime(filing_date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                        if filing_date < date_limit:
+                            continue
+                    except ValueError:
+                        continue
+
+                    accession_number_no_dashes = accession_numbers[i].replace('-', '')
+                    primary_document_xml = primary_documents[i]
+                    xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_number_no_dashes}/{primary_document_xml}"
+                    
+                    try:
+                        filing_response = requests.get(xml_url, headers=headers, timeout=10)
+                        if filing_response.status_code != 200: continue # Skip if XML not found
+
+                        soup_xml = BeautifulSoup(filing_response.content, 'xml')
+                        reporting_owner_tag = soup_xml.find('reportingOwner')
+                        owner_name = "N/A"; owner_relationship_tags = []
+                        if reporting_owner_tag:
+                            owner_id_tag = reporting_owner_tag.find('reportingOwnerId')
+                            if owner_id_tag and owner_id_tag.find('rptOwnerName'):
+                                owner_name = owner_id_tag.find('rptOwnerName').text.strip()
+                            relationship_tag = reporting_owner_tag.find('reportingOwnerRelationship')
+                            if relationship_tag:
+                                if relationship_tag.find('isDirector'): owner_relationship_tags.append("Director")
+                                if relationship_tag.find('isOfficer'): owner_relationship_tags.append(f"Officer ({relationship_tag.find('officerTitle').text.strip() if relationship_tag.find('officerTitle') else ''})")
+                                if relationship_tag.find('isTenPercentOwner'): owner_relationship_tags.append(">10% Owner")
+                        owner_relationship = ", ".join(filter(None, owner_relationship_tags)) or "N/A"
+
+                        for transaction in soup_xml.find_all(['nonDerivativeTransaction', 'derivativeTransaction']):
+                            transaction_date_tag = transaction.find('transactionDate')
+                            if not transaction_date_tag or not transaction_date_tag.find('value'): continue
+                            trans_date = transaction_date_tag.find('value').text.strip()
+
+                            trans_coding_tag = transaction.find('transactionCoding')
+                            if not trans_coding_tag or not trans_coding_tag.find('transactionFormType') or \
+                               not trans_coding_tag.find('transactionCode'): continue
+                            form_type = trans_coding_tag.find('transactionFormType').text.strip() # Should be 4
+                            trans_code = trans_coding_tag.find('transactionCode').text.strip().upper()
+
+                            shares_tag = transaction.find('transactionAmounts') # For nonDerivativeTransaction
+                            if not shares_tag: shares_tag = transaction.find('derivativeTransactionAmounts') # For derivativeTransaction
+                            
+                            shares_val = None; price_val = None
+                            if shares_tag and shares_tag.find('transactionShares') and shares_tag.find('transactionShares').find('value'):
+                                try: shares_val = float(shares_tag.find('transactionShares').find('value').text.strip())
+                                except ValueError: continue
+                            
+                            price_tag = transaction.find('transactionPricePerShare')
+                            if price_tag and price_tag.find('value'):
+                                try: price_val = float(price_tag.find('value').text.strip())
+                                except ValueError: price_val = None
+
+                            acq_disp_tag = transaction.find('transactionAcquiredDisposedCode')
+                            if not acq_disp_tag or not acq_disp_tag.find('value'): continue
+                            acq_disp_code = acq_disp_tag.find('value').text.strip().upper()
+
+                            if shares_val is not None: # Only record if shares are found
+                                transactions_list.append({
+                                    "ticker": ticker_symbol, "filing_date": filing_date_str,
+                                    "transaction_date": trans_date, "reporting_owner": owner_name,
+                                    "owner_relationship": owner_relationship, "form_type": form_type,
+                                    "transaction_code": trans_code, "acq_disp_code": acq_disp_code,
+                                    "shares": shares_val, "price_per_share": price_val,
+                                    "link_to_filing": xml_url.replace(primary_document_xml, "FilingSummary.xml")
+                                })
+                    except requests.exceptions.RequestException: pass # Skip individual filing fetch/parse error
+                    except Exception: pass # Skip other parsing errors for an individual filing
+
+            if not transactions_list:
+                return [{"error": f"SEC Filings: No parsable Form 4 transactions found for {ticker_symbol} in the last {lookback_days} days.", "cik": cik}]
+        else:
+            return [{"error": f"SEC Filings: 'filings' or 'recent' key not found in submissions data for {ticker_symbol} (CIK: {cik})"}]
+    except requests.exceptions.HTTPError as http_err:
+        return [{"error": f"SEC Filings: HTTP error fetching submissions for {ticker_symbol} (CIK: {cik}): {http_err}"}]
+    except requests.exceptions.RequestException as req_err:
+        return [{"error": f"SEC Filings: Request error fetching submissions for {ticker_symbol} (CIK: {cik}): {req_err}"}]
+    except Exception as e:
+        return [{"error": f"SEC Filings: Unexpected error for {ticker_symbol} (CIK: {cik}): {e}"}]
+    return transactions_list
+
 
 @st.cache_data(ttl=3600)
 def fetch_fair_value_from_value_trades(ticker: str, company_name: str) -> dict:
-    """
-    Placeholder for fetching fair value from value-trades.com.
-    The site uses dynamic search (likely via search.php).
-    Effective scraping requires significant effort to replicate browser behavior.
-    """
     error_message = (
         f"VT ({ticker}): Scraping value-trades.com for this data is complex due to its dynamic search. "
         "This function is currently a placeholder. To implement fully, you would need to: "
@@ -213,7 +320,8 @@ def fetch_fair_value_from_value_trades(ticker: str, company_name: str) -> dict:
     return {
         "error": error_message,
         "vt_fair_value": None, "vt_current_price": None, "vt_valuation_text": None,
-        "vt_valuation_status": None, "vt_valuation_percentage": None
+        "vt_valuation_status": None, "vt_valuation_percentage": None,
+        "vt_assigned_pe_by_site": None, "vt_eps_used_by_site": None
     }
 
 
@@ -223,8 +331,7 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Referer': 'https://www.capitoltrades.com/'
+        'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'
     }
     politician_trades_list = []
     try:
@@ -251,12 +358,12 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
                 value_range = value_range_tag.text.strip()
                 date_str = date_tag.text.strip()
                 value_estimate = 0
-                value_matches = re.findall(r'\$([\d,]+)', value_range) # Corrected line 253/254 context
+                value_matches = re.findall(r'\$([\d,]+)', value_range)
                 if value_matches:
                     try:
                         value_estimate = int(value_matches[0].replace(',', ''))
                     except ValueError:
-                        pass # Keep value_estimate as 0 if parsing fails
+                        pass
                 politician_trades_list.append({
                     "politician_name": name, "transaction_type": tx_type,
                     "value_range": value_range, "value_estimate_lower": value_estimate,
@@ -265,12 +372,9 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
         if not politician_trades_list and trade_rows:
              return [{"error": f"CT: Found trade rows for {ticker} but failed to parse individual fields. Selectors need update."}]
         return politician_trades_list
-    except requests.exceptions.Timeout:
-        return [{"error": f"CT: Timeout accessing CapitolTrades for {ticker}"}]
-    except requests.exceptions.HTTPError as http_err:
-        return [{"error": f"CT HTTP error for {ticker}: {http_err}"}]
-    except Exception as e:
-        return [{"error": f"CT Parsing error for {ticker}: {e}"}]
+    except requests.exceptions.Timeout: return [{"error": f"CT: Timeout accessing CapitolTrades for {ticker}"}]
+    except requests.exceptions.HTTPError as http_err: return [{"error": f"CT HTTP error for {ticker}: {http_err}"}]
+    except Exception as e: return [{"error": f"CT Parsing error for {ticker}: {e}"}]
 
 # --------------------------------
 # LLM Client
@@ -403,7 +507,7 @@ class FundamentalsAgent:
         sig  = "buy" if piotroski_score >= 2 else ("sell" if piotroski_score == 0 else "hold")
         return {"ticker": ticker, "fcf_yield": float(fcy), "piotroski_score": piotroski_score, "fund_signal": sig}
 
-class ValuationAgent:
+class ValuationAgent: # Standard yfinance based valuation
     def run(self, ticker: str, data: dict) -> dict:
         stats = data.get("ticker_info", {}); price_history_df = data.get("price_history")
         price = stats.get("currentPrice") or (price_history_df["Close"].iloc[-1] if price_history_df is not None and not price_history_df.empty else None)
@@ -412,41 +516,49 @@ class ValuationAgent:
         if pe is not None: rel_sig = "buy" if pe < 15 else "sell" if pe > 25 else "hold"
         fcf = stats.get("freeCashflow"); mcap = stats.get("marketCap")
         fcy = (fcf / mcap) if fcf is not None and mcap is not None and mcap != 0 else 0.0
-        fair_price = price * (1 + fcy); dcf_sig = "hold"
+        fair_price = price * (1 + fcy); dcf_sig = "hold" # Simple FCF yield based FV adjustment
         if fair_price > price * 1.15: dcf_sig = "buy"
         elif fair_price < price * 0.85: dcf_sig = "sell"
         return {"ticker": ticker, "forward_pe": pe, "relative_pe_signal": rel_sig, "dcf_fair_price": float(fair_price), "dcf_signal": dcf_sig}
 
-class FilingsAgent:
+# --- NEW AGENT FOR SEC FILINGS ---
+class SECFilingAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        insiders = data.get("insider_filings",[]); net_shares = 0
-        if insiders:
-            for r in insiders:
-                shares_val = r.get("Shares",0)
-                try: shares = int(str(shares_val).replace(',',''))
-                except ValueError: shares = 0
-                if r.get("type") == "buy": net_shares += shares
-                elif r.get("type") == "sell": net_shares -= shares
-        sig = "buy" if net_shares > 1000 else ("sell" if net_shares < -1000 else "hold")
-        return {"ticker": ticker, "net_insider_shares": int(net_shares), "filings_signal": sig}
+        form4_transactions = fetch_sec_form4_filings(ticker, lookback_days=180)
 
-class AnalystRatingAgent:
-    def run(self, ticker: str, data: dict) -> dict:
-        ticker_info_res = data.get("ticker_info", {}); price_history_df = data.get("price_history")
-        current_price = ticker_info_res.get("currentPrice") or (price_history_df["Close"].iloc[-1] if price_history_df is not None and not price_history_df.empty else None)
-        target_mean_price = ticker_info_res.get("targetMeanPrice"); recommendation = str(ticker_info_res.get("recommendationKey", "hold")).lower(); upside = 0.0
-        if target_mean_price and current_price and current_price > 0:
-            try: upside = (float(target_mean_price) / float(current_price)) - 1
-            except: upside = 0.0
-        sig = "hold"
-        if recommendation in ["buy", "strong_buy"] and upside > 0.10: sig = "buy"
-        elif recommendation == "buy" and upside > 0.05: sig = "buy"
-        elif recommendation in ["sell", "strong_sell", "underperform"] and upside < -0.05: sig = "sell"
-        elif upside > 0.20: sig = "buy"
-        elif upside < -0.15: sig = "sell"
-        buy_pct_inferred = {"strong_buy": 0.9, "buy": 0.7, "hold": 0.5, "underperform": 0.3, "sell": 0.1}.get(recommendation, 0.5)
-        return {"ticker": ticker, "analyst_buy_pct_inferred": buy_pct_inferred, "target_upside": float(upside),
-                "yfinance_recommendation": recommendation, "analyst_signal": sig}
+        if not form4_transactions or (isinstance(form4_transactions[0], dict) and "error" in form4_transactions[0]):
+            return {
+                "ticker": ticker, "sec_net_insider_shares_6m": 0,
+                "sec_insider_buy_value_6m": 0, "sec_insider_sell_value_6m": 0,
+                "sec_filings_signal": "hold",
+                "sec_filings_error": form4_transactions[0].get("error") if form4_transactions and isinstance(form4_transactions[0], dict) else "No SEC Form 4 data.",
+                "sec_recent_form4_transactions": []
+            }
+
+        net_shares = 0; buy_value = 0; sell_value = 0
+        processed_transactions = []
+        for tx in form4_transactions:
+            if tx.get("transaction_code") == "P" and tx.get("acq_disp_code") == "A":
+                shares = tx.get("shares", 0); price = tx.get("price_per_share")
+                net_shares += shares
+                if price and shares: buy_value += shares * price
+                processed_transactions.append(tx)
+            elif tx.get("transaction_code") == "S" and tx.get("acq_disp_code") == "D":
+                shares = tx.get("shares", 0); price = tx.get("price_per_share")
+                net_shares -= shares
+                if price and shares: sell_value += shares * price
+                processed_transactions.append(tx)
+        
+        signal = "hold"
+        if net_shares > 5000 or buy_value > 500000: signal = "buy" # Adjusted thresholds
+        elif net_shares < -5000 or sell_value > 500000: signal = "sell"
+        
+        return {
+            "ticker": ticker, "sec_net_insider_shares_6m": int(net_shares),
+            "sec_insider_buy_value_6m": buy_value, "sec_insider_sell_value_6m": sell_value,
+            "sec_filings_signal": signal, "sec_filings_error": None,
+            "sec_recent_form4_transactions": processed_transactions[:10]
+        }
 
 class PoliticianFilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
@@ -468,7 +580,7 @@ class PoliticianFilingsAgent:
                 "politician_buy_tx_count": buy_count, "politician_sell_tx_count": sell_count,
                 "politician_filings_signal": signal, "politician_data_error": error}
 
-class FairValueAgentVT:
+class FairValueAgentVT: # For scraped data from value-trades.com (currently a placeholder fetcher)
     def run(self, ticker: str, data: dict) -> dict:
         vt_data = data.get("value_trades_fair_value_data", {})
         fair_value = vt_data.get("vt_fair_value")
@@ -477,7 +589,7 @@ class FairValueAgentVT:
         current_price = current_price_data.get("currentPrice")
         if current_price is None and data.get("price_history") is not None and not data["price_history"].empty:
             current_price = data["price_history"]["Close"].iloc[-1]
-        signal = "hold"; margin_of_safety = 0.20
+        signal = "hold"; margin_of_safety = 0.15
 
         error_fv_not_found_page = f"VT: FV not found on page for {ticker}."
         error_specific_sentence_prefix = f"VT: Specific fair value sentence not found for {ticker} on page"
@@ -505,12 +617,68 @@ class FairValueAgentVT:
                 "vt_valuation_percentage": vt_data.get("vt_valuation_percentage"),
                 "vt_valuation_text_display": vt_data.get("vt_valuation_text")}
 
+class VTInspiredFairValueAgent:
+    DEFAULT_ASSUMED_FAIR_PE = 20.0
+    DEFAULT_INDUSTRY_PE_LOOKUP = {
+        "TECHNOLOGY": 25.0, "CONSUMER ELECTRONICS": 25.0, "HEALTHCARE": 20.0,
+        "FINANCIAL SERVICES": 15.0, "CONSUMER CYCLICAL": 18.0, "INDUSTRIALS": 17.0,
+        "DEFAULT": 18.0
+    }
+    DEFAULT_HISTORICAL_AVG_PE = 20.0 
+    DEFAULT_GROWTH_PE = 10.0
+
+    def get_eps(self, ticker_info: dict) -> float | None:
+        return ticker_info.get('trailingEps')
+
+    def get_industry_pe(self, ticker_info: dict) -> float:
+        industry = str(ticker_info.get("industry", "")).upper()
+        sector = str(ticker_info.get("sector", "")).upper()
+        if industry in self.DEFAULT_INDUSTRY_PE_LOOKUP: return self.DEFAULT_INDUSTRY_PE_LOOKUP[industry]
+        if sector in self.DEFAULT_INDUSTRY_PE_LOOKUP: return self.DEFAULT_INDUSTRY_PE_LOOKUP[sector]
+        return self.DEFAULT_INDUSTRY_PE_LOOKUP["DEFAULT"]
+
+    def run(self, ticker: str, data: dict) -> dict:
+        ticker_info = data.get("ticker_info", {})
+        eps = self.get_eps(ticker_info)
+        historical_avg_pe = self.DEFAULT_HISTORICAL_AVG_PE
+        assumed_fair_pe = self.DEFAULT_ASSUMED_FAIR_PE
+        industry_pe = self.get_industry_pe(ticker_info)
+        growth_pe_val = self.DEFAULT_GROWTH_PE
+
+        if eps is None:
+            return {"error_vt_inspired_fv": "EPS not available for calculation.", "vt_inspired_fair_value": None, "vt_inspired_signal": "hold"}
+
+        pe_components = [historical_avg_pe, assumed_fair_pe, industry_pe, growth_pe_val]
+        valid_pe_components = [p for p in pe_components if p is not None]
+        our_assigned_pe = None
+        if valid_pe_components: our_assigned_pe = sum(valid_pe_components) / len(valid_pe_components)
+        vt_inspired_fair_value = None
+        if our_assigned_pe is not None and eps is not None: vt_inspired_fair_value = our_assigned_pe * eps
+
+        current_price = ticker_info.get("currentPrice")
+        signal = "hold"
+        if vt_inspired_fair_value is not None and current_price is not None and current_price > 0:
+            margin = 0.15
+            if current_price < vt_inspired_fair_value * (1 - margin): signal = "buy"
+            elif current_price > vt_inspired_fair_value * (1 + margin): signal = "sell"
+        
+        return {"ticker": ticker, "vt_inspired_eps_used": eps,
+                "vt_inspired_historical_avg_pe": historical_avg_pe, "vt_inspired_assumed_fair_pe": assumed_fair_pe,
+                "vt_inspired_industry_pe": industry_pe, "vt_inspired_growth_pe": growth_pe_val,
+                "vt_inspired_assigned_pe": our_assigned_pe, "vt_inspired_fair_value": vt_inspired_fair_value,
+                "vt_inspired_signal": signal,
+                "error_vt_inspired_fv": None if vt_inspired_fair_value is not None else "Could not calculate VT-Inspired Fair Value"}
+
 
 class PortfolioAgent:
     WEIGHTS = {
         "price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.6, "fund": 0.9,
-        "valuation_dcf":0.5, "valuation_pe":0.5, "filings": 0.5, "analyst": 0.7,
-        "politician_filings": 0.4, "vt_fair_value": 0.8
+        "valuation_dcf":0.5, "valuation_pe":0.5, 
+        "sec_filings": 0.6, # New SEC Filings weight
+        "analyst": 0.7,
+        "politician_filings": 0.4, 
+        "vt_fair_value": 0.0, 
+        "vt_inspired": 0.7 
     }
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
         current_weights = agent_weights or self.WEIGHTS; total_weighted_score = 0; sum_of_weights_used = 0
@@ -520,8 +688,13 @@ class PortfolioAgent:
 
         signal_map = {"price_signal": "price", "momentum_signal": "momentum", "volatility_signal": "volatility",
                       "sentiment_signal": "sentiment", "fund_signal": "fund", "dcf_signal": "valuation_dcf",
-                      "relative_pe_signal": "valuation_pe", "filings_signal": "filings", "analyst_signal": "analyst",
-                      "politician_filings_signal": "politician_filings", "vt_fair_value_signal": "vt_fair_value"}
+                      "relative_pe_signal": "valuation_pe", 
+                      "sec_filings_signal": "sec_filings", # Updated key
+                      "analyst_signal": "analyst",
+                      "politician_filings_signal": "politician_filings", 
+                      "vt_fair_value_signal": "vt_fair_value",
+                      "vt_inspired_signal": "vt_inspired" 
+                     }
         for signal_key, weight_key in signal_map.items():
             signal_value = agg_signals.get(signal_key); weight = current_weights.get(weight_key, 0)
             if signal_value and weight > 0 :
@@ -555,9 +728,8 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
         news_fetch_status_messages = []
 
         if configs["use_sentiment"]:
-            yfinance_news = fetch_enriched_news(t, ticker_info) # Pass ticker_info
+            yfinance_news = fetch_enriched_news(t, ticker_info)
             if yfinance_news and not (isinstance(yfinance_news[0], dict) and "error" in yfinance_news[0]):
-                # No need to tag source here, already done in fetch_enriched_news
                 combined_news_data_list.extend(yfinance_news)
             elif yfinance_news and isinstance(yfinance_news[0], dict) and "error" in yfinance_news[0]:
                 news_fetch_status_messages.append(f"Yahoo News: {yfinance_news[0]['error']}")
@@ -568,8 +740,8 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
                     combined_news_data_list.extend(newsapi_articles)
                 elif newsapi_articles and isinstance(newsapi_articles[0], dict) and "error" in newsapi_articles[0]:
                     news_fetch_status_messages.append(f"NewsAPI: {newsapi_articles[0]['error']}")
-            elif configs["use_sentiment"]: 
-                 news_fetch_status_messages.append("NewsAPI Key not configured; consider adding for broader news coverage.")
+            elif configs["use_sentiment"]:
+                 news_fetch_status_messages.append("NewsAPI Key not configured.")
         
         seen_urls = set()
         deduplicated_news = []
@@ -592,7 +764,9 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
             "price_history": price_history_full, "ticker_info": ticker_info,
             "news": deduplicated_news, 
             "news_fetch_status_error": news_fetch_status_for_bundle if "Error" in news_fetch_status_for_bundle or "failed" in news_fetch_status_for_bundle.lower() or "No news" in news_fetch_status_for_bundle else None,
-            "insider_filings": fetch_insider_filings(t) if configs["use_filings"] else [],
+            # SEC Filings data will be generated by the SECFilingAgent, not pre-fetched here.
+            # If you wanted to pre-fetch it, you would call fetch_sec_form4_filings here.
+            # For now, SECFilingAgent will call it.
             "politician_trades": politician_trades_list,
             "value_trades_fair_value_data": fetch_fair_value_from_value_trades(t, company_name_for_news) if configs["use_value_trades"] else \
                                             {"vt_fair_value": None, "error": "VT: Skipped by user config."}
@@ -600,9 +774,12 @@ def run_live_analysis(tickers, history_years, llm_client, configs):
         
         all_agents_instances = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()]
         if configs["use_sentiment"] and llm_client: all_agents_instances.append(SentimentAgent(llm_client))
-        if configs["use_filings"]: all_agents_instances.append(FilingsAgent())
+        if configs["use_filings"]: 
+            all_agents_instances.append(SECFilingAgent()) # Use new SEC Filing Agent
         if configs["use_politician_filings"]: all_agents_instances.append(PoliticianFilingsAgent())
-        if configs["use_value_trades"]: all_agents_instances.append(FairValueAgentVT())
+        if configs["use_value_trades"]: 
+            all_agents_instances.append(FairValueAgentVT()) # For scraping VT
+            all_agents_instances.append(VTInspiredFairValueAgent()) # For VT-inspired calculation
 
         agent_results_list = []
         for agent_instance in all_agents_instances:
@@ -729,10 +906,10 @@ with config_container:
         cols_features = st.columns(3)
         with cols_features[0]:
             use_sentiment_live_main = st.checkbox("News Sentiment (LLM)", value=True if llm_client else False, disabled=not llm_client, key="live_sentiment_cb_main", help="Uses LLM for news sentiment. Requires NewsAPI key if used, else Yahoo Finance.")
-            use_filings_live_main = st.checkbox("Insider Filings", value=True, key="live_insider_cb_main", help="Analyzes yfinance insider transaction data.")
+            use_filings_live_main = st.checkbox("SEC Insider Filings (Form 4)", value=True, key="live_sec_filings_cb_main", help="Analyzes SEC Form 4 insider transactions. (Replaces old yfinance filings)") # Updated help
         with cols_features[1]:
             use_politician_filings_main = st.checkbox("Politician Filings", value=False, key="live_politician_cb_main", help="EXPERIMENTAL: Attempts to scrape CapitolTrades.com. May be slow/unreliable.")
-            use_value_trades_main = st.checkbox("Value-Trades Fair Value", value=False, key="live_vt_cb_main", help="EXPERIMENTAL: Attempts to scrape Value-Trades.com. Relies on specific page structure.")
+            use_value_trades_main = st.checkbox("Value-Trades Inspired Analysis", value=False, key="live_vt_cb_main", help="EXPERIMENTAL: Uses a placeholder for Value-Trades.com direct scraping & shows a VT-Inspired calculation.") # Updated help
         st.markdown("")
         run_button_live_main = st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_btn_main")
 
@@ -754,7 +931,7 @@ with config_container:
             bt_weights_volatility_main = st.slider("Volatility Signal Weight:", 0.0, 2.0, 0.2, 0.1, key="bt_w_vol_main")
         backtest_portfolio_weights_main = {"price": bt_weights_price_main, "momentum": bt_weights_momentum_main, "volatility": bt_weights_volatility_main,
                                       "sentiment": 0.0, "fund": 0.0, "valuation_dcf":0.0, "valuation_pe":0.0,
-                                      "filings": 0.0, "analyst": 0.0, "politician_filings": 0.0, "vt_fair_value": 0.0}
+                                      "sec_filings": 0.0, "analyst": 0.0, "politician_filings": 0.0, "vt_fair_value": 0.0, "vt_inspired":0.0}
         st.markdown("")
         run_button_backtest_main = st.button("📈 Run Backtest", use_container_width=True, type="primary", key="run_bt_btn_main")
 
@@ -820,35 +997,55 @@ if app_mode == "Live Analysis":
                         if business_summary:
                             with st.popover("View Business Summary"):
                                 st.markdown(business_summary)
-                    with tabs[2]:
-                        st.subheader("Valuation Metrics")
+                    with tabs[2]: # Valuation & Fair Value Tab
+                        st.subheader("Valuation Metrics (yfinance based)")
                         val_s = {"Forward P/E": f"{res.get('forward_pe',0):.1f}", "Relative P/E Signal": res.get('relative_pe_signal', "N/A").upper(), "DCF Fair Price (Simple Est.)": f"${res.get('dcf_fair_price',0):.2f}" if res.get('dcf_fair_price') is not None else "N/A", "DCF Signal": res.get('dcf_signal', "N/A").upper()}
                         st.dataframe(pd.Series(val_s, name="Value"), use_container_width=True)
+                        
                         if live_configs_main["use_value_trades"]:
-                            st.subheader("Value-Trades.com Analysis (Experimental)")
-                            vt_scrape_status = res.get('vt_data_error') if res.get('vt_data_error') else "Success"
-                            if res.get('vt_fair_value_estimate') is None and not res.get('vt_data_error'):
-                                vt_scrape_status = "Data not found on page"
-                            elif "VT Configuration incomplete" in str(vt_scrape_status) or "Skipped by user" in str(vt_scrape_status) :
-                                vt_scrape_status = "Not Attempted / Config Error"
+                            st.subheader("Value-Trades Scraper (Experimental)")
+                            vt_scrape_status_msg = res.get('vt_data_error', "Status unknown") # Default if key missing
+                            if not res.get('vt_data_error') and res.get('vt_fair_value_estimate') is not None:
+                                vt_scrape_status_msg = "Success"
+                            elif not res.get('vt_data_error') and res.get('vt_fair_value_estimate') is None :
+                                vt_scrape_status_msg = "Data not found on page by scraper."
+                            # Keep original error message if it's significant
 
                             vt_full_text_display = res.get('vt_valuation_text_display')
                             if vt_full_text_display:
                                 st.markdown(f"""> *"{vt_full_text_display}"*""")
-
-                            vt_s = {
+                            vt_s_scraped = {
                                 "VT Scraped Fair Value": f"${res.get('vt_fair_value_estimate'):.2f}" if res.get('vt_fair_value_estimate') is not None else "N/A",
                                 "VT Site Current Price": f"${res.get('vt_site_current_price'):.2f}" if res.get('vt_site_current_price') is not None else "N/A",
                                 "VT Site Valuation Status": str(res.get('vt_valuation_status', "N/A")).title(),
                                 "VT Site Valuation (%)": f"{res.get('vt_valuation_percentage'):.2f}%" if res.get('vt_valuation_percentage') is not None else "N/A",
-                                "VT Fair Value Signal": res.get('vt_fair_value_signal', "N/A").upper(),
-                                "VT Scrape Status": vt_scrape_status
+                                "VT Scraper Signal": res.get('vt_fair_value_signal', "N/A").upper(),
+                                "VT Scraper Status": vt_scrape_status_msg
                             }
-                            st.dataframe(pd.Series(vt_s, name="Value"), use_container_width=True)
+                            st.dataframe(pd.Series(vt_s_scraped, name="Value"), use_container_width=True)
+
+                            st.subheader("Value-Trades Inspired Calculation (Internal)")
+                            vt_inspired_error = res.get("error_vt_inspired_fv")
+                            if vt_inspired_error:
+                                st.caption(f"Calculation Status: {vt_inspired_error}")
+                            
+                            vt_inspired_data = {
+                                "EPS Used (Trailing)": f"${res.get('vt_inspired_eps_used'):.2f}" if res.get('vt_inspired_eps_used') is not None else "N/A",
+                                "Component PE - Hist. Avg (Assumed)": f"{res.get('vt_inspired_historical_avg_pe'):.2f}" if res.get('vt_inspired_historical_avg_pe') is not None else "N/A",
+                                "Component PE - Fair Val (Assumed)": f"{res.get('vt_inspired_assumed_fair_pe'):.2f}" if res.get('vt_inspired_assumed_fair_pe') is not None else "N/A",
+                                "Component PE - Industry (Est.)": f"{res.get('vt_inspired_industry_pe'):.2f}" if res.get('vt_inspired_industry_pe') is not None else "N/A",
+                                "Component PE - Growth (Assumed)": f"{res.get('vt_inspired_growth_pe'):.2f}" if res.get('vt_inspired_growth_pe') is not None else "N/A",
+                                "Calculated Assigned P/E (Avg)": f"{res.get('vt_inspired_assigned_pe'):.2f}" if res.get('vt_inspired_assigned_pe') is not None else "N/A",
+                                "VT-Inspired Fair Value": f"${res.get('vt_inspired_fair_value'):.2f}" if res.get('vt_inspired_fair_value') is not None else "N/A",
+                                "VT-Inspired Signal": res.get('vt_inspired_signal', "N/A").upper()
+                            }
+                            st.dataframe(pd.Series(vt_inspired_data, name="Value"), use_container_width=True)
+                            st.caption("Note: 'Assumed' P/E components are placeholders inspired by Value-Trades' example and may need adjustment/configuration for accuracy.")
+                    
                     with tabs[3]: # News & Filings Tab
                         if live_configs_main["use_sentiment"]:
                             st.subheader("News Sentiment (LLM)")
-                            llm_status_message = res.get("news_status_display", "Status: OK")
+                            llm_status_message = res.get("news_status_display", "Status: OK") 
                             if res.get("sentiment_error"):
                                 llm_status_message += f" | LLM: {res.get('sentiment_error')}"
                             
@@ -865,10 +1062,32 @@ if app_mode == "Live Analysis":
                             elif "Error" not in llm_status_message and "No news items" not in llm_status_message and "No valid news" not in llm_status_message :
                                  st.caption("No news headlines available or processed.")
 
-                        if live_configs_main["use_filings"]:
-                            st.subheader("Insider Filings")
-                            fil_s = {"Net Insider Shares (Recent)": f"{res.get('net_insider_shares',0):,}", "Insider Filings Signal": res.get("filings_signal", "N/A").upper()}
-                            st.dataframe(pd.Series(fil_s, name="Value"), use_container_width=True)
+                        if live_configs_main["use_filings"]: # This now refers to SEC Filings
+                            st.subheader("SEC Insider Transactions (Form 4 - Last 6 Months)")
+                            sec_filings_error = res.get("sec_filings_error")
+                            if sec_filings_error:
+                                st.caption(f"SEC Filings Status: {sec_filings_error}")
+                            
+                            sec_data_display = {
+                                "Net Insider Shares (6M)": f"{res.get('sec_net_insider_shares_6m',0):,}",
+                                "Total Buy Value (6M Est.)": f"${res.get('sec_insider_buy_value_6m',0):,.0f}",
+                                "Total Sell Value (6M Est.)": f"${res.get('sec_insider_sell_value_6m',0):,.0f}",
+                                "SEC Filings Signal": res.get("sec_filings_signal", "N/A").upper()
+                            }
+                            st.dataframe(pd.Series(sec_data_display, name="Value"), use_container_width=True)
+
+                            recent_txs_display = res.get("sec_recent_form4_transactions")
+                            if recent_txs_display:
+                                with st.popover("View Recent SEC Form 4 Transactions (Max 10)"):
+                                    for tx in recent_txs_display:
+                                        direction = "Acquired" if tx.get('acq_disp_code') == 'A' else "Disposed"
+                                        price_info = f"@ ${tx.get('price_per_share'):.2f}" if tx.get('price_per_share') is not None else "(price N/A)"
+                                        st.markdown(f"- **{tx.get('transaction_date')}**: {tx.get('reporting_owner')} ({tx.get('owner_relationship', '')}) "
+                                                    f"{direction} {tx.get('shares'):,.0f} shares {price_info}. Code: {tx.get('transaction_code')}. "
+                                                    f"[Link]({tx.get('link_to_filing')})")
+                            elif not sec_filings_error:
+                                st.caption("No recent Form 4 transactions found or processed.")
+                                
                         if live_configs_main["use_politician_filings"]:
                             st.subheader("Politician Filings (Experimental Scrape)")
                             pol_scrape_error = res.get("politician_data_error")
