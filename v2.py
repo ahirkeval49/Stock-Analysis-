@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
 import re
-from urllib.parse import urljoin, urlparse # Added urlparse
+from urllib.parse import urljoin, urlparse
 from newsapi import NewsApiClient
 import json
 
@@ -23,8 +23,45 @@ load_dotenv()
 # SEC EDGAR User-Agent
 SEC_USER_AGENT = "KevalAhirApp/1.0 keval.ahir2019@gmail.com"
 
+PORTFOLIOS_FILE = "portfolios.json"
+
 # --------------------------------
-# Data Fetchers
+# Portfolio Helper Functions
+# --------------------------------
+def load_portfolios():
+    if os.path.exists(PORTFOLIOS_FILE):
+        try:
+            with open(PORTFOLIOS_FILE, 'r') as f:
+                data = json.load(f)
+                # Ensure data is a dict (for multiple portfolios)
+                return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {} # Return empty if file is corrupted or not valid JSON
+    return {}
+
+def save_portfolios(portfolios_data):
+    # Ensure the data being saved is a dictionary
+    if not isinstance(portfolios_data, dict):
+        st.error("Error saving portfolios: Data is not in the correct format.")
+        return
+    with open(PORTFOLIOS_FILE, 'w') as f:
+        json.dump(portfolios_data, f, indent=4)
+
+# Initialize portfolio data in session state
+if 'portfolios_data' not in st.session_state:
+    st.session_state.portfolios_data = load_portfolios()
+
+if 'selected_portfolio_name' not in st.session_state:
+    st.session_state.selected_portfolio_name = None
+    if st.session_state.portfolios_data: # Select the first portfolio by default if any exist
+        st.session_state.selected_portfolio_name = list(st.session_state.portfolios_data.keys())[0]
+
+if 'portfolio_stock_analysis' not in st.session_state:
+    st.session_state.portfolio_stock_analysis = {}
+
+
+# --------------------------------
+# Data Fetchers ( 그대로 유지 - keeping as is)
 # --------------------------------
 @st.cache_data
 def fetch_price_history(ticker: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
@@ -36,7 +73,7 @@ def fetch_price_history(ticker: str, period: str = "5y", interval: str = "1d") -
             return pd.DataFrame()
         df.index = pd.to_datetime(df.index).tz_localize(None)
         return df
-    except Exception: # Simplified error handling, orchestrator will report
+    except Exception: 
         return pd.DataFrame()
 
 @st.cache_data
@@ -45,7 +82,7 @@ def fetch_ticker_info(ticker: str) -> dict:
     try:
         info = yf.Ticker(ticker).info
         if not info or (info.get('regularMarketPrice') is None and info.get('currentPrice') is None and info.get('financialCurrency') is None):
-            return {} # Orchestrator will handle this
+            return {} 
         return {
             "marketCap": info.get("marketCap"), "freeCashflow": info.get("freeCashflow"),
             "forwardPE": info.get("forwardPE"), "trailingPE": info.get("trailingPE"),
@@ -59,46 +96,33 @@ def fetch_ticker_info(ticker: str) -> dict:
             "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
             "financialCurrency": info.get("financialCurrency")
         }
-    except Exception: # Simplified error handling
+    except Exception: 
         return {}
 
 @st.cache_data
 def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
     try:
         company_name = ticker_info_data.get('longName', ticker_info_data.get('shortName', ticker))
-        ticker_obj = yf.Ticker(ticker)
-        raw_news = []
-        try:
-            raw_news = ticker_obj.news
-        except TypeError as te:
-            return [{"error": f"yfinance .news type error for {ticker}: {te}", "source_api": "Yahoo Finance"}]
-        except Exception as news_exc:
-            return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
-
+        ticker_obj = yf.Ticker(ticker); raw_news = []
+        try: raw_news = ticker_obj.news
+        except TypeError as te: return [{"error": f"yfinance .news type error for {ticker}: {te}", "source_api": "Yahoo Finance"}]
+        except Exception as news_exc: return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
         enriched_news_list = []
         if not raw_news: return []
         for news_item in raw_news:
             if not isinstance(news_item, dict): continue
-            enriched_item = news_item.copy()
-            enriched_item['ticker'] = ticker; enriched_item['company_name'] = company_name
-            enriched_item['source_api'] = 'Yahoo Finance'
+            enriched_item = news_item.copy(); enriched_item['ticker'] = ticker; enriched_item['company_name'] = company_name; enriched_item['source_api'] = 'Yahoo Finance'
             if 'providerPublishTime' in news_item and news_item['providerPublishTime'] is not None:
                 try:
-                    timestamp = int(news_item['providerPublishTime'])
-                    dt_object_utc = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-                    enriched_item['publish_datetime_utc'] = dt_object_utc
-                    enriched_item['publish_time_readable'] = dt_object_utc.strftime('%Y-%m-%d %H:%M:%S %Z')
-                except (ValueError, TypeError, OSError) as e_ts:
-                    enriched_item['publish_datetime_utc'] = None; enriched_item['publish_time_readable'] = "N/A"
-                    enriched_item['publish_time_error'] = str(e_ts)
-            else:
-                enriched_item['publish_datetime_utc'] = None; enriched_item['publish_time_readable'] = "N/A"
+                    dt_object_utc = datetime.fromtimestamp(int(news_item['providerPublishTime']), tz=timezone.utc)
+                    enriched_item['publish_datetime_utc'] = dt_object_utc; enriched_item['publish_time_readable'] = dt_object_utc.strftime('%Y-%m-%d %H:%M:%S %Z')
+                except (ValueError, TypeError, OSError) as e_ts: enriched_item['publish_datetime_utc'], enriched_item['publish_time_readable'], enriched_item['publish_time_error'] = None, "N/A", str(e_ts)
+            else: enriched_item['publish_datetime_utc'], enriched_item['publish_time_readable'] = None, "N/A"
             for key in ['title', 'publisher', 'link', 'type']: enriched_item.setdefault(key, 'N/A' if key != 'link' else '#')
             enriched_news_list.append(enriched_item)
         enriched_news_list.sort(key=lambda x: x.get('publish_datetime_utc') or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return enriched_news_list
-    except Exception as e:
-        return [{"error": f"Processing Yahoo Finance news for {ticker} failed: {e}", "source_api": "Yahoo Finance"}]
+    except Exception as e: return [{"error": f"Processing Yahoo Finance news for {ticker} failed: {e}", "source_api": "Yahoo Finance"}]
 
 @st.cache_data(ttl=1800)
 def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_days: int = 30) -> list[dict]:
@@ -106,20 +130,18 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
     if not api_key: return [{"error": "NEWSAPI_KEY not found.", "source_api": "NewsAPI.org"}]
     newsapi = NewsApiClient(api_key=api_key)
     query = f'("{company_name}" OR {ticker.upper()}) AND (stock OR shares OR business OR finance OR earnings OR "product launch" OR "analyst rating" OR "market sentiment")'
-    to_date_dt = datetime.now(timezone.utc); from_date_dt = to_date_dt - timedelta(days=lookback_days)
-    from_param_str = from_date_dt.strftime('%Y-%m-%d'); to_param_str = to_date_dt.strftime('%Y-%m-%d')
+    to_date_dt, from_date_dt = datetime.now(timezone.utc), datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    from_param_str, to_param_str = from_date_dt.strftime('%Y-%m-%d'), to_date_dt.strftime('%Y-%m-%d')
     articles_list = []
     try:
         all_articles_response = newsapi.get_everything(q=query, from_param=from_param_str, to=to_param_str, language='en', sort_by='publishedAt', page_size=100)
         if all_articles_response.get("status") == "ok" and "articles" in all_articles_response:
             for article in all_articles_response["articles"]:
-                dt_object_utc = None; readable_time = "N/A"
+                dt_obj_utc, readable_time = None, "N/A"
                 if article.get('publishedAt'):
-                    try:
-                        dt_object_utc = datetime.fromisoformat(article['publishedAt'].replace('Z', '+00:00'))
-                        readable_time = dt_object_utc.strftime('%Y-%m-%d %H:%M:%S %Z')
+                    try: dt_obj_utc = datetime.fromisoformat(article['publishedAt'].replace('Z', '+00:00')); readable_time = dt_obj_utc.strftime('%Y-%m-%d %H:%M:%S %Z')
                     except ValueError: pass
-                articles_list.append({"uuid": article.get('url'), "title": article.get('title', 'No Title'), "publisher": article.get('source', {}).get('name', 'N/A'), "link": article.get('url', '#'), "publish_datetime_utc": dt_object_utc, "publish_time_readable": readable_time, "description": article.get('description'), "content_snippet": article.get('content'), "company_name": company_name, "ticker": ticker, "source_api": "NewsAPI.org"})
+                articles_list.append({"uuid": article.get('url'), "title": article.get('title', 'No Title'), "publisher": article.get('source', {}).get('name', 'N/A'), "link": article.get('url', '#'), "publish_datetime_utc": dt_obj_utc, "publish_time_readable": readable_time, "description": article.get('description'), "content_snippet": article.get('content'), "company_name": company_name, "ticker": ticker, "source_api": "NewsAPI.org"})
         elif all_articles_response.get("status") == "error": return [{"error": f"NewsAPI Error ({ticker}): {all_articles_response.get('code')} - {all_articles_response.get('message')}", "source_api": "NewsAPI.org"}]
         else: return [{"error": f"NewsAPI ({ticker}): No articles or unexpected structure.", "source_api": "NewsAPI.org"}]
     except requests.exceptions.RequestException as e: return [{"error": f"NewsAPI request failed for {ticker}: {e}", "source_api": "NewsAPI.org"}]
@@ -130,12 +152,9 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
 def get_all_cik_ticker_mappings():
     try:
         url = "https://www.sec.gov/files/company_tickers.json"
-        response = requests.get(url, headers={'User-Agent': SEC_USER_AGENT})
-        response.raise_for_status()
-        data = response.json()
-        return {item['ticker']: str(item['cik_str']).zfill(10) for item in data if 'ticker' in item and 'cik_str' in item}
-    except Exception as e:
-        st.error(f"CRITICAL: Failed to fetch CIK ticker mappings: {e}. SEC features may be impaired."); return {}
+        response = requests.get(url, headers={'User-Agent': SEC_USER_AGENT}); response.raise_for_status()
+        return {item['ticker']: str(item['cik_str']).zfill(10) for item in response.json() if 'ticker' in item and 'cik_str' in item}
+    except Exception as e: st.error(f"CRITICAL: Failed CIK mappings: {e}."); return {}
 TICKER_TO_CIK_MAP = get_all_cik_ticker_mappings()
 
 def get_cik_for_ticker(ticker: str) -> str | None: return TICKER_TO_CIK_MAP.get(ticker.upper())
@@ -144,7 +163,7 @@ def get_cik_for_ticker(ticker: str) -> str | None: return TICKER_TO_CIK_MAP.get(
 def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]:
     cik = get_cik_for_ticker(ticker_symbol)
     if not cik:
-        try:
+        try: # Fallback CIK lookup
             headers = {'User-Agent': SEC_USER_AGENT}
             lookup_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={ticker_symbol.upper()}&owner=exclude&count=10"
             response = requests.get(lookup_url, headers=headers, timeout=10); response.raise_for_status()
@@ -164,7 +183,7 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
     try:
         response = requests.get(submissions_url, headers=headers, timeout=20); response.raise_for_status()
         submissions_data = response.json()
-        today = datetime.now(timezone.utc); date_limit = today - timedelta(days=lookback_days)
+        today, date_limit = datetime.now(timezone.utc), datetime.now(timezone.utc) - timedelta(days=lookback_days)
         if 'filings' in submissions_data and 'recent' in submissions_data['filings']:
             recent = submissions_data['filings']['recent']
             forms, dates, acc_nos, docs = recent.get('form',[]), recent.get('filingDate',[]), recent.get('accessionNumber',[]), recent.get('primaryDocument',[])
@@ -213,12 +232,12 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                                     except ValueError: price = None
                                 ad_node = tx.find('transactionAcquiredDisposedCode'); ad_code = ad_node.find('value').text.strip().upper() if ad_node and ad_node.find('value') else "N/A"
                                 if shares != 0: filings_list.append({"is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": date_str, "transaction_date": tx_date, "reporting_owner": owner_name, "owner_relationship": owner_rel, "transaction_code": tx_code, "acq_disp_code": ad_code, "shares": shares, "price_per_share": price, "link_to_filing": idx_link})
-                    except: pass # Suppress individual Form 4 fetch/parse errors
+                    except: pass 
                 elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other:
                     filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": date_str, "form_type": form, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}", "summary_link": idx_link})
-            if not filings_list and xml_fetches > 0: return [{"error": f"SEC: {xml_fetches} Form 4s found for {ticker_symbol}, but no transactions parsed."}]
-            if not filings_list: return [{"error": f"SEC: No relevant filings for {ticker_symbol} in last {lookback_days} days (CIK:{cik_padded})."}]
-        else: return [{"error": f"SEC: No recent filings data in submissions JSON for {ticker_symbol} (CIK:{cik_padded})."}]
+            if not filings_list and xml_fetches > 0: return [{"error": f"SEC: {xml_fetches} Form 4s for {ticker_symbol}, but no tx parsed."}]
+            if not filings_list: return [{"error": f"SEC: No relevant filings for {ticker_symbol} (CIK:{cik_padded})."}]
+        else: return [{"error": f"SEC: No recent filings data for {ticker_symbol} (CIK:{cik_padded})."}]
     except requests.exceptions.HTTPError as e: return [{"error": f"SEC HTTP error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
     except requests.exceptions.RequestException as e: return [{"error": f"SEC Request error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
     except Exception as e: return [{"error": f"SEC Unexpected error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
@@ -293,7 +312,7 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
     except requests.exceptions.RequestException as e: return [{"error": f"CT: Request error for {ticker}: {e}."}]
     except Exception as e: return [{"error": f"CT: Parsing error for {ticker}: {e}."}]
 
-# --- LLM Client and Agent Classes (assumed robust from previous versions) ---
+# --- LLM Client and Agent Classes ---
 class ModelClient:
     def __init__(self, api_key: str, provider: str = "openai"):
         self.api_key, self.provider = api_key, provider
@@ -325,7 +344,7 @@ class MomentumAgent:
         if price_data_slice.empty or len(price_data_slice) < 253: return {"ticker": ticker, "momentum_signal": "hold", "momentum_1m": np.nan, "momentum_12m": np.nan, "momentum_error": "Not enough data"}
         P_t = price_data_slice.Close.iloc[-1]
         P_1m = price_data_slice.Close.shift(21).iloc[-1] if len(price_data_slice) > 21 else np.nan
-        P_12m = price_data_slice.Close.shift(252).iloc[-1] # Already checked len >= 253
+        P_12m = price_data_slice.Close.shift(252).iloc[-1] 
         m1 = ((P_t / P_1m) - 1) if pd.notna(P_1m) and P_1m != 0 else np.nan
         m12 = ((P_t / P_12m) - 1) if pd.notna(P_12m) and P_12m != 0 else np.nan
         signal = "hold"
@@ -549,7 +568,7 @@ class PortfolioAgent:
         decision = "buy" if comp_score > 0.15 else ("sell" if comp_score < -0.15 else "hold")
         return {"ticker":ticker, "composite_score":comp_score, "final_decision":decision}
 
-# --- Orchestrator and Backtesting (structure assumed robust from prior, focusing on the NameError fix impact) ---
+# --- Orchestrator and Backtesting ---
 def run_live_analysis(tickers, llm_client, configs):
     results = {}
     for t in tickers:
@@ -582,6 +601,8 @@ def run_live_analysis(tickers, llm_client, configs):
         if dedup_news: dedup_news.sort(key=lambda x: x.get('publish_datetime_utc') or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         news_status_bundle = " | ".join(news_fetch_msgs) if news_fetch_msgs else "News fetch OK"
         if not dedup_news and not news_fetch_msgs and configs["use_sentiment"]: news_status_bundle="No news articles found."
+        
+        # This data_bundle is local to this function call for ticker 't'
         data_bundle = {
             "price_history":price_history_full, "ticker_info":ticker_info, "news":dedup_news,
             "news_fetch_status_error": news_status_bundle if any(kw in news_status_bundle.lower() for kw in ["error","failed","no news","missing"]) else None,
@@ -623,24 +644,21 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     if full_hist.empty: return {"error": f"Backtest fail {ticker}: Price history empty."}, pd.DataFrame()
     hist = full_hist[(full_hist.index >= pd.to_datetime(fetch_s_dt)) & (full_hist.index <= pd.to_datetime(end_date))].copy()
     if hist.empty or len(hist[hist.index >= pd.to_datetime(start_date)]) < 2: return {"error": f"Backtest fail {ticker}: Not enough data in range."}, pd.DataFrame()
-    info_bt = fetch_ticker_info(ticker) # Might be {}
-    data_static = {"ticker_info": info_bt}
+    info_bt = fetch_ticker_info(ticker); data_static = {"ticker_info": info_bt}
     p_agent, m_agent, v_agent, port_agent = PriceAgent(), MomentumAgent(), VolatilityAgent(), PortfolioAgent()
     log, cash, shares, port_val = [], initial_capital, 0, initial_capital
     run_dates = hist[hist.index >= pd.to_datetime(start_date)].index
     for curr_dt in run_dates:
         data_sl = hist[hist.index <= curr_dt]
         curr_price_pt = data_sl.Close.iloc[-1] if not data_sl.empty else (port_val / shares if shares else 0)
-        if data_sl.empty or len(data_sl) < 253: # Min days for indicators
+        if data_sl.empty or len(data_sl) < 253: 
             log.append({"date":curr_dt, "cash":cash, "shares_held":shares, "price":curr_price_pt, "portfolio_value":port_val, "signal":"hold (no data)", "composite_score":0.0}); continue
         curr_price = data_sl.Close.iloc[-1]
         pa_r, ma_r, va_r = p_agent.run(ticker,data_sl), m_agent.run(ticker,data_sl), v_agent.run(ticker,data_static,data_sl)
         final_dec_obj = port_agent.run(ticker, [pa_r,ma_r,va_r], agent_weights=backtest_agent_weights)
         final_dec = final_dec_obj["final_decision"]
-        if final_dec=="buy" and cash > curr_price and curr_price > 0:
-            s_buy = cash/curr_price; shares += s_buy; cash=0
-        elif final_dec=="sell" and shares > 0:
-            cash += shares*curr_price; shares=0
+        if final_dec=="buy" and cash > curr_price and curr_price > 0: s_buy = cash/curr_price; shares += s_buy; cash=0
+        elif final_dec=="sell" and shares > 0: cash += shares*curr_price; shares=0
         port_val = cash + shares*curr_price
         log.append({"date":curr_dt, "cash":cash, "shares_held":shares, "price":curr_price, "portfolio_value":port_val, "signal":final_dec, "composite_score":final_dec_obj["composite_score"]})
     log_df = pd.DataFrame(log)
@@ -661,10 +679,9 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
 # --- Streamlit UI ---
 llm_client = None
 try:
-    ds_key, oa_key = st.secrets.get("DEEPSEEK_API_KEY"), st.secrets.get("OPENAI_API_KEY") # Prefer secrets
-    if not ds_key: ds_key = os.environ.get("DEEPSEEK_API_KEY") # Fallback to env
+    ds_key, oa_key = st.secrets.get("DEEPSEEK_API_KEY"), st.secrets.get("OPENAI_API_KEY")
+    if not ds_key: ds_key = os.environ.get("DEEPSEEK_API_KEY")
     if not oa_key: oa_key = os.environ.get("OPENAI_API_KEY")
-
     if ds_key: llm_client = ModelClient(api_key=ds_key, provider="deepseek"); st.sidebar.caption("✅ LLM: DeepSeek")
     elif oa_key: llm_client = ModelClient(api_key=oa_key, provider="openai"); st.sidebar.caption("✅ LLM: OpenAI")
     else: st.sidebar.warning("LLM API key missing. Sentiment/Summary disabled.")
@@ -673,11 +690,19 @@ except Exception as e: st.sidebar.error(f"LLM Unexpected Init Error: {e}"); llm_
 
 st.title("🚀 AI Hedge Fund Simulator")
 st.header("⚙️ Configuration"); config_cont = st.container(border=True)
-app_mode = "Live Analysis"
+
+# --- App Mode Selection ---
+# Added "Portfolio Management"
+app_mode_options = ["Live Analysis", "Backtesting", "💼 Portfolio Management"]
+if 'app_mode' not in st.session_state:
+    st.session_state.app_mode = app_mode_options[0] # Default to Live Analysis
+
 with config_cont:
-    app_mode = st.radio("Select Mode:", ["Live Analysis", "Backtesting"], key="app_mode_sel", horizontal=True)
+    st.session_state.app_mode = st.radio("Select Mode:", app_mode_options, key="app_mode_sel_main_key", horizontal=True, index=app_mode_options.index(st.session_state.app_mode))
     st.markdown("---")
-    if app_mode == "Live Analysis":
+
+    # --- Live Analysis Configuration ---
+    if st.session_state.app_mode == "Live Analysis":
         st.subheader("Live Analysis Settings")
         tickers_in = st.text_input("Tickers (comma-separated):", "AAPL,MSFT,GOOG,CRWV", key="live_tickers_in")
         st.caption("ℹ️ Live analysis uses all available historical data.")
@@ -689,7 +714,9 @@ with config_cont:
             use_poli = st.checkbox("Politician Filings (Exp.)", value=False, key="live_poli_cb", help="Scrapes CapitolTrades. May be slow/unreliable.")
             use_valtrades = st.checkbox("ValueInvesting.io (Exp.)", value=False, key="live_vt_cb", help="Scrapes ValueInvesting.io. May be slow/unreliable.")
         st.markdown(""); run_live_btn = st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_btn")
-    elif app_mode == "Backtesting":
+
+    # --- Backtesting Configuration ---
+    elif st.session_state.app_mode == "Backtesting":
         st.subheader("Backtesting Settings"); bt_ticker = st.text_input("Ticker:", "AAPL", key="bt_ticker_in").upper()
         bt_c1, bt_c2 = st.columns(2)
         with bt_c1:
@@ -700,15 +727,196 @@ with config_cont:
             min_end_dt_bt = start_dt_in+timedelta(days=30)
             bt_end_str = st.date_input("End Date:", def_end_dt, min_value=min_end_dt_bt, max_value=datetime.now()-timedelta(days=1), key="bt_end_dt").strftime("%Y-%m-%d")
         bt_capital = st.number_input("Initial Capital:",1000,1000000,10000,1000,key="bt_cap_in",format="%d")
-        with st.expander("Adjust Backtest Weights",expanded=False):
+        with st.expander("Adjust Backtest Agent Weights",expanded=False):
             st.caption("Backtesting uses a simplified strategy. Adjust weights:")
             w_p, w_m, w_v = st.slider("Price W:",0.,2.,1.,.1,key="bt_w_p"), st.slider("Mom W:",0.,2.,.8,.1,key="bt_w_m"), st.slider("Vol W:",0.,2.,.2,.1,key="bt_w_v")
             st.info("Other signals disabled in backtest.")
         bt_weights = {"price":w_p, "momentum":w_m, "volatility":w_v, "sentiment":0.,"fund":0.,"valuation_dcf":0.,"valuation_pe":0.,"sec_filings":0.,"inst_holdings":0.,"analyst":0.,"politician_filings":0.,"vi_signal":0.}
         st.markdown(""); run_bt_btn = st.button("📈 Run Backtest",use_container_width=True,type="primary",key="run_bt_btn")
-st.markdown("---")
 
-if app_mode == "Live Analysis":
+    # --- Portfolio Management Configuration ---
+    elif st.session_state.app_mode == "💼 Portfolio Management":
+        st.subheader("💼 Portfolio Management")
+        
+        # Portfolio selection and creation
+        portfolio_names = list(st.session_state.portfolios_data.keys())
+        if not portfolio_names and st.session_state.selected_portfolio_name is None: # If no portfolios, force creation state or guide
+             st.session_state.selected_portfolio_name = "My First Portfolio" # Default name for a new portfolio
+             if "My First Portfolio" not in st.session_state.portfolios_data: # Add it if truly new
+                 st.session_state.portfolios_data["My First Portfolio"] = []
+                 save_portfolios(st.session_state.portfolios_data)
+             portfolio_names = ["My First Portfolio"]
+
+
+        # Ensure selected_portfolio_name is valid, default to first if not or if it was deleted
+        if st.session_state.selected_portfolio_name not in portfolio_names and portfolio_names:
+            st.session_state.selected_portfolio_name = portfolio_names[0]
+        elif not portfolio_names: # handles case where all portfolios might have been deleted
+            st.session_state.selected_portfolio_name = None
+
+
+        col_pf_sel1, col_pf_sel2 = st.columns([3,2])
+        with col_pf_sel1:
+            if portfolio_names:
+                # Use index for selectbox if selected_portfolio_name is guaranteed to be in portfolio_names
+                current_selection_index = portfolio_names.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name in portfolio_names else 0
+                st.session_state.selected_portfolio_name = st.selectbox(
+                    "Select Portfolio:", portfolio_names, 
+                    index=current_selection_index, 
+                    key="portfolio_selector"
+                )
+            else:
+                st.info("No portfolios yet. Create one below.")
+        
+        with col_pf_sel2:
+            new_portfolio_name = st.text_input("Create New Portfolio:", key="new_portfolio_name_input")
+            if st.button("Create Portfolio", key="create_portfolio_btn"):
+                if new_portfolio_name and new_portfolio_name not in st.session_state.portfolios_data:
+                    st.session_state.portfolios_data[new_portfolio_name] = []
+                    st.session_state.selected_portfolio_name = new_portfolio_name # Select the new one
+                    save_portfolios(st.session_state.portfolios_data)
+                    st.success(f"Portfolio '{new_portfolio_name}' created.")
+                    st.rerun()
+                elif not new_portfolio_name:
+                    st.warning("Portfolio name cannot be empty.")
+                else:
+                    st.warning(f"Portfolio '{new_portfolio_name}' already exists.")
+        
+        if st.session_state.selected_portfolio_name and st.session_state.selected_portfolio_name in st.session_state.portfolios_data:
+            if st.button(f"Delete Portfolio '{st.session_state.selected_portfolio_name}'", type="secondary", key=f"delete_pf_{st.session_state.selected_portfolio_name}"):
+                if st.session_state.selected_portfolio_name in st.session_state.portfolios_data:
+                    del st.session_state.portfolios_data[st.session_state.selected_portfolio_name]
+                    # Clear analysis results for the deleted portfolio's stocks if stored by portfolio name
+                    # (current portfolio_stock_analysis is global, might need adjustment if too many stocks)
+                    st.session_state.selected_portfolio_name = None # Reset selection
+                    save_portfolios(st.session_state.portfolios_data)
+                    st.success(f"Portfolio '{st.session_state.selected_portfolio_name}' deleted.") # This will show None
+                    st.rerun()
+
+
+        st.markdown("---")
+
+        # Manage holdings for the selected portfolio
+        if st.session_state.selected_portfolio_name and st.session_state.selected_portfolio_name in st.session_state.portfolios_data:
+            st.subheader(f"Holdings for: {st.session_state.selected_portfolio_name}")
+            current_holdings = st.session_state.portfolios_data[st.session_state.selected_portfolio_name]
+
+            with st.form(key="add_stock_form"):
+                cols_form = st.columns(4)
+                new_ticker = cols_form[0].text_input("Ticker Symbol", key="pf_new_ticker").upper()
+                new_quantity = cols_form[1].number_input("Quantity", min_value=0.0, step=0.01, format="%.2f", key="pf_new_qty")
+                new_avg_price = cols_form[2].number_input("Average Price", min_value=0.0, step=0.01, format="%.2f", key="pf_new_avg_price")
+                add_stock_submitted = cols_form[3].form_submit_button("Add/Update Stock")
+
+                if add_stock_submitted:
+                    if new_ticker and new_quantity > 0 and new_avg_price >= 0:
+                        # Check if stock already exists to update, otherwise add
+                        found = False
+                        for i, holding in enumerate(current_holdings):
+                            if holding['ticker'] == new_ticker:
+                                current_holdings[i] = {'ticker': new_ticker, 'quantity': new_quantity, 'avg_price': new_avg_price}
+                                found = True
+                                break
+                        if not found:
+                            current_holdings.append({'ticker': new_ticker, 'quantity': new_quantity, 'avg_price': new_avg_price})
+                        
+                        st.session_state.portfolios_data[st.session_state.selected_portfolio_name] = current_holdings
+                        save_portfolios(st.session_state.portfolios_data)
+                        st.success(f"Stock {new_ticker} added/updated in {st.session_state.selected_portfolio_name}.")
+                        # Clear previous analysis for this stock if it was updated
+                        if new_ticker in st.session_state.portfolio_stock_analysis:
+                            del st.session_state.portfolio_stock_analysis[new_ticker]
+                        st.rerun()
+                    else:
+                        st.error("Please fill in all fields correctly (Ticker, Quantity > 0, Avg. Price >= 0).")
+            
+            if current_holdings:
+                df_holdings_list = []
+                for i, holding in enumerate(current_holdings):
+                    holding_data = holding.copy()
+                    # Attempt to get current price and analysis from session state
+                    analysis_res = st.session_state.portfolio_stock_analysis.get(holding['ticker'], {})
+                    current_mkt_price = analysis_res.get("current_price_display")
+                    
+                    if current_mkt_price is None: # Fetch if not analyzed yet or missing
+                         # This could be slow if done for many stocks here. Better to do it on "Analyze" click.
+                         # For display, we can leave it N/A until analysis.
+                         current_mkt_price = "N/A"
+
+
+                    holding_data["Current Price"] = current_mkt_price
+                    if isinstance(current_mkt_price, (int, float)) and isinstance(holding.get('quantity'), (int, float)):
+                        holding_data["Current Value"] = current_mkt_price * holding['quantity']
+                        if isinstance(holding.get('avg_price'), (int,float)):
+                             holding_data["Unrealized P&L"] = (current_mkt_price - holding['avg_price']) * holding['quantity']
+                        else: holding_data["Unrealized P&L"] = "N/A"
+                    else:
+                        holding_data["Current Value"] = "N/A"
+                        holding_data["Unrealized P&L"] = "N/A"
+                    
+                    holding_data["Signal"] = analysis_res.get("final_decision", "N/A").upper()
+                    advice = "Analyze stock for advice."
+                    if holding_data["Signal"] == "BUY": advice = "Consider buying more."
+                    elif holding_data["Signal"] == "SELL": advice = "Consider selling/reducing."
+                    elif holding_data["Signal"] == "HOLD": advice = "Hold position."
+                    elif holding_data["Signal"] != "N/A": advice = "Signal: " + holding_data["Signal"]
+
+
+                    holding_data["Advice"] = advice
+                    holding_data["id"] = i # For removal
+                    df_holdings_list.append(holding_data)
+
+                if df_holdings_list:
+                    df_display = pd.DataFrame(df_holdings_list)
+                    # st.dataframe(df_display[['ticker', 'quantity', 'avg_price', 'Current Price', 'Current Value', 'Unrealized P&L', 'Signal', 'Advice']])
+                    
+                    # Display with remove buttons
+                    st.markdown("##### Current Holdings Overview")
+                    for i, row_data in df_display.iterrows():
+                        cols_holding = st.columns([2,1,1,1,1,1,1,2,1])
+                        cols_holding[0].write(f"**{row_data['ticker']}**")
+                        cols_holding[1].write(f"{row_data['quantity']:.2f}")
+                        cols_holding[2].write(f"${row_data['avg_price']:.2f}")
+                        cols_holding[3].write(f"${row_data['Current Price']:.2f}" if isinstance(row_data['Current Price'], (int,float)) else "N/A")
+                        cols_holding[4].write(f"${row_data['Current Value']:.2f}" if isinstance(row_data['Current Value'], (int,float)) else "N/A")
+                        cols_holding[5].write(f"${row_data['Unrealized P&L']:.2f}" if isinstance(row_data['Unrealized P&L'], (int,float)) else "N/A")
+                        cols_holding[6].write(f"**{row_data['Signal']}**")
+                        cols_holding[7].write(f"{row_data['Advice']}")
+                        if cols_holding[8].button("❌", key=f"remove_{st.session_state.selected_portfolio_name}_{row_data['ticker']}_{i}", help="Remove this holding"):
+                            st.session_state.portfolios_data[st.session_state.selected_portfolio_name].pop(row_data['id']) # Use original index
+                            # Clear analysis for removed stock
+                            if row_data['ticker'] in st.session_state.portfolio_stock_analysis:
+                                del st.session_state.portfolio_stock_analysis[row_data['ticker']]
+                            save_portfolios(st.session_state.portfolios_data)
+                            st.rerun()
+                    st.markdown("---")
+
+
+                if st.button("📊 Analyze Entire Portfolio", key="analyze_portfolio_btn", type="primary"):
+                    with st.spinner("Analyzing portfolio stocks... This may take time."):
+                        # Get live analysis configs (can be made configurable later if needed)
+                        portfolio_live_configs = {
+                            "use_sentiment": True if llm_client else False, 
+                            "use_filings": True,
+                            "use_politician_filings": False, # Default off for portfolio view due to speed/reliability
+                            "use_value_trades": False      # Default off
+                        }
+                        tickers_to_analyze = [h['ticker'] for h in current_holdings]
+                        if tickers_to_analyze:
+                            analysis_batch = run_live_analysis(tickers_to_analyze, llm_client, portfolio_live_configs)
+                            st.session_state.portfolio_stock_analysis.update(analysis_batch)
+                            st.success("Portfolio analysis complete. View results above.")
+                            st.rerun() # Rerun to update the displayed table with new analysis
+
+            else:
+                st.info("This portfolio is empty. Add some stocks using the form above.")
+        elif not st.session_state.selected_portfolio_name:
+             st.info("Please create or select a portfolio to manage holdings.")
+
+st.markdown("---") # Separator before main display area
+
+# --- Live Analysis Results Display ---
+if st.session_state.app_mode == "Live Analysis":
     if 'run_live_btn' in locals() and run_live_btn and 'tickers_in' in locals() and tickers_in:
         live_tickers = [t.strip().upper() for t in tickers_in.split(",") if t.strip()]
         if not live_tickers: st.error("Please enter at least one ticker.")
@@ -730,35 +938,24 @@ if app_mode == "Live Analysis":
                         s_html = f'<p style="font-size:0.9em;">Score:<strong style="color:{color};">{score:.2f}</strong></p>' if pd.notna(score) else f'<p style="font-size:0.9em;">Score:<strong style="color:{color};">N/A</strong></p>'
                         st.markdown(f"""<div style="border:1px solid {color};border-radius:8px;padding:15px;margin-bottom:10px;background-color:{color}20;"><h3 style="margin-bottom:5px;color:{color};">{sym}</h3><p style="font-size:1.6em;font-weight:bold;color:{color};margin-bottom:5px;">{dec}</p>{s_html}{p_html}</div>""", unsafe_allow_html=True)
             st.markdown("---")
-            for sym_detail in live_tickers: # Changed variable name to avoid conflict
+            for sym_detail in live_tickers: 
                 res_detail = st.session_state.live_output.get(sym_detail)
                 if not res_detail or res_detail.get("error"): continue
                 with st.expander(f"🔍 Detailed Analysis for {sym_detail} ({res_detail.get('ticker_info',{}).get('longName','N/A')})"):
                     ui_tabs = st.tabs(["📈 Chart & Core", " फंड Fundamentals", "💰 Valuation & Fair Value", "📰 News & Filings", "⚙️ All Signals"])
-                    with ui_tabs[0]: # Chart & Core
+                    with ui_tabs[0]: 
                         st.subheader("Price Performance & Core Signals")
-                        # CORRECTED: Directly fetch price history for the chart using the correct ticker symbol variable 'sym_detail'.
-                        # The 'data_bundle' from run_live_analysis is not in this scope.
                         price_hist_chart = fetch_price_history(sym_detail, period="max") 
-                        
                         if not price_hist_chart.empty:
                             plot_df = price_hist_chart.copy()
-                            # If history is very long, plot a recent segment (e.g., last 5 years) for better readability
-                            if len(plot_df) > 5 * 252: 
-                                plot_df = plot_df.tail(5 * 252)
+                            if len(plot_df) > 5 * 252: plot_df = plot_df.tail(5 * 252)
                             st.line_chart(plot_df["Close"], use_container_width=True)
-                        else:
-                            st.warning("Price chart data not available for display.")
-                        
-                        # The rest of the tab content uses res_detail, which is correctly scoped.
-                        core_s_data = {
-                            "Price Sig (SMA/RSI)": res_detail.get("price_signal", "N/A").upper(),
-                            # ... other items in core_s_data
-                        }
-                        st.dataframe(pd.Series(core_s_data, name="Value"), use_container_width=True)
+                        else: st.warning("Price chart data unavailable.")
+                        core_s_data = {"Price Sig (SMA/RSI)":res_detail.get("price_signal","N/A").upper(), "SMA50/SMA200":f"{res_detail.get('sma50',np.nan):.2f}/{res_detail.get('sma200',np.nan):.2f}", "RSI14":f"{res_detail.get('rsi14',np.nan):.2f}", "Momentum Sig (1M/12M)":res_detail.get("momentum_signal","N/A").upper(), "Momentum 1M/12M (%)":f"{res_detail.get('momentum_1m',np.nan)*100:.1f}%/{res_detail.get('momentum_12m',np.nan)*100:.1f}%", "Volatility Sig (Beta)":res_detail.get("volatility_signal","N/A").upper(), "Beta/Ann.Vol (%)":f"{res_detail.get('beta',np.nan):.2f}/{res_detail.get('annual_vol',np.nan)*100:.1f}%"}
+                        st.dataframe(pd.Series(core_s_data,name="Value"),use_container_width=True)
                         if res_detail.get("price_error"): st.caption(f"Price Note: {res_detail.get('price_error')}")
                         if res_detail.get("momentum_error"): st.caption(f"Momentum Note: {res_detail.get('momentum_error')}")
-                    with ui_tabs[1]: # Fundamentals
+                    with ui_tabs[1]: 
                         st.subheader(f"Fundamentals - {res_detail.get('industry_display','N/A')} ({res_detail.get('sector_display','N/A')})")
                         info_res_exp = res_detail.get("ticker_info",{}); fund_s_exp = {}
                         mcap_exp = res_detail.get('market_cap_display'); fund_s_exp["Market Cap"] = f"${mcap_exp:,.0f}" if isinstance(mcap_exp,(int,float)) else "N/A"
@@ -770,7 +967,7 @@ if app_mode == "Live Analysis":
                         if info_res_exp.get("longBusinessSummary"):
                             with st.popover("Business Summary"): st.markdown(info_res_exp.get("longBusinessSummary"))
                         else: st.info("No business summary.")
-                    with ui_tabs[2]: # Valuation
+                    with ui_tabs[2]: 
                         st.subheader("Valuation (yfinance)"); val_err_yf = res_detail.get("valuation_error")
                         if val_err_yf: st.warning(f"Valuation (yf): {val_err_yf}")
                         val_s_exp_data = {}; fwdpe_d = res_detail.get('forward_pe'); val_s_exp_data["Fwd P/E"] = f"{fwdpe_d:.1f}" if isinstance(fwdpe_d,(int,float)) else "N/A"
@@ -796,7 +993,7 @@ if app_mode == "Live Analysis":
                                 st.markdown(f"- VI.io Sig: {res_detail.get('vi_signal','N/A').upper()}")
                             elif vi_err_d: st.warning(f"VI.io Status: {vi_err_d}")
                             else: st.info("VI.io: No specific fair value analysis parsed.")
-                    with ui_tabs[3]: # News & Filings
+                    with ui_tabs[3]: 
                         if live_configs["use_sentiment"]:
                             st.subheader("News Sentiment (LLM)"); sent_status_d = res_detail.get("news_status_display","OK")
                             if res_detail.get("sentiment_error"): sent_status_d += f" | LLM Sent Err: {res_detail.get('sentiment_error')}"
@@ -854,7 +1051,7 @@ if app_mode == "Live Analysis":
                                     for trade in pol_pop_d: st.markdown(f"- **{trade.get('date_str')}**: {trade.get('politician_name')} - {trade.get('transaction_type','N/A').title()} - {trade.get('value_range')} [Link]({trade.get('source_url')})")
                             elif not pol_err_d: st.caption("No recent poli. trades.")
                         else: st.info("Poli. Filings disabled.")
-                    with ui_tabs[4]: # All Signals
+                    with ui_tabs[4]: 
                         st.subheader("Aggregated Signals & Final Decision")
                         all_s_keys_d = [k for k in res_detail if k.endswith("_signal")]; all_s_tab_d = {k.replace("_signal","").replace("_"," ").title(): str(res_detail[k]).upper() for k in all_s_keys_d}
                         all_s_tab_d["Composite Score"] = f"{res_detail.get('composite_score',0.0):.2f}"; all_s_tab_d["Final Decision"] = res_detail.get('final_decision',"").upper()
@@ -862,14 +1059,16 @@ if app_mode == "Live Analysis":
                         with st.popover("View Full Raw Analysis Data (JSON)"): st.json(res_detail)
     with st.sidebar.expander("Portfolio Agent Weights (Live Analysis)",expanded=False):
         st.caption("Weights for PortfolioAgent combining signals."); st.json(dict(sorted(PortfolioAgent.WEIGHTS.items())))
-elif app_mode == "Backtesting":
-    if 'run_bt_btn' in locals() and run_bt_btn and 'bt_ticker' in locals() and bt_ticker: # use bt_ticker from UI
+
+# --- Backtesting Results Display ---
+elif st.session_state.app_mode == "Backtesting":
+    if 'run_bt_btn' in locals() and run_bt_btn and 'bt_ticker' in locals() and bt_ticker: 
         if 'bt_metrics' not in st.session_state: st.session_state.bt_metrics = None
         if 'bt_log_df' not in st.session_state: st.session_state.bt_log_df = pd.DataFrame()
-        with st.spinner(f"⏳ Running backtest for {bt_ticker} from {bt_start_str} to {bt_end_str}..."): # use UI vars
+        with st.spinner(f"⏳ Running backtest for {bt_ticker} from {bt_start_str} to {bt_end_str}..."): 
             st.session_state.bt_metrics, st.session_state.bt_log_df = run_backtest(bt_ticker, bt_start_str, bt_end_str, bt_capital, llm_client, bt_weights)
         if st.session_state.bt_metrics and not (st.session_state.bt_metrics.get("message") or st.session_state.bt_metrics.get("error")):
-            st.header(f"📈 Backtest Results for {bt_ticker}") # use UI var
+            st.header(f"📈 Backtest Results for {bt_ticker}") 
             metrics_df_bt = pd.DataFrame.from_dict(st.session_state.bt_metrics,orient='index',columns=['Value']); st.table(metrics_df_bt)
             if not st.session_state.bt_log_df.empty:
                 st.subheader("Portfolio Value Over Time"); st.line_chart(st.session_state.bt_log_df["portfolio_value"])
@@ -880,6 +1079,204 @@ elif app_mode == "Backtesting":
             err_msg_bt_res = "Unknown backtest error."
             if st.session_state.bt_metrics: err_msg_bt_res = st.session_state.bt_metrics.get('message','') or st.session_state.bt_metrics.get('error','Unknown error')
             st.error(f"Backtest failed: {err_msg_bt_res}")
+
+# --- Portfolio Management Display ---
+elif st.session_state.app_mode == "💼 Portfolio Management":
+    # This section now correctly uses st.session_state.app_mode
+    # The UI logic for portfolio management as described in the thought block would go here.
+    st.header("💼 My Portfolios")
+
+    # Portfolio Selection and Creation
+    st.sidebar.subheader("Portfolio Actions")
+    portfolio_names_list = list(st.session_state.portfolios_data.keys())
+    
+    # Default to first portfolio if one exists and none is selected, or if selected was deleted
+    if not st.session_state.selected_portfolio_name and portfolio_names_list:
+        st.session_state.selected_portfolio_name = portfolio_names_list[0]
+    elif st.session_state.selected_portfolio_name not in portfolio_names_list and portfolio_names_list:
+         st.session_state.selected_portfolio_name = portfolio_names_list[0]
+    elif not portfolio_names_list: # No portfolios exist
+        st.session_state.selected_portfolio_name = None
+
+
+    selected_portfolio_sidebar = st.sidebar.selectbox(
+        "Select Portfolio",
+        options=portfolio_names_list,
+        index=portfolio_names_list.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name and st.session_state.selected_portfolio_name in portfolio_names_list else 0,
+        key="portfolio_selector_sidebar"
+    )
+    if selected_portfolio_sidebar != st.session_state.selected_portfolio_name : # if selection changed
+        st.session_state.selected_portfolio_name = selected_portfolio_sidebar
+        st.session_state.portfolio_stock_analysis = {} # Clear analysis for new portfolio
+        st.rerun()
+
+
+    new_portfolio_name_sidebar = st.sidebar.text_input("Create New Portfolio Name", key="new_portfolio_name_sidebar_input")
+    if st.sidebar.button("Create Portfolio", key="create_portfolio_sidebar_btn"):
+        if new_portfolio_name_sidebar and new_portfolio_name_sidebar not in st.session_state.portfolios_data:
+            st.session_state.portfolios_data[new_portfolio_name_sidebar] = []
+            st.session_state.selected_portfolio_name = new_portfolio_name_sidebar
+            save_portfolios(st.session_state.portfolios_data)
+            st.sidebar.success(f"Portfolio '{new_portfolio_name_sidebar}' created.")
+            st.rerun() # Rerun to update selector and view
+        elif not new_portfolio_name_sidebar:
+            st.sidebar.warning("Portfolio name cannot be empty.")
+        else:
+            st.sidebar.warning(f"Portfolio '{new_portfolio_name_sidebar}' already exists.")
+
+    if st.session_state.selected_portfolio_name:
+        if st.sidebar.button(f"Delete '{st.session_state.selected_portfolio_name}'", type="secondary", key=f"delete_pf_sidebar_{st.session_state.selected_portfolio_name}"):
+            if st.session_state.selected_portfolio_name in st.session_state.portfolios_data:
+                del st.session_state.portfolios_data[st.session_state.selected_portfolio_name]
+                save_portfolios(st.session_state.portfolios_data)
+                st.sidebar.success(f"Portfolio '{st.session_state.selected_portfolio_name}' deleted.")
+                st.session_state.selected_portfolio_name = None # Reset
+                st.session_state.portfolio_stock_analysis = {}
+                st.rerun()
+    
+    # Display and Manage Holdings for Selected Portfolio
+    if st.session_state.selected_portfolio_name:
+        st.subheader(f"Managing: {st.session_state.selected_portfolio_name}")
+        current_holdings_list = st.session_state.portfolios_data.get(st.session_state.selected_portfolio_name, [])
+
+        # Form to Add/Update Stock
+        with st.form(key="portfolio_add_stock_form"):
+            st.markdown("##### Add or Update Stock in Portfolio")
+            pf_cols_form = st.columns([2,1,1])
+            pf_new_ticker = pf_cols_form[0].text_input("Ticker Symbol", key="pf_form_ticker").upper()
+            pf_new_quantity = pf_cols_form[1].number_input("Quantity", min_value=0.0, value=1.0, step=0.01, format="%.2f", key="pf_form_qty")
+            pf_new_avg_price = pf_cols_form[2].number_input("Average Purchase Price", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="pf_form_avg_price")
+            pf_add_stock_submitted = st.form_submit_button("💾 Save to Portfolio")
+
+            if pf_add_stock_submitted:
+                if pf_new_ticker and pf_new_quantity > 0: # Avg price can be 0 if it's a recent add not yet bought
+                    ticker_exists_idx = -1
+                    for idx, holding in enumerate(current_holdings_list):
+                        if holding['ticker'] == pf_new_ticker:
+                            ticker_exists_idx = idx
+                            break
+                    
+                    new_holding_data = {'ticker': pf_new_ticker, 'quantity': pf_new_quantity, 'avg_price': pf_new_avg_price}
+                    if ticker_exists_idx != -1: # Update existing
+                        current_holdings_list[ticker_exists_idx] = new_holding_data
+                    else: # Add new
+                        current_holdings_list.append(new_holding_data)
+                    
+                    st.session_state.portfolios_data[st.session_state.selected_portfolio_name] = current_holdings_list
+                    save_portfolios(st.session_state.portfolios_data)
+                    st.success(f"{pf_new_ticker} saved to {st.session_state.selected_portfolio_name}.")
+                    if pf_new_ticker in st.session_state.portfolio_stock_analysis: # Clear old analysis for this stock
+                        del st.session_state.portfolio_stock_analysis[pf_new_ticker]
+                    st.rerun()
+                else:
+                    st.error("Ticker and Quantity (>0) are required.")
+        
+        st.markdown("---")
+        st.markdown("##### Current Holdings & Analysis")
+
+        if not current_holdings_list:
+            st.info("This portfolio is empty. Add stocks using the form above.")
+        else:
+            portfolio_df_rows = []
+            tickers_to_fetch_price = []
+            for holding in current_holdings_list:
+                if holding['ticker'] not in st.session_state.portfolio_stock_analysis or \
+                   st.session_state.portfolio_stock_analysis[holding['ticker']].get("current_price_display") is None:
+                    tickers_to_fetch_price.append(holding['ticker'])
+            
+            # Batch fetch current prices if needed (outside the loop for efficiency)
+            # This is a simplified price fetch, full analysis is on button click
+            if tickers_to_fetch_price:
+                with st.spinner("Fetching current prices for portfolio..."):
+                    for ticker_sym in tickers_to_fetch_price:
+                        if ticker_sym not in st.session_state.portfolio_stock_analysis:
+                             st.session_state.portfolio_stock_analysis[ticker_sym] = {} # Initialize if not present
+                        info = fetch_ticker_info(ticker_sym)
+                        st.session_state.portfolio_stock_analysis[ticker_sym]["current_price_display"] = info.get("currentPrice") if info else None
+
+
+            for i, holding in enumerate(current_holdings_list):
+                row = holding.copy()
+                analysis = st.session_state.portfolio_stock_analysis.get(holding['ticker'], {})
+                
+                current_price = analysis.get("current_price_display")
+                row["Current Price"] = f"${current_price:.2f}" if isinstance(current_price, (int, float)) else "N/A"
+                
+                if isinstance(current_price, (int, float)) and isinstance(holding['quantity'], (int,float)):
+                    row["Current Value"] = f"${current_price * holding['quantity']:,.2f}"
+                    if isinstance(holding['avg_price'], (int,float)):
+                        row["Unrealized P&L"] = f"${(current_price - holding['avg_price']) * holding['quantity']:,.2f}"
+                    else: row["Unrealized P&L"] = "N/A"
+                else:
+                    row["Current Value"], row["Unrealized P&L"] = "N/A", "N/A"
+                
+                row["Signal"] = analysis.get("final_decision", "N/A").upper()
+                advice_text = "Analyze for advice"
+                if row["Signal"] == "BUY": advice_text = "📈 Consider Buying More"
+                elif row["Signal"] == "SELL": advice_text = "📉 Consider Selling/Reducing"
+                elif row["Signal"] == "HOLD": advice_text = "HOLD"
+                row["Advice"] = advice_text
+                row["id_for_removal"] = i # Store original index for removal
+                portfolio_df_rows.append(row)
+
+            if portfolio_df_rows:
+                df_portfolio_view = pd.DataFrame(portfolio_df_rows)
+                
+                # Use st.columns to create a table with a remove button
+                header_cols = st.columns([2,1,1,1,1,1,1,2,0.5]) # Ticker, Qty, Avg Px, Curr Px, Curr Val, P&L, Signal, Advice, Action
+                header_cols[0].markdown("**Ticker**")
+                header_cols[1].markdown("**Qty**")
+                header_cols[2].markdown("**Avg Price**")
+                header_cols[3].markdown("**Curr Price**")
+                header_cols[4].markdown("**Curr Value**")
+                header_cols[5].markdown("**P&L**")
+                header_cols[6].markdown("**Signal**")
+                header_cols[7].markdown("**Advice**")
+                header_cols[8].markdown("**Act**")
+
+
+                for idx, row in df_portfolio_view.iterrows():
+                    data_cols = st.columns([2,1,1,1,1,1,1,2,0.5])
+                    data_cols[0].write(row['ticker'])
+                    data_cols[1].write(f"{row['quantity']:.2f}")
+                    data_cols[2].write(f"${row['avg_price']:.2f}")
+                    data_cols[3].write(row['Current Price'])
+                    data_cols[4].write(row['Current Value'])
+                    data_cols[5].write(row['Unrealized P&L'])
+                    data_cols[6].markdown(f"**{row['Signal']}**")
+                    data_cols[7].write(row['Advice'])
+                    
+                    if data_cols[8].button("🗑️", key=f"del_{st.session_state.selected_portfolio_name}_{row['ticker']}_{row['id_for_removal']}", help="Remove holding"):
+                        # Remove by original index stored in id_for_removal
+                        original_idx_to_remove = row['id_for_removal']
+                        # Need to find the item by this original_idx if list was modified by prior removals in the same run
+                        # A safer way is to rebuild the list excluding the target or find by ticker if tickers are unique in portfolio
+                        
+                        # Simpler: remove by ticker if unique, or rebuild list
+                        temp_holdings = st.session_state.portfolios_data[st.session_state.selected_portfolio_name]
+                        st.session_state.portfolios_data[st.session_state.selected_portfolio_name] = [h for h_idx, h in enumerate(temp_holdings) if h_idx != original_idx_to_remove]
+
+                        if row['ticker'] in st.session_state.portfolio_stock_analysis:
+                            del st.session_state.portfolio_stock_analysis[row['ticker']]
+                        save_portfolios(st.session_state.portfolios_data)
+                        st.rerun()
+                    st.markdown("<hr style='margin:0.1rem'>", unsafe_allow_html=True)
+
+
+            if st.button("📊 Analyze Entire Portfolio Holdings", key="analyze_portfolio_holdings_btn", type="primary", use_container_width=True):
+                if current_holdings_list:
+                    with st.spinner("Analyzing portfolio stocks... This may take time."):
+                        portfolio_live_configs = { "use_sentiment": use_sent, "use_filings": use_filings, "use_politician_filings": use_poli, "use_value_trades": use_valtrades } # Use existing toggles
+                        
+                        tickers_to_analyze = [h['ticker'] for h in current_holdings_list]
+                        analysis_batch_results = run_live_analysis(tickers_to_analyze, llm_client, portfolio_live_configs)
+                        st.session_state.portfolio_stock_analysis.update(analysis_batch_results)
+                        st.success("Portfolio analysis complete!")
+                        st.rerun()
+                else:
+                    st.warning("Portfolio is empty. Add stocks to analyze.")
+
+
 st.sidebar.markdown("---")
 st.sidebar.info("Educational purposes only. Not financial advice.")
 st.sidebar.markdown("Experimental scraping features may be unreliable.")
