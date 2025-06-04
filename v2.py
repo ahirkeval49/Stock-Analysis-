@@ -8,7 +8,7 @@ import openai
 from openai import OpenAI
 from dotenv import load_dotenv
 import requests
-from bs.bs4 import BeautifulSoup
+from bs4 import BeautifulSoup
 import re
 from urllib.parse import urljoin
 from newsapi import NewsApiClient
