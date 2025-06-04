@@ -737,15 +737,25 @@ if app_mode == "Live Analysis":
                     ui_tabs = st.tabs(["📈 Chart & Core", " फंड Fundamentals", "💰 Valuation & Fair Value", "📰 News & Filings", "⚙️ All Signals"])
                     with ui_tabs[0]: # Chart & Core
                         st.subheader("Price Performance & Core Signals")
-                        # CORRECTED: Directly fetch price history for the chart.
-                        price_hist_chart = fetch_price_history(sym_detail, period="max") # Use sym_detail
+                        # CORRECTED: Directly fetch price history for the chart using the correct ticker symbol variable 'sym_detail'.
+                        # The 'data_bundle' from run_live_analysis is not in this scope.
+                        price_hist_chart = fetch_price_history(sym_detail, period="max") 
+                        
                         if not price_hist_chart.empty:
                             plot_df = price_hist_chart.copy()
-                            if len(plot_df) > 5*252: plot_df = plot_df.tail(5*252)
+                            # If history is very long, plot a recent segment (e.g., last 5 years) for better readability
+                            if len(plot_df) > 5 * 252: 
+                                plot_df = plot_df.tail(5 * 252)
                             st.line_chart(plot_df["Close"], use_container_width=True)
-                        else: st.warning("Price chart data unavailable.")
-                        core_s_data = {"Price Sig (SMA/RSI)":res_detail.get("price_signal","N/A").upper(), "SMA50/SMA200":f"{res_detail.get('sma50',np.nan):.2f}/{res_detail.get('sma200',np.nan):.2f}", "RSI14":f"{res_detail.get('rsi14',np.nan):.2f}", "Momentum Sig (1M/12M)":res_detail.get("momentum_signal","N/A").upper(), "Momentum 1M/12M (%)":f"{res_detail.get('momentum_1m',np.nan)*100:.1f}%/{res_detail.get('momentum_12m',np.nan)*100:.1f}%", "Volatility Sig (Beta)":res_detail.get("volatility_signal","N/A").upper(), "Beta/Ann.Vol (%)":f"{res_detail.get('beta',np.nan):.2f}/{res_detail.get('annual_vol',np.nan)*100:.1f}%"}
-                        st.dataframe(pd.Series(core_s_data,name="Value"),use_container_width=True)
+                        else:
+                            st.warning("Price chart data not available for display.")
+                        
+                        # The rest of the tab content uses res_detail, which is correctly scoped.
+                        core_s_data = {
+                            "Price Sig (SMA/RSI)": res_detail.get("price_signal", "N/A").upper(),
+                            # ... other items in core_s_data
+                        }
+                        st.dataframe(pd.Series(core_s_data, name="Value"), use_container_width=True)
                         if res_detail.get("price_error"): st.caption(f"Price Note: {res_detail.get('price_error')}")
                         if res_detail.get("momentum_error"): st.caption(f"Momentum Note: {res_detail.get('momentum_error')}")
                     with ui_tabs[1]: # Fundamentals
