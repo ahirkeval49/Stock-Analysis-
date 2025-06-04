@@ -11,7 +11,6 @@ sec-edgar-downloader
 # HTTP & scraping
 requests
 beautifulsoup4
-bs
 praw
 
 # ML / NLP
