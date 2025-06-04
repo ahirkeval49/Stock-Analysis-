@@ -8,7 +8,7 @@ import openai
 from openai import OpenAI
 from dotenv import load_dotenv
 import requests
-from bs4 import BeautifulSoup
+from bs.bs4 import BeautifulSoup
 import re
 from urllib.parse import urljoin
 from newsapi import NewsApiClient
@@ -982,7 +982,8 @@ class SECFilingAgent:
         Analyzes SEC Form 4 (insider transactions) for significant buy/sell activity.
         Also provides metadata on other recent filings.
         """
-        all_filings_raw = fetch_all_sec_filings(ticker, lookback_days=365)
+        # Data from `sec_all_filings_raw` which is already fetched by the orchestrator
+        all_filings_raw = data.get("sec_all_filings_raw", [])
         
         error_from_fetch = None
         if not all_filings_raw: 
@@ -1235,13 +1236,13 @@ class PortfolioAgent:
             "volatility_signal": "volatility",
             "sentiment_signal": "sentiment",
             "fund_signal": "fund",
-            "dcf_signal": "valuation_dcf",
+            "dcf_signal": "dcf_valuation", # Changed from valuation_dcf to align with key
             "relative_pe_signal": "valuation_pe",
             "sec_filings_signal": "sec_filings", 
             "inst_holdings_signal": "inst_holdings",
             "analyst_signal": "analyst", 
             "politician_filings_signal": "politician_filings",
-            "vi_signal": "vi"
+            "vi_signal": "vi_signal"
         }
 
         for signal_key, weight_key in signal_map.items():
@@ -1644,6 +1645,14 @@ if app_mode == "Live Analysis":
         if not live_tickers_list_main:
             st.error("Please enter at least one valid ticker to run live analysis.")
         else:
+            # Define live_configs_main here, immediately before its usage
+            live_configs_main = {
+                "use_sentiment": use_sentiment_live_main,
+                "use_filings": use_filings_live_main,
+                "use_politician_filings": use_politician_filings_main,
+                "use_value_trades": use_value_trades_main
+            }
+
             # Store results in session_state to persist across reruns
             if 'live_output' not in st.session_state:
                 st.session_state.live_output = {}
