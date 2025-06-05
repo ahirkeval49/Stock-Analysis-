@@ -35,7 +35,7 @@ def load_portfolios():
                 data = json.load(f)
                 return data if isinstance(data, dict) else {}
         except json.JSONDecodeError:
-            return {} 
+            return {}
     return {}
 
 def save_portfolios(portfolios_data):
@@ -45,16 +45,22 @@ def save_portfolios(portfolios_data):
     with open(PORTFOLIOS_FILE, 'w') as f:
         json.dump(portfolios_data, f, indent=4)
 
+# Initialize portfolio data in session state
 if 'portfolios_data' not in st.session_state:
     st.session_state.portfolios_data = load_portfolios()
 
 if 'selected_portfolio_name' not in st.session_state:
     st.session_state.selected_portfolio_name = None
-    if st.session_state.portfolios_data: 
+    if st.session_state.portfolios_data:
         st.session_state.selected_portfolio_name = list(st.session_state.portfolios_data.keys())[0]
 
 if 'portfolio_stock_analysis' not in st.session_state:
     st.session_state.portfolio_stock_analysis = {}
+
+# Initialize backtest results state
+if 'backtest_results' not in st.session_state:
+    st.session_state.backtest_results = {}
+
 
 # --------------------------------
 # Data Fetchers
@@ -74,7 +80,7 @@ def fetch_ticker_info(ticker: str) -> dict:
     try:
         info = yf.Ticker(ticker).info
         if not info or (info.get('regularMarketPrice') is None and info.get('currentPrice') is None and info.get('financialCurrency') is None):
-            return {} 
+            return {}
         return {
             "marketCap": info.get("marketCap"), "freeCashflow": info.get("freeCashflow"),
             "forwardPE": info.get("forwardPE"), "trailingPE": info.get("trailingPE"),
@@ -566,11 +572,11 @@ def run_live_analysis(tickers, llm_client, configs):
         st.write(f"▶️ Running analysis for {t}...")
         price_history_full = fetch_price_history(t, period="max")
         if price_history_full.empty:
-            results[t] = {"error": f"Price history unavailable for {t}.", "ticker": t, "final_decision":"error", "composite_score":0}; st.error(f"Skipping {t}: Price history error."); continue
+            results[t] = {"error": f"Price history unavailable for {t}.", "ticker": t, "final_decision":"error", "composite_score":0}; continue
         ticker_info = fetch_ticker_info(t)
         if not ticker_info or not ticker_info.get("financialCurrency"):
             err_msg = f"Core ticker info (e.g., currency) unavailable for {t}. Invalid/delisted/no yfinance data."
-            results[t] = {"error": err_msg, "ticker": t, "final_decision":"error", "composite_score":0}; st.error(f"Skipping {t}: {err_msg}"); continue
+            results[t] = {"error": err_msg, "ticker": t, "final_decision":"error", "composite_score":0}; continue
         current_price_for_ticker = ticker_info.get("currentPrice")
         if current_price_for_ticker is None and not price_history_full.empty: current_price_for_ticker = price_history_full["Close"].iloc[-1]
         company_name_for_news = ticker_info.get('longName', ticker_info.get('shortName', t))
@@ -640,7 +646,7 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     run_dates = hist[hist.index >= pd.to_datetime(start_date)].index
     for curr_dt in run_dates:
         data_sl = hist[hist.index <= curr_dt]
-        current_price_pt = data_sl.Close.iloc[-1] if not data_sl.empty else (port_val / shares if shares else 0)
+        curr_price_pt = data_sl.Close.iloc[-1] if not data_sl.empty else (port_val / shares if shares else 0)
         if data_sl.empty or len(data_sl) < 253: 
             log.append({"date":curr_dt, "cash":cash, "shares_held":shares, "price":curr_price_pt, "portfolio_value":port_val, "signal":"hold (no data)", "composite_score":0.0}); continue
         curr_price = data_sl.Close.iloc[-1]
@@ -681,7 +687,7 @@ except Exception as e: st.sidebar.error(f"LLM Unexpected Init Error: {e}"); llm_
 st.title("🚀 AI Hedge Fund Simulator")
 st.header("⚙️ Configuration"); config_cont = st.container(border=True)
 
-app_mode_options = ["Live Analysis", "Backtesting", "💼 Portfolio Management"]
+app_mode_options = ["Live Analysis", "💼 Portfolio Management"] # Removed Backtesting from main options
 if 'app_mode' not in st.session_state:
     st.session_state.app_mode = app_mode_options[0] 
 
@@ -691,34 +697,16 @@ with config_cont:
 
     if st.session_state.app_mode == "Live Analysis":
         st.subheader("Live Analysis Settings")
-        tickers_in = st.text_input("Tickers (comma-separated):", "AAPL,MSFT,GOOG,CRWV", key="live_tickers_in")
+        tickers_in_live = st.text_input("Tickers (comma-separated):", "AAPL,MSFT,GOOG,CRWV", key="live_tickers_input")
         st.caption("ℹ️ Live analysis uses all available historical data.")
         st.subheader("Feature Toggles"); feat_cols = st.columns(3)
         with feat_cols[0]:
-            use_sent_live = st.checkbox("News Sentiment & Summary (LLM)", value=bool(llm_client), disabled=not llm_client, key="live_sent_cb_la", help="Uses LLM. Requires NewsAPI key.") # Changed key
-            use_filings_live = st.checkbox("SEC & Inst. Filings", value=True, key="live_sec_cb_la") # Changed key
+            use_sent_live = st.checkbox("News Sentiment & Summary (LLM)", value=bool(llm_client), disabled=not llm_client, key="live_sent_cb_main", help="Uses LLM. Requires NewsAPI key.")
+            use_filings_live = st.checkbox("SEC & Inst. Filings", value=True, key="live_sec_cb_main")
         with feat_cols[1]:
-            use_poli_live = st.checkbox("Politician Filings (Exp.)", value=False, key="live_poli_cb_la", help="Scrapes CapitolTrades. May be slow/unreliable.") # Changed key
-            use_valtrades_live = st.checkbox("ValueInvesting.io (Exp.)", value=False, key="live_vt_cb_la", help="Scrapes ValueInvesting.io. May be slow/unreliable.") # Changed key
-        st.markdown(""); run_live_btn = st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_btn_main") # Changed key
-
-    elif st.session_state.app_mode == "Backtesting":
-        st.subheader("Backtesting Settings"); bt_ticker = st.text_input("Ticker:", "AAPL", key="bt_ticker_in_bt").upper() # Changed key
-        bt_c1, bt_c2 = st.columns(2)
-        with bt_c1:
-            def_end_dt = datetime.now()-timedelta(days=1); def_start_dt = def_end_dt-pd.DateOffset(years=3)
-            start_dt_in = st.date_input("Start Date:", def_start_dt, max_value=def_end_dt-timedelta(days=30), key="bt_start_dt_bt") # Changed key
-            bt_start_str = start_dt_in.strftime("%Y-%m-%d")
-        with bt_c2:
-            min_end_dt_bt = start_dt_in+timedelta(days=30)
-            bt_end_str = st.date_input("End Date:", def_end_dt, min_value=min_end_dt_bt, max_value=datetime.now()-timedelta(days=1), key="bt_end_dt_bt").strftime("%Y-%m-%d") # Changed key
-        bt_capital = st.number_input("Initial Capital:",1000,1000000,10000,1000,key="bt_cap_in_bt",format="%d") # Changed key
-        with st.expander("Adjust Backtest Agent Weights",expanded=False):
-            st.caption("Backtesting uses a simplified strategy. Adjust weights:")
-            w_p, w_m, w_v = st.slider("Price W:",0.,2.,1.,.1,key="bt_w_p_bt"), st.slider("Mom W:",0.,2.,.8,.1,key="bt_w_m_bt"), st.slider("Vol W:",0.,2.,.2,.1,key="bt_w_v_bt") # Changed keys
-            st.info("Other signals disabled in backtest.")
-        bt_weights = {"price":w_p, "momentum":w_m, "volatility":w_v, "sentiment":0.,"fund":0.,"valuation_dcf":0.,"valuation_pe":0.,"sec_filings":0.,"inst_holdings":0.,"analyst":0.,"politician_filings":0.,"vi_signal":0.}
-        st.markdown(""); run_bt_btn = st.button("📈 Run Backtest",use_container_width=True,type="primary",key="run_bt_btn_main") # Changed key
+            use_poli_live = st.checkbox("Politician Filings (Exp.)", value=False, key="live_poli_cb_main", help="Scrapes CapitolTrades. May be slow/unreliable.")
+            use_valtrades_live = st.checkbox("ValueInvesting.io (Exp.)", value=False, key="live_vt_cb_main", help="Scrapes ValueInvesting.io. May be slow/unreliable.")
+        st.markdown(""); run_live_btn = st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_analysis_button")
 
     elif st.session_state.app_mode == "💼 Portfolio Management":
         st.subheader("💼 Portfolio Management")
@@ -783,7 +771,7 @@ with config_cont:
                     else: st.error("Ticker and Quantity (>0) are required.")
             
             st.markdown("---")
-            st.markdown("##### Configure Analysis for this Portfolio") # Moved here
+            st.markdown("##### Configure Analysis for this Portfolio") 
             pf_analysis_feat_cols = st.columns(2)
             with pf_analysis_feat_cols[0]:
                 pf_use_sentiment_config = st.checkbox("News Sentiment & Summary (LLM)", value=bool(llm_client), disabled=not llm_client, key="pf_config_sent_cb")
@@ -803,7 +791,8 @@ with config_cont:
                         for ticker_sym_pf in tickers_to_fetch_price_pf:
                             if ticker_sym_pf not in st.session_state.portfolio_stock_analysis: st.session_state.portfolio_stock_analysis[ticker_sym_pf] = {}
                             info_price_pf = fetch_ticker_info(ticker_sym_pf)
-                            st.session_state.portfolio_stock_analysis[ticker_sym_pf]["current_price_display"] = info_price_pf.get("currentPrice") if info_price_pf else None
+                            current_price_val = info_price_pf.get("currentPrice")
+                            st.session_state.portfolio_stock_analysis[ticker_sym_pf]["current_price_display"] = current_price_val
                 
                 header_cols_pf_disp = st.columns([2,1,1,1,1,1,1,2,0.5]) 
                 header_cols_pf_disp[0].markdown("**Ticker**"); header_cols_pf_disp[1].markdown("**Qty**"); header_cols_pf_disp[2].markdown("**Avg Price**")
@@ -816,7 +805,7 @@ with config_cont:
                     row_data_pf_item["Current Price"] = f"${current_mkt_price_pf_item:.2f}" if isinstance(current_mkt_price_pf_item, (int, float)) else "N/A"
                     if isinstance(current_mkt_price_pf_item, (int, float)) and isinstance(holding.get('quantity'), (int,float)):
                         row_data_pf_item["Current Value"] = f"${current_mkt_price_pf_item * holding['quantity']:,.2f}"
-                        if isinstance(holding.get('avg_price'), (int,float)): row_data_pf_item["Unrealized P&L"] = f"${(current_mkt_price_pf_item - holding['avg_price']) * holding['quantity']:,.2f}"
+                        if isinstance(holding.get('avg_price'), (int,float)) and holding.get('avg_price') > 0: row_data_pf_item["Unrealized P&L"] = f"${(current_mkt_price_pf_item - holding['avg_price']) * holding['quantity']:,.2f}"
                         else: row_data_pf_item["Unrealized P&L"] = "N/A"
                     else: row_data_pf_item["Current Value"], row_data_pf_item["Unrealized P&L"] = "N/A", "N/A"
                     row_data_pf_item["Signal"] = analysis_res_pf_item.get("final_decision", "N/A").upper()
@@ -831,9 +820,9 @@ with config_cont:
                     data_cols_pf_disp[3].write(row_data_pf_item['Current Price']); data_cols_pf_disp[4].write(row_data_pf_item['Current Value']); data_cols_pf_disp[5].write(row_data_pf_item['Unrealized P&L'])
                     data_cols_pf_disp[6].markdown(f"**{row_data_pf_item['Signal']}**"); data_cols_pf_disp[7].write(row_data_pf_item['Advice'])
                     if data_cols_pf_disp[8].button("🗑️", key=f"del_holding_{st.session_state.selected_portfolio_name}_{row_data_pf_item['ticker']}_{i}", help="Remove this holding"):
-                        current_holdings_list.pop(i) # Remove by current index 'i'
+                        current_holdings_list.pop(i) 
                         if row_data_pf_item['ticker'] in st.session_state.portfolio_stock_analysis: del st.session_state.portfolio_stock_analysis[row_data_pf_item['ticker']]
-                        st.session_state.portfolios_data[st.session_state.selected_portfolio_name] = current_holdings_list # Update session state
+                        st.session_state.portfolios_data[st.session_state.selected_portfolio_name] = current_holdings_list
                         save_portfolios(st.session_state.portfolios_data); st.rerun()
                     st.markdown("<hr style='margin:0.1rem'>", unsafe_allow_html=True)
 
@@ -850,20 +839,17 @@ with config_cont:
 
 st.markdown("---") 
 
-# --- Live Analysis Results Display --- (No changes needed here, uses its own scoped feature toggles)
 if st.session_state.app_mode == "Live Analysis":
-    if 'run_live_btn' in locals() and run_live_btn and 'tickers_in' in locals() and tickers_in: # Use 'tickers_in' as defined for Live Analysis
-        live_tickers = [t.strip().upper() for t in tickers_in.split(",") if t.strip()]
+    if 'run_live_btn' in locals() and run_live_btn and 'tickers_in_live' in locals() and tickers_in_live:
+        live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
         if not live_tickers: st.error("Please enter at least one ticker.")
         else:
-            # Use the feature toggles defined under "Live Analysis" mode
             live_configs = {"use_sentiment":use_sent_live, "use_filings":use_filings_live, 
                             "use_politician_filings":use_poli_live, "use_value_trades":use_valtrades_live}
             if 'live_output' not in st.session_state: st.session_state.live_output = {}
             with st.spinner("⏳ Processing live analysis..."):
                 st.session_state.live_output = run_live_analysis(live_tickers, llm_client, live_configs)
             
-            # ... (rest of the Live Analysis display logic - unchanged) ...
             st.header("📊 Live Analysis Summary"); n_tickers = len(live_tickers); cols_pr = min(n_tickers,3)
             for i in range(0,n_tickers,cols_pr):
                 row_t = live_tickers[i:i+cols_pr]; cols_ui = st.columns(len(row_t))
@@ -881,7 +867,9 @@ if st.session_state.app_mode == "Live Analysis":
                 res_detail = st.session_state.live_output.get(sym_detail)
                 if not res_detail or res_detail.get("error"): continue
                 with st.expander(f"🔍 Detailed Analysis for {sym_detail} ({res_detail.get('ticker_info',{}).get('longName','N/A')})"):
-                    ui_tabs = st.tabs(["📈 Chart & Core", " फंड Fundamentals", "💰 Valuation & Fair Value", "📰 News & Filings", "⚙️ All Signals"])
+                    # Add "Historical Backtest" tab here
+                    tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Valuation & Fair Value", "📰 News & Filings", "⚙️ All Signals", "📋 Historical Backtest"]
+                    ui_tabs = st.tabs(tab_titles)
                     with ui_tabs[0]: 
                         st.subheader("Price Performance & Core Signals")
                         price_hist_chart = fetch_price_history(sym_detail, period="max") 
@@ -919,7 +907,7 @@ if st.session_state.app_mode == "Live Analysis":
                         buy_pct_inf_d = res_detail.get('analyst_buy_pct_inferred'); an_s_exp_data["Inf. Buy %"] = f"{buy_pct_inf_d*100:.0f}%" if isinstance(buy_pct_inf_d,(int,float)) else "N/A"
                         an_s_exp_data["Analyst Sig"] = res_detail.get("analyst_signal","N/A").upper(); st.dataframe(pd.Series(an_s_exp_data,name="Value"),use_container_width=True)
                         if res_detail.get("analyst_error"): st.caption(f"Analyst Note: {res_detail.get('analyst_error')}")
-                        if live_configs["use_value_trades"]: # Use live_configs here
+                        if live_configs["use_value_trades"]: 
                             st.subheader("ValueInvesting.io (Exp.)"); vi_err_d = res_detail.get('vi_data_error'); vi_text_d = res_detail.get('vi_valuation_text_display')
                             if not vi_err_d and (res_detail.get('vi_fair_value_estimate') is not None or vi_text_d):
                                 st.markdown("**VI.io Analysis:**");
@@ -933,7 +921,7 @@ if st.session_state.app_mode == "Live Analysis":
                             elif vi_err_d: st.warning(f"VI.io Status: {vi_err_d}")
                             else: st.info("VI.io: No specific fair value analysis parsed.")
                     with ui_tabs[3]: 
-                        if live_configs["use_sentiment"]: # Use live_configs here
+                        if live_configs["use_sentiment"]: 
                             st.subheader("News Sentiment (LLM)"); sent_status_d = res_detail.get("news_status_display","OK")
                             if res_detail.get("sentiment_error"): sent_status_d += f" | LLM Sent Err: {res_detail.get('sentiment_error')}"
                             sent_s_d = {"Sent. Score":f"{res_detail.get('sentiment_score',0.0):.2f}", "Sent. Signal":res_detail.get("sentiment_signal","N/A").upper(), "News/LLM Status":sent_status_d}
@@ -948,7 +936,7 @@ if st.session_state.app_mode == "Live Analysis":
                             elif "Error" not in sent_status_d and "No news" not in sent_status_d: st.caption("No headlines for summary.")
                         else: st.info("News Sentiment/Summary disabled.")
                         st.markdown("---")
-                        if live_configs["use_filings"]: # Use live_configs here
+                        if live_configs["use_filings"]: 
                             st.subheader("SEC Insider Tx (Form 4 - 1Y)"); sec_err_d = res_detail.get("sec_filings_error")
                             if sec_err_d: st.caption(f"SEC Status: {sec_err_d}")
                             sec_data_d = {"Net Insider Shares (1Y)":f"{res_detail.get('sec_net_insider_shares_1y',0):,}", "Insider Buy Val (1Y Est)":f"${res_detail.get('sec_insider_buy_value_1y',0):,.0f}", "Insider Sell Val (1Y Est)":f"${res_detail.get('sec_insider_sell_value_1y',0):,.0f}", "SEC Filings Sig":res_detail.get("sec_filings_signal","N/A").upper()}
@@ -979,7 +967,7 @@ if st.session_state.app_mode == "Live Analysis":
                                         st.markdown(f"{i+1}. **{h.get('Holder')}**: Sh:{s_d} (%Out:{p_d}) Rept:{h.get('Date Reported','N/A')}")
                             elif not inst_err_d: st.caption("No top inst. holder data.")
                         else: st.info("SEC/Inst. Filings disabled.")
-                        if live_configs["use_politician_filings"]: # Use live_configs here
+                        if live_configs["use_politician_filings"]: 
                             st.subheader("Politician Trading (Exp.)"); pol_err_d = res_detail.get("politician_data_error")
                             if pol_err_d: st.warning(f"Poli. Trades Status: {pol_err_d}")
                             pol_data_d = {"Net Poli. Trade Val Est":f"${res_detail.get('politician_net_trade_value_estimate',0):,.0f}", "Poli. Buy Tx":res_detail.get('politician_buy_tx_count',0), "Poli. Sell Tx":res_detail.get('politician_sell_tx_count',0), "Poli. Filings Sig":res_detail.get("politician_filings_signal","N/A").upper()}
@@ -996,28 +984,58 @@ if st.session_state.app_mode == "Live Analysis":
                         all_s_tab_d["Composite Score"] = f"{res_detail.get('composite_score',0.0):.2f}"; all_s_tab_d["Final Decision"] = res_detail.get('final_decision',"").upper()
                         st.dataframe(pd.Series(all_s_tab_d,name="Signal Value"),use_container_width=True)
                         with st.popover("View Full Raw Analysis Data (JSON)"): st.json(res_detail)
+                    
+                    # --- NEW Backtesting Tab ---
+                    with ui_tabs[5]:
+                        st.subheader(f"Backtest Simplified Strategy for {sym_detail}")
+                        
+                        bt_c1_detail, bt_c2_detail = st.columns(2)
+                        with bt_c1_detail:
+                            def_end_dt_detail = datetime.now()-timedelta(days=1)
+                            def_start_dt_detail = def_end_dt_detail-pd.DateOffset(years=3)
+                            start_dt_in_detail = st.date_input("Start Date:", def_start_dt_detail, max_value=def_end_dt_detail-timedelta(days=30), key=f"bt_start_dt_{sym_detail}")
+                            bt_start_str_detail = start_dt_in_detail.strftime("%Y-%m-%d")
+                        with bt_c2_detail:
+                            min_end_dt_bt_detail = start_dt_in_detail+timedelta(days=30)
+                            bt_end_str_detail = st.date_input("End Date:", def_end_dt_detail, min_value=min_end_dt_bt_detail, max_value=datetime.now()-timedelta(days=1), key=f"bt_end_dt_{sym_detail}").strftime("%Y-%m-%d")
+                        
+                        bt_capital_detail = st.number_input("Initial Capital:",1000,1000000,10000,1000,key=f"bt_cap_in_{sym_detail}",format="%d")
+                        
+                        with st.expander("Adjust Backtest Agent Weights"):
+                            st.caption("Backtesting uses a simplified strategy based on core technicals.")
+                            w_p_detail = st.slider("Price W:",0.,2.,1.,.1,key=f"bt_w_p_{sym_detail}")
+                            w_m_detail = st.slider("Mom W:",0.,2.,.8,.1,key=f"bt_w_m_{sym_detail}")
+                            w_v_detail = st.slider("Vol W:",0.,2.,.2,.1,key=f"bt_w_v_{sym_detail}")
+                        
+                        bt_weights_detail = {"price":w_p_detail, "momentum":w_m_detail, "volatility":w_v_detail, "sentiment":0.,"fund":0.,"valuation_dcf":0.,"valuation_pe":0.,"sec_filings":0.,"inst_holdings":0.,"analyst":0.,"politician_filings":0.,"vi_signal":0.}
+                        
+                        if st.button(f"📈 Run Backtest for {sym_detail}", key=f"run_bt_btn_{sym_detail}"):
+                            with st.spinner(f"⏳ Running backtest for {sym_detail}..."):
+                                bt_metrics_res, bt_log_df_res = run_backtest(sym_detail, bt_start_str_detail, bt_end_str_detail, bt_capital_detail, llm_client, bt_weights_detail)
+                                st.session_state.backtest_results[sym_detail] = {"metrics": bt_metrics_res, "log_df": bt_log_df_res}
+                                st.rerun() # Rerun to display results from session state
+                        
+                        # Display results if they exist in session state for this ticker
+                        if sym_detail in st.session_state.backtest_results:
+                            bt_res_for_ticker = st.session_state.backtest_results[sym_detail]
+                            metrics = bt_res_for_ticker.get("metrics")
+                            log_df = bt_res_for_ticker.get("log_df")
+                            
+                            if metrics and not (metrics.get("message") or metrics.get("error")):
+                                st.markdown("---")
+                                st.subheader(f"Backtest Results for {sym_detail}")
+                                metrics_df_display = pd.DataFrame.from_dict(metrics, orient='index', columns=['Value']); st.table(metrics_df_display)
+                                if log_df is not None and not log_df.empty:
+                                    st.subheader("Portfolio Value Over Time"); st.line_chart(log_df["portfolio_value"])
+                                    st.subheader("Drawdown Over Time"); st.area_chart(log_df["drawdown"].fillna(0))
+                                    with st.expander("View Raw Backtest Log"): st.dataframe(log_df.tail(1000))
+                                else: st.warning("Backtest log is empty.")
+                            elif metrics: # If there's an error message
+                                st.error(f"Backtest failed: {metrics.get('message', '') or metrics.get('error', 'Unknown error')}")
+
+
     with st.sidebar.expander("Portfolio Agent Weights (Live Analysis)",expanded=False):
         st.caption("Weights for PortfolioAgent combining signals."); st.json(dict(sorted(PortfolioAgent.WEIGHTS.items())))
-
-elif st.session_state.app_mode == "Backtesting":
-    # This section will only execute if run_bt_btn is defined, which happens when app_mode is "Backtesting"
-    if 'run_bt_btn' in locals() and run_bt_btn and 'bt_ticker' in locals() and bt_ticker: 
-        if 'bt_metrics' not in st.session_state: st.session_state.bt_metrics = None
-        if 'bt_log_df' not in st.session_state: st.session_state.bt_log_df = pd.DataFrame()
-        with st.spinner(f"⏳ Running backtest for {bt_ticker} from {bt_start_str} to {bt_end_str}..."): 
-            st.session_state.bt_metrics, st.session_state.bt_log_df = run_backtest(bt_ticker, bt_start_str, bt_end_str, bt_capital, llm_client, bt_weights)
-        if st.session_state.bt_metrics and not (st.session_state.bt_metrics.get("message") or st.session_state.bt_metrics.get("error")):
-            st.header(f"📈 Backtest Results for {bt_ticker}") 
-            metrics_df_bt = pd.DataFrame.from_dict(st.session_state.bt_metrics,orient='index',columns=['Value']); st.table(metrics_df_bt)
-            if not st.session_state.bt_log_df.empty:
-                st.subheader("Portfolio Value Over Time"); st.line_chart(st.session_state.bt_log_df["portfolio_value"])
-                st.subheader("Drawdown Over Time"); drawdown_s_bt = st.session_state.bt_log_df["drawdown"].fillna(0); st.area_chart(drawdown_s_bt)
-                with st.expander("View Raw Backtest Log (Last 1000)"): st.dataframe(st.session_state.bt_log_df[["price","signal","composite_score","portfolio_value","cash","shares_held"]].tail(1000))
-            else: st.warning("Backtest log empty.")
-        else:
-            err_msg_bt_res = "Unknown backtest error."
-            if st.session_state.bt_metrics: err_msg_bt_res = st.session_state.bt_metrics.get('message','') or st.session_state.bt_metrics.get('error','Unknown error')
-            st.error(f"Backtest failed: {err_msg_bt_res}")
 
 st.sidebar.markdown("---")
 st.sidebar.info("Educational purposes only. Not financial advice.")
