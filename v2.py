@@ -737,14 +737,14 @@ def display_detailed_analysis(res_detail):
         file_col1, file_col2 = st.columns(2)
         with file_col1:
             st.markdown("**SEC Filings**"); st.metric("Insider Signal", res_detail.get('sec_filings_signal', 'hold').upper())
-            with st.expander("View Recent Filings"):
+            with st.popover("View Recent Filings"): # CORRECTED: Changed from expander to popover
                 filings = res_detail.get('sec_other_recent_filings', [])
                 if filings:
                     for f in filings: st.write(f"**{f.get('filing_date')}**: Form {f.get('form_type')} - [Link]({f.get('summary_link')})")
                 else: st.info("No recent SEC filings found.")
         with file_col2:
             st.markdown("**Institutional Holdings**"); st.metric("Institutional Signal", res_detail.get('inst_holdings_signal', 'hold').upper())
-            with st.expander("View Top 10 Institutional Holders"):
+            with st.popover("View Top 10 Institutional Holders"): # CORRECTED: Changed from expander to popover
                 holders = res_detail.get('inst_top_holders', [])
                 if holders:
                     df_holders = pd.DataFrame(holders)
@@ -847,6 +847,7 @@ with config_cont:
         if st.session_state.selected_portfolio_name not in portfolio_names_list and portfolio_names_list:
              st.session_state.selected_portfolio_name = portfolio_names_list[0]
         elif not portfolio_names_list: st.session_state.selected_portfolio_name = None
+        
         selected_portfolio_sidebar = st.sidebar.selectbox("Select Portfolio", options=portfolio_names_list, 
             index=portfolio_names_list.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name in portfolio_names_list else 0, 
             key="portfolio_selector_sidebar")
