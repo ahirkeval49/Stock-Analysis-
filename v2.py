@@ -64,7 +64,7 @@ if 'backtest_results' not in st.session_state:
 # Data Fetchers
 # --------------------------------
 @st.cache_data
-def fetch_price_history(ticker: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
+def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame: # CORRECTED: Default period is now "max"
     try:
         ticker_obj = yf.Ticker(ticker)
         df = ticker_obj.history(period=period, interval=interval)
@@ -737,18 +737,29 @@ def display_detailed_analysis(res_detail):
         file_col1, file_col2 = st.columns(2)
         with file_col1:
             st.markdown("**SEC Filings**"); st.metric("Insider Signal", res_detail.get('sec_filings_signal', 'hold').upper())
-            with st.popover("View Recent Filings"): # CORRECTED: Changed from expander to popover
+            with st.popover("View Recent Filings"): 
                 filings = res_detail.get('sec_other_recent_filings', [])
                 if filings:
                     for f in filings: st.write(f"**{f.get('filing_date')}**: Form {f.get('form_type')} - [Link]({f.get('summary_link')})")
                 else: st.info("No recent SEC filings found.")
         with file_col2:
             st.markdown("**Institutional Holdings**"); st.metric("Institutional Signal", res_detail.get('inst_holdings_signal', 'hold').upper())
-            with st.popover("View Top 10 Institutional Holders"): # CORRECTED: Changed from expander to popover
+            with st.popover("View Top 10 Institutional Holders"): 
                 holders = res_detail.get('inst_top_holders', [])
                 if holders:
                     df_holders = pd.DataFrame(holders)
-                    st.dataframe(df_holders[["Holder", "Shares", "% Out"]].rename(columns={"% Out":"% of Outstanding"}), column_config={"% of Outstanding": st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=0.10)}, hide_index=True, use_container_width=True)
+                    # CORRECTED: Dynamically check for columns before displaying
+                    available_cols = ["Holder", "Shares"]
+                    if '% Out' in df_holders.columns:
+                        available_cols.append('% Out')
+                    
+                    column_config = {}
+                    if '% Out' in available_cols:
+                        df_holders = df_holders.rename(columns={"% Out":"% of Outstanding"})
+                        available_cols[available_cols.index('% Out')] = '% of Outstanding'
+                        column_config["% of Outstanding"] = st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=0.10)
+                    
+                    st.dataframe(df_holders[available_cols], column_config=column_config, hide_index=True, use_container_width=True)
                 else: st.info("No institutional holder data available.")
 
     with tabs[4]:
@@ -801,11 +812,13 @@ with config_cont:
         st.subheader("Backtesting Settings"); bt_ticker = st.text_input("Ticker:", "AAPL", key="bt_ticker_in_bt").upper()
         bt_capital_source = st.radio("Capital Source:", ("Manual Input", "From Saved Portfolio"), horizontal=True, key="bt_capital_source_radio")
         bt_capital = 10000 
+        
         if bt_capital_source == "Manual Input":
              bt_capital = st.number_input("Initial Capital:", 1000, 1000000, 10000, 1000, key="bt_cap_in_bt", format="%d")
         else:
             portfolio_names_bt = list(st.session_state.portfolios_data.keys())
-            if not portfolio_names_bt: st.warning("No portfolios found. Create one in the Portfolio Management tab to use this feature.")
+            if not portfolio_names_bt:
+                st.warning("No portfolios found. Create one in the Portfolio Management tab to use this feature.")
             else:
                 sel_pf_bt = st.selectbox("Select Portfolio to use its total value:", portfolio_names_bt, key="bt_pf_select")
                 holdings_bt = st.session_state.portfolios_data.get(sel_pf_bt, [])
