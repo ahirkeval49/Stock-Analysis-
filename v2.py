@@ -59,7 +59,6 @@ if 'portfolio_stock_analysis' not in st.session_state:
 if 'backtest_results' not in st.session_state:
     st.session_state.backtest_results = {}
 
-
 # --------------------------------
 # Data Fetchers
 # --------------------------------
@@ -238,6 +237,7 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
     except Exception as e: return [{"error": f"SEC Unexpected error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
     filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True); return filings_list
 
+# CORRECTED: The syntax error in this function is fixed.
 @st.cache_data(ttl=6*3600)
 def fetch_inst_filings(ticker: str) -> list[dict]:
     try:
@@ -272,7 +272,7 @@ def fetch_value_investing_io_data(ticker: str) -> dict:
             if fv_match: return {"ticker": ticker, "vi_valuation_date": "N/A (generic)", "vi_fair_value": float(fv_match.group(1)) if fv_match.group(1) else None, "vi_site_market_price": None, "vi_upside_percent": None, "vi_full_text": target_text, "vi_data_source_url": url, "error": None, "note": "Generic parse."}
             return {"error": f"VI.io: Could not parse details for {ticker} from: '{target_text[:200]}...'"}
     except requests.exceptions.HTTPError as http_err: return {"error": f"VI.io: HTTP error for {ticker} ({http_err.response.status_code if http_err.response else 'Unknown'}): {url}"}
-    except requests.exceptions.RequestException as req_err: return [{"error": f"VI.io: Request error for {ticker}: {req_err}"}
+    except requests.exceptions.RequestException as req_err: return {"error": f"VI.io: Request error for {ticker}: {req_err}"}
     except Exception as e: return {"error": f"VI.io: Unexpected error for {ticker}: {e}"}
 
 @st.cache_data(ttl=3600)
@@ -685,7 +685,7 @@ except Exception as e: st.sidebar.error(f"LLM Unexpected Init Error: {e}"); llm_
 st.title("🚀 AI Hedge Fund Simulator")
 st.header("⚙️ Configuration"); config_cont = st.container(border=True)
 
-# CORRECTED: Restore "Backtesting" to the main list of app modes to fix ValueError
+# CORRECTED: Restore "Backtesting" to the list of main app modes
 app_mode_options = ["Live Analysis", "Backtesting", "💼 Portfolio Management"] 
 if 'app_mode' not in st.session_state:
     st.session_state.app_mode = app_mode_options[0] 
@@ -709,6 +709,33 @@ with config_cont:
 
     elif st.session_state.app_mode == "Backtesting":
         st.subheader("Backtesting Settings"); bt_ticker = st.text_input("Ticker:", "AAPL", key="bt_ticker_in_bt").upper()
+        
+        # New Feature: Choose capital source
+        capital_source = st.radio("Choose Capital Source:", ("Manual Input", "From Saved Portfolio"), horizontal=True, key="bt_capital_source")
+        bt_capital = 10000 # Default value
+        
+        if capital_source == "Manual Input":
+             bt_capital = st.number_input("Initial Capital:",1000,1000000,10000,1000,key="bt_cap_in_bt",format="%d")
+        else:
+            portfolio_names_bt = list(st.session_state.portfolios_data.keys())
+            if not portfolio_names_bt:
+                st.warning("No portfolios found. Please create one in the Portfolio Management tab.")
+            else:
+                sel_pf_bt = st.selectbox("Select Portfolio to use its total value:", portfolio_names_bt, key="bt_pf_select")
+                holdings_bt = st.session_state.portfolios_data.get(sel_pf_bt, [])
+                total_value = 0
+                if holdings_bt:
+                    for holding in holdings_bt:
+                        # Fetch current price to calculate total value
+                        info_bt_cap = fetch_ticker_info(holding['ticker'])
+                        price_bt_cap = info_bt_cap.get('currentPrice')
+                        if isinstance(price_bt_cap, (int,float)) and isinstance(holding.get('quantity'), (int,float)):
+                            total_value += price_bt_cap * holding['quantity']
+                    bt_capital = int(total_value) if total_value > 0 else 10000 # Fallback if value is zero
+                    st.info(f"Using **${bt_capital:,.2f}** as initial capital from portfolio '{sel_pf_bt}'.")
+                else:
+                    st.warning(f"Portfolio '{sel_pf_bt}' is empty. Using default capital.")
+
         bt_c1, bt_c2 = st.columns(2)
         with bt_c1:
             def_end_dt = datetime.now()-timedelta(days=1); def_start_dt = def_end_dt-pd.DateOffset(years=3)
@@ -717,7 +744,7 @@ with config_cont:
         with bt_c2:
             min_end_dt_bt = start_dt_in+timedelta(days=30)
             bt_end_str = st.date_input("End Date:", def_end_dt, min_value=min_end_dt_bt, max_value=datetime.now()-timedelta(days=1), key="bt_end_dt_bt").strftime("%Y-%m-%d")
-        bt_capital = st.number_input("Initial Capital:",1000,1000000,10000,1000,key="bt_cap_in_bt",format="%d")
+        
         with st.expander("Adjust Backtest Agent Weights",expanded=False):
             st.caption("Backtesting uses a simplified strategy. Adjust weights:")
             w_p, w_m, w_v = st.slider("Price W:",0.,2.,1.,.1,key="bt_w_p_bt"), st.slider("Mom W:",0.,2.,.8,.1,key="bt_w_m_bt"), st.slider("Vol W:",0.,2.,.2,.1,key="bt_w_v_bt")
@@ -729,17 +756,15 @@ with config_cont:
         st.subheader("💼 Portfolio Management")
         st.sidebar.subheader("Portfolio Actions")
         portfolio_names_list = list(st.session_state.portfolios_data.keys())
-        if not portfolio_names_list: # If no portfolios, create a default one
+        if not portfolio_names_list:
              st.session_state.portfolios_data["My First Portfolio"] = []
              st.session_state.selected_portfolio_name = "My First Portfolio"
              save_portfolios(st.session_state.portfolios_data)
-             portfolio_names_list = ["My First Portfolio"]
-             st.rerun()
+             portfolio_names_list = ["My First Portfolio"]; st.rerun()
 
         if st.session_state.selected_portfolio_name not in portfolio_names_list and portfolio_names_list:
              st.session_state.selected_portfolio_name = portfolio_names_list[0]
-        elif not portfolio_names_list: 
-            st.session_state.selected_portfolio_name = None
+        elif not portfolio_names_list: st.session_state.selected_portfolio_name = None
 
         selected_portfolio_sidebar = st.sidebar.selectbox("Select Portfolio", options=portfolio_names_list, 
             index=portfolio_names_list.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name in portfolio_names_list else 0, 
@@ -811,7 +836,8 @@ with config_cont:
                         for ticker_sym_pf in tickers_to_fetch_price_pf:
                             if ticker_sym_pf not in st.session_state.portfolio_stock_analysis: st.session_state.portfolio_stock_analysis[ticker_sym_pf] = {}
                             info_price_pf = fetch_ticker_info(ticker_sym_pf)
-                            st.session_state.portfolio_stock_analysis[ticker_sym_pf]["current_price_display"] = info_price_pf.get("currentPrice") if info_price_pf else None
+                            current_price_val = info_price_pf.get("currentPrice")
+                            st.session_state.portfolio_stock_analysis[ticker_sym_pf]["current_price_display"] = current_price_val
                 
                 header_cols_pf_disp = st.columns([2,1,1,1,1,1,1,2,0.5]) 
                 header_cols_pf_disp[0].markdown("**Ticker**"); header_cols_pf_disp[1].markdown("**Qty**"); header_cols_pf_disp[2].markdown("**Avg Price**")
@@ -858,7 +884,6 @@ with config_cont:
 
 st.markdown("---") 
 
-# --- Main Display Area ---
 if st.session_state.app_mode == "Live Analysis":
     if 'run_live_btn' in locals() and run_live_btn and 'tickers_in_live' in locals() and tickers_in_live:
         live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
@@ -885,29 +910,26 @@ if st.session_state.app_mode == "Live Analysis":
                 res_detail = st.session_state.live_output.get(sym_detail)
                 if not res_detail or res_detail.get("error"): continue
                 with st.expander(f"🔍 Detailed Analysis for {sym_detail} ({res_detail.get('ticker_info',{}).get('longName','N/A')})"):
-                    # Display logic for tabs remains here...
                     st.json(res_detail) 
 
 elif st.session_state.app_mode == "Backtesting":
     if 'run_bt_btn' in locals() and run_bt_btn and 'bt_ticker' in locals() and bt_ticker: 
         if 'backtest_results' not in st.session_state: st.session_state.backtest_results = {}
         with st.spinner(f"⏳ Running backtest for {bt_ticker} from {bt_start_str} to {bt_end_str}..."): 
-            bt_metrics_res, bt_log_df_res = run_backtest(bt_ticker, bt_start_str, bt_end_str, bt_capital, llm_client, bt_weights)
-            st.session_state.backtest_results[bt_ticker] = {"metrics": bt_metrics_res, "log_df": bt_log_df_res}
+            st.session_state.backtest_results[bt_ticker] = run_backtest(bt_ticker, bt_start_str, bt_end_str, bt_capital, llm_client, bt_weights)
     
     if 'bt_ticker' in locals() and bt_ticker and bt_ticker in st.session_state.backtest_results:
-        bt_res_for_ticker = st.session_state.backtest_results[bt_ticker]
-        metrics, log_df = bt_res_for_ticker.get("metrics"), bt_res_for_ticker.get("log_df")
-        if metrics and not (metrics.get("message") or metrics.get("error")):
+        bt_metrics_res_disp, bt_log_df_res_disp = st.session_state.backtest_results[bt_ticker]
+        if bt_metrics_res_disp and not (bt_metrics_res_disp.get("message") or bt_metrics_res_disp.get("error")):
             st.header(f"📈 Backtest Results for {bt_ticker}") 
-            metrics_df_bt = pd.DataFrame.from_dict(metrics,orient='index',columns=['Value']); st.table(metrics_df_bt)
-            if log_df is not None and not log_df.empty:
-                st.subheader("Portfolio Value Over Time"); st.line_chart(log_df["portfolio_value"])
-                st.subheader("Drawdown Over Time"); st.area_chart(log_df["drawdown"].fillna(0))
-                with st.expander("View Raw Backtest Log (Last 1000)"): st.dataframe(log_df.tail(1000))
+            metrics_df_bt_disp = pd.DataFrame.from_dict(bt_metrics_res_disp,orient='index',columns=['Value']); st.table(metrics_df_bt_disp)
+            if bt_log_df_res_disp is not None and not bt_log_df_res_disp.empty:
+                st.subheader("Portfolio Value Over Time"); st.line_chart(bt_log_df_res_disp["portfolio_value"])
+                st.subheader("Drawdown Over Time"); st.area_chart(bt_log_df_res_disp["drawdown"].fillna(0))
+                with st.expander("View Raw Backtest Log (Last 1000)"): st.dataframe(bt_log_df_res_disp.tail(1000))
             else: st.warning("Backtest log empty.")
-        elif metrics:
-            st.error(f"Backtest failed: {metrics.get('message','') or metrics.get('error','Unknown error')}")
+        elif bt_metrics_res_disp:
+            st.error(f"Backtest failed: {bt_metrics_res_disp.get('message','') or bt_metrics_res_disp.get('error','Unknown error')}")
 
 st.sidebar.markdown("---")
 st.sidebar.info("Educational purposes only. Not financial advice.")
