@@ -59,7 +59,6 @@ if 'portfolio_stock_analysis' not in st.session_state:
 if 'backtest_results' not in st.session_state:
     st.session_state.backtest_results = {}
 
-
 # --------------------------------
 # Data Fetchers
 # --------------------------------
@@ -670,6 +669,95 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     trades = (log_df.signal != log_df.signal.shift()).fillna(False).sum()//2
     return {"Initial Capital":f"${initial_capital:,.2f}", "Final Portfolio Value":f"${log_df.portfolio_value.iloc[-1]:,.2f}", "Total Return (%)":f"{total_ret:.2f}%", "Annualized Return (%)":f"{ann_ret:.2f}%", "Annualized Volatility (%)":f"{ann_vol:.2f}%", "Sharpe Ratio":f"{sharpe:.2f}", "Max Drawdown (%)":f"{max_dd:.2f}%", "Number of Trades (approx)":f"{trades}"}, log_df
 
+# --- Detailed Analysis Display Function ---
+def display_detailed_analysis(res_detail):
+    ticker = res_detail.get("ticker", "N/A"); ticker_info = res_detail.get("ticker_info", {})
+    tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
+    tabs = st.tabs(tab_titles)
+    def get_signal_color(signal):
+        if signal == "BUY" or signal == "STRONG_BUY": return "green"
+        elif signal == "SELL": return "red"
+        return "orange"
+    with tabs[0]:
+        st.subheader("Price Performance & Technical Signals")
+        price_hist_chart = fetch_price_history(ticker, period="1y")
+        if not price_hist_chart.empty:
+            st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
+        else: st.warning("Price chart data not available.")
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Technical Indicators"); price_signal = res_detail.get('price_signal', 'hold').upper()
+            st.metric(label=f"Price Signal (SMA/RSI)", value=price_signal)
+            st.markdown(f"""<div style="font-size: 14px;"><li><b>50-Day SMA:</b> ${res_detail.get('sma50', 0):,.2f}</li><li><b>200-Day SMA:</b> ${res_detail.get('sma200', 0):,.2f}</li><li><b>14-Day RSI:</b> {res_detail.get('rsi14', 0):.2f}</li></div>""", unsafe_allow_html=True)
+        with col2:
+            st.subheader("Momentum & Volatility"); momentum_signal = res_detail.get('momentum_signal', 'hold').upper()
+            st.metric(label="Momentum Signal", value=momentum_signal)
+            st.markdown(f"""<div style="font-size: 14px;"><li><b>1-Month Momentum:</b> {res_detail.get('momentum_1m', 0) * 100:.2f}%</li><li><b>12-Month Momentum:</b> {res_detail.get('momentum_12m', 0) * 100:.2f}%</li><li><b>Beta:</b> {res_detail.get('beta', 0):.2f}</li></div>""", unsafe_allow_html=True)
+
+    with tabs[1]:
+        st.subheader(f"Fundamental Overview: {ticker_info.get('longName', '')}"); st.caption(f"**Sector:** {ticker_info.get('sector', 'N/A')} | **Industry:** {ticker_info.get('industry', 'N/A')}")
+        with st.expander("Show Business Summary"): st.write(ticker_info.get('longBusinessSummary', 'No summary available.'))
+        st.markdown("---"); fund_col1, fund_col2, fund_col3, fund_col4 = st.columns(4)
+        fund_col1.metric("Market Cap", f"${ticker_info.get('marketCap', 0) / 1e12:.2f}T" if isinstance(ticker_info.get('marketCap'),(int,float)) else "N/A")
+        fund_col2.metric("Trailing P/E", f"{ticker_info.get('trailingPE', 0):.2f}" if isinstance(ticker_info.get('trailingPE'),(int,float)) else "N/A")
+        fund_col3.metric("Forward P/E", f"{ticker_info.get('forwardPE', 0):.2f}" if isinstance(ticker_info.get('forwardPE'),(int,float)) else "N/A")
+        fund_col4.metric("Price/Book", f"{ticker_info.get('priceToBook', 0):.2f}" if isinstance(ticker_info.get('priceToBook'),(int,float)) else "N/A")
+        st.markdown("---"); st.subheader("Financial Health"); fund_sig = res_detail.get('fund_signal', 'hold').upper()
+        f_col1, f_col2, f_col3 = st.columns(3)
+        f_col1.metric("Fundamental Signal", fund_sig); f_col2.metric("Piotroski Score (0-3)", f"{res_detail.get('piotroski_score', 'N/A')}/3")
+        fcy_val = res_detail.get('fcf_yield'); f_col3.metric("FCF Yield", f"{fcy_val * 100:.2f}%" if isinstance(fcy_val,(int,float)) else "N/A")
+        roe_val = ticker_info.get('returnOnEquity'); de_val = ticker_info.get('debtToEquity'); etr_val = ticker_info.get('enterpriseToRevenue'); ete_val = ticker_info.get('enterpriseToEbitda')
+        health_data = {"Return on Equity (ROE)": f"{roe_val * 100:.2f}%" if isinstance(roe_val,(int,float)) else "N/A", "Debt to Equity": f"{de_val:.2f}" if isinstance(de_val,(int,float)) else "N/A", "EV/Revenue": f"{etr_val:.2f}" if isinstance(etr_val,(int,float)) else "N/A", "EV/EBITDA": f"{ete_val:.2f}" if isinstance(ete_val,(int,float)) else "N/A"}
+        st.table(pd.DataFrame(health_data.items(), columns=["Metric", "Value"]))
+
+    with tabs[2]:
+        val_col1, val_col2 = st.columns(2)
+        with val_col1:
+            st.subheader("Analyst Consensus"); analyst_signal = res_detail.get('analyst_signal', 'hold').upper()
+            st.metric(label=f"Analyst Signal (from {ticker_info.get('numberOfAnalystOpinions')} analysts)", value=analyst_signal)
+            abp_val = res_detail.get('analyst_buy_pct_inferred',0.5); st.progress(abp_val, text=f"{abp_val*100:.0f}% Buy Rating")
+            tm_val = ticker_info.get('targetMeanPrice'); tu_val = res_detail.get('target_upside')
+            st.metric("Mean Target Price", f"${tm_val:.2f}" if isinstance(tm_val,(int,float)) else "N/A", f"{tu_val*100:.2f}% Upside" if isinstance(tu_val,(int,float)) else None)
+        with val_col2:
+            st.subheader("Peter Lynch Fair Value (via VI.io)"); vi_signal = res_detail.get('vi_signal', 'hold').upper()
+            vi_fv = res_detail.get('vi_fair_value_estimate'); up_val = res_detail.get('vi_upside_percent')
+            st.metric(label=f"VI.io Signal (Fair Value: ${vi_fv:,.2f})", value=vi_signal, delta=f"{up_val:.2f}% Upside" if isinstance(up_val,(int,float)) else None)
+            if res_detail.get('vi_valuation_text_display'): st.markdown(f"> *{res_detail.get('vi_valuation_text_display')}*")
+    
+    with tabs[3]:
+        st.subheader("News Analysis & Filings")
+        if res_detail.get('news_summary'):
+            with st.container(border=True):
+                st.markdown("**AI-Generated News Summary**"); st.write(res_detail.get('news_summary'))
+                if res_detail.get('sentiment_error'): st.warning(f"Sentiment Analysis Note: {res_detail.get('sentiment_error')}")
+        file_col1, file_col2 = st.columns(2)
+        with file_col1:
+            st.markdown("**SEC Filings**"); st.metric("Insider Signal", res_detail.get('sec_filings_signal', 'hold').upper())
+            with st.expander("View Recent Filings"):
+                filings = res_detail.get('sec_other_recent_filings', [])
+                if filings:
+                    for f in filings: st.write(f"**{f.get('filing_date')}**: Form {f.get('form_type')} - [Link]({f.get('summary_link')})")
+                else: st.info("No recent SEC filings found.")
+        with file_col2:
+            st.markdown("**Institutional Holdings**"); st.metric("Institutional Signal", res_detail.get('inst_holdings_signal', 'hold').upper())
+            with st.expander("View Top 10 Institutional Holders"):
+                holders = res_detail.get('inst_top_holders', [])
+                if holders:
+                    df_holders = pd.DataFrame(holders)
+                    st.dataframe(df_holders[["Holder", "Shares", "% Out"]].rename(columns={"% Out":"% of Outstanding"}), column_config={"% of Outstanding": st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=0.10)}, hide_index=True, use_container_width=True)
+                else: st.info("No institutional holder data available.")
+
+    with tabs[4]:
+        st.subheader("All Agent Signals at a Glance")
+        signals_data = {"Price Signal (SMA/RSI)": res_detail.get("price_signal","N/A").upper(), "Momentum Signal": res_detail.get("momentum_signal","N/A").upper(), "Volatility Signal": res_detail.get("volatility_signal","N/A").upper(), "Fundamental Signal": res_detail.get("fund_signal","N/A").upper(), "Analyst Signal": res_detail.get("analyst_signal","N/A").upper(), "ValueInvesting.io Signal": res_detail.get("vi_signal","N/A").upper(), "News Sentiment Signal": res_detail.get("sentiment_signal","N/A").upper(), "SEC Filings Signal": res_detail.get("sec_filings_signal","N/A").upper(), "Institutional Signal": res_detail.get("inst_holdings_signal","N/A").upper()}
+        df_signals = pd.DataFrame(signals_data.items(), columns=["Agent", "Signal"])
+        st.dataframe(df_signals.style.applymap(lambda x: f'color: {get_signal_color(x)}', subset=['Signal']), hide_index=True, use_container_width=True)
+        st.markdown("---")
+        final_decision = res_detail.get('final_decision', 'hold').upper(); final_color = get_signal_color(final_decision)
+        st.markdown(f"""<div style="border:2px solid {final_color}; border-radius:8px; padding:15px; text-align:center;"><p style="font-size:1.2em; margin-bottom:5px;">Final AI Decision</p><h2 style="color:{final_color}; margin-bottom:5px;">{final_decision}</h2><p style="font-size:1em;">Composite Score: <strong>{res_detail.get('composite_score', 0):.2f}</strong></p></div>""", unsafe_allow_html=True)
+
+
 # --- Streamlit UI ---
 llm_client = None
 try:
@@ -685,7 +773,6 @@ except Exception as e: st.sidebar.error(f"LLM Unexpected Init Error: {e}"); llm_
 st.title("🚀 AI Hedge Fund Simulator")
 st.header("⚙️ Configuration"); config_cont = st.container(border=True)
 
-# CORRECTED: Restore "Backtesting" to the main list of app modes
 app_mode_options = ["Live Analysis", "Backtesting", "💼 Portfolio Management"] 
 if 'app_mode' not in st.session_state:
     st.session_state.app_mode = app_mode_options[0] 
@@ -711,13 +798,11 @@ with config_cont:
         st.subheader("Backtesting Settings"); bt_ticker = st.text_input("Ticker:", "AAPL", key="bt_ticker_in_bt").upper()
         bt_capital_source = st.radio("Capital Source:", ("Manual Input", "From Saved Portfolio"), horizontal=True, key="bt_capital_source_radio")
         bt_capital = 10000 
-        
         if bt_capital_source == "Manual Input":
              bt_capital = st.number_input("Initial Capital:", 1000, 1000000, 10000, 1000, key="bt_cap_in_bt", format="%d")
         else:
             portfolio_names_bt = list(st.session_state.portfolios_data.keys())
-            if not portfolio_names_bt:
-                st.warning("No portfolios found. Create one in the Portfolio Management tab to use this feature.")
+            if not portfolio_names_bt: st.warning("No portfolios found. Create one in the Portfolio Management tab to use this feature.")
             else:
                 sel_pf_bt = st.selectbox("Select Portfolio to use its total value:", portfolio_names_bt, key="bt_pf_select")
                 holdings_bt = st.session_state.portfolios_data.get(sel_pf_bt, [])
@@ -755,13 +840,10 @@ with config_cont:
         if not portfolio_names_list: 
              st.session_state.portfolios_data["My First Portfolio"] = []
              st.session_state.selected_portfolio_name = "My First Portfolio"
-             save_portfolios(st.session_state.portfolios_data)
-             st.rerun()
-
+             save_portfolios(st.session_state.portfolios_data); st.rerun()
         if st.session_state.selected_portfolio_name not in portfolio_names_list and portfolio_names_list:
              st.session_state.selected_portfolio_name = portfolio_names_list[0]
         elif not portfolio_names_list: st.session_state.selected_portfolio_name = None
-        
         selected_portfolio_sidebar = st.sidebar.selectbox("Select Portfolio", options=portfolio_names_list, 
             index=portfolio_names_list.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name in portfolio_names_list else 0, 
             key="portfolio_selector_sidebar")
@@ -880,7 +962,6 @@ with config_cont:
 st.markdown("---") 
 
 if st.session_state.app_mode == "Live Analysis":
-    # This block now uses its own feature toggle variables, e.g., use_sent_live
     if 'run_live_btn' in locals() and run_live_btn and 'tickers_in_live' in locals() and tickers_in_live:
         live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
         if not live_tickers: st.error("Please enter at least one ticker.")
@@ -906,15 +987,14 @@ if st.session_state.app_mode == "Live Analysis":
                 res_detail = st.session_state.live_output.get(sym_detail)
                 if not res_detail or res_detail.get("error"): continue
                 with st.expander(f"🔍 Detailed Analysis for {sym_detail} ({res_detail.get('ticker_info',{}).get('longName','N/A')})"):
-                    # Placeholder for the aesthetic tab layout
-                    st.json(res_detail)
+                    # This now calls the full display function, replacing the st.json placeholder
+                    display_detailed_analysis(res_detail)
 
 elif st.session_state.app_mode == "Backtesting":
     if 'run_bt_btn' in locals() and run_bt_btn and 'bt_ticker' in locals() and bt_ticker: 
         if 'backtest_results' not in st.session_state: st.session_state.backtest_results = {}
         with st.spinner(f"⏳ Running backtest for {bt_ticker} from {bt_start_str} to {bt_end_str}..."): 
-            bt_metrics_res, bt_log_df_res = run_backtest(bt_ticker, bt_start_str, bt_end_str, bt_capital, llm_client, bt_weights)
-            st.session_state.backtest_results[bt_ticker] = {"metrics": bt_metrics_res, "log_df": bt_log_df_res}
+            st.session_state.backtest_results[bt_ticker] = run_backtest(bt_ticker, bt_start_str, bt_end_str, bt_capital, llm_client, bt_weights)
     
     if 'bt_ticker' in locals() and bt_ticker and bt_ticker in st.session_state.backtest_results:
         bt_res_for_ticker = st.session_state.backtest_results[bt_ticker]
