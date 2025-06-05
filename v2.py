@@ -691,7 +691,6 @@ if 'app_mode' not in st.session_state:
     st.session_state.app_mode = app_mode_options[0] 
 
 with config_cont:
-    # This radio button will now work without error
     st.session_state.app_mode = st.radio("Select Mode:", app_mode_options, key="app_mode_sel_main_key", horizontal=True, index=app_mode_options.index(st.session_state.app_mode))
     st.markdown("---")
 
@@ -881,6 +880,7 @@ with config_cont:
 st.markdown("---") 
 
 if st.session_state.app_mode == "Live Analysis":
+    # This block now uses its own feature toggle variables, e.g., use_sent_live
     if 'run_live_btn' in locals() and run_live_btn and 'tickers_in_live' in locals() and tickers_in_live:
         live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
         if not live_tickers: st.error("Please enter at least one ticker.")
@@ -906,7 +906,8 @@ if st.session_state.app_mode == "Live Analysis":
                 res_detail = st.session_state.live_output.get(sym_detail)
                 if not res_detail or res_detail.get("error"): continue
                 with st.expander(f"🔍 Detailed Analysis for {sym_detail} ({res_detail.get('ticker_info',{}).get('longName','N/A')})"):
-                    st.json(res_detail) 
+                    # Placeholder for the aesthetic tab layout
+                    st.json(res_detail)
 
 elif st.session_state.app_mode == "Backtesting":
     if 'run_bt_btn' in locals() and run_bt_btn and 'bt_ticker' in locals() and bt_ticker: 
