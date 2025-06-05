@@ -45,7 +45,6 @@ def save_portfolios(portfolios_data):
     with open(PORTFOLIOS_FILE, 'w') as f:
         json.dump(portfolios_data, f, indent=4)
 
-# Initialize portfolio data in session state
 if 'portfolios_data' not in st.session_state:
     st.session_state.portfolios_data = load_portfolios()
 
@@ -56,6 +55,10 @@ if 'selected_portfolio_name' not in st.session_state:
 
 if 'portfolio_stock_analysis' not in st.session_state:
     st.session_state.portfolio_stock_analysis = {}
+
+if 'backtest_results' not in st.session_state:
+    st.session_state.backtest_results = {}
+
 
 # --------------------------------
 # Data Fetchers
@@ -269,7 +272,7 @@ def fetch_value_investing_io_data(ticker: str) -> dict:
             if fv_match: return {"ticker": ticker, "vi_valuation_date": "N/A (generic)", "vi_fair_value": float(fv_match.group(1)) if fv_match.group(1) else None, "vi_site_market_price": None, "vi_upside_percent": None, "vi_full_text": target_text, "vi_data_source_url": url, "error": None, "note": "Generic parse."}
             return {"error": f"VI.io: Could not parse details for {ticker} from: '{target_text[:200]}...'"}
     except requests.exceptions.HTTPError as http_err: return {"error": f"VI.io: HTTP error for {ticker} ({http_err.response.status_code if http_err.response else 'Unknown'}): {url}"}
-    except requests.exceptions.RequestException as req_err: return {"error": f"VI.io: Request error for {ticker}: {req_err}"}
+    except requests.exceptions.RequestException as req_err: return [{"error": f"VI.io: Request error for {ticker}: {req_err}"}
     except Exception as e: return {"error": f"VI.io: Unexpected error for {ticker}: {e}"}
 
 @st.cache_data(ttl=3600)
@@ -682,17 +685,15 @@ except Exception as e: st.sidebar.error(f"LLM Unexpected Init Error: {e}"); llm_
 st.title("🚀 AI Hedge Fund Simulator")
 st.header("⚙️ Configuration"); config_cont = st.container(border=True)
 
-# CORRECTED: Restore "Backtesting" to the main list of app modes
+# CORRECTED: Restore "Backtesting" to the main list of app modes to fix ValueError
 app_mode_options = ["Live Analysis", "Backtesting", "💼 Portfolio Management"] 
 if 'app_mode' not in st.session_state:
     st.session_state.app_mode = app_mode_options[0] 
 
 with config_cont:
-    # This radio button will now work without error as its list of options matches the possible session states
     st.session_state.app_mode = st.radio("Select Mode:", app_mode_options, key="app_mode_sel_main_key", horizontal=True, index=app_mode_options.index(st.session_state.app_mode))
     st.markdown("---")
 
-    # --- Live Analysis Configuration ---
     if st.session_state.app_mode == "Live Analysis":
         st.subheader("Live Analysis Settings")
         tickers_in_live = st.text_input("Tickers (comma-separated):", "AAPL,MSFT,GOOG,CRWV", key="live_tickers_input")
@@ -706,7 +707,6 @@ with config_cont:
             use_valtrades_live = st.checkbox("ValueInvesting.io (Exp.)", value=False, key="live_vt_cb_main", help="Scrapes ValueInvesting.io. May be slow/unreliable.")
         st.markdown(""); run_live_btn = st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_analysis_button")
 
-    # --- Backtesting Configuration (Restored) ---
     elif st.session_state.app_mode == "Backtesting":
         st.subheader("Backtesting Settings"); bt_ticker = st.text_input("Ticker:", "AAPL", key="bt_ticker_in_bt").upper()
         bt_c1, bt_c2 = st.columns(2)
@@ -725,26 +725,29 @@ with config_cont:
         bt_weights = {"price":w_p, "momentum":w_m, "volatility":w_v, "sentiment":0.,"fund":0.,"valuation_dcf":0.,"valuation_pe":0.,"sec_filings":0.,"inst_holdings":0.,"analyst":0.,"politician_filings":0.,"vi_signal":0.}
         st.markdown(""); run_bt_btn = st.button("📈 Run Backtest",use_container_width=True,type="primary",key="run_bt_btn_main")
 
-    # --- Portfolio Management Configuration ---
     elif st.session_state.app_mode == "💼 Portfolio Management":
         st.subheader("💼 Portfolio Management")
         st.sidebar.subheader("Portfolio Actions")
         portfolio_names_list = list(st.session_state.portfolios_data.keys())
-        if not portfolio_names_list and st.session_state.selected_portfolio_name is None: 
-            st.session_state.selected_portfolio_name = "My First Portfolio" 
-            if "My First Portfolio" not in st.session_state.portfolios_data:
-                st.session_state.portfolios_data["My First Portfolio"] = []
-                save_portfolios(st.session_state.portfolios_data)
-            portfolio_names_list = ["My First Portfolio"]
+        if not portfolio_names_list: # If no portfolios, create a default one
+             st.session_state.portfolios_data["My First Portfolio"] = []
+             st.session_state.selected_portfolio_name = "My First Portfolio"
+             save_portfolios(st.session_state.portfolios_data)
+             portfolio_names_list = ["My First Portfolio"]
+             st.rerun()
+
         if st.session_state.selected_portfolio_name not in portfolio_names_list and portfolio_names_list:
-            st.session_state.selected_portfolio_name = portfolio_names_list[0]
-        elif not portfolio_names_list: st.session_state.selected_portfolio_name = None
+             st.session_state.selected_portfolio_name = portfolio_names_list[0]
+        elif not portfolio_names_list: 
+            st.session_state.selected_portfolio_name = None
+
         selected_portfolio_sidebar = st.sidebar.selectbox("Select Portfolio", options=portfolio_names_list, 
-            index=portfolio_names_list.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name and st.session_state.selected_portfolio_name in portfolio_names_list else 0, 
+            index=portfolio_names_list.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name in portfolio_names_list else 0, 
             key="portfolio_selector_sidebar")
         if selected_portfolio_sidebar != st.session_state.selected_portfolio_name : 
             st.session_state.selected_portfolio_name = selected_portfolio_sidebar
             st.session_state.portfolio_stock_analysis = {}; st.rerun()
+
         new_portfolio_name_sidebar = st.sidebar.text_input("Create New Portfolio Name", key="new_portfolio_name_sidebar_input")
         if st.sidebar.button("Create Portfolio", key="create_portfolio_sidebar_btn"):
             if new_portfolio_name_sidebar and new_portfolio_name_sidebar not in st.session_state.portfolios_data:
@@ -808,8 +811,7 @@ with config_cont:
                         for ticker_sym_pf in tickers_to_fetch_price_pf:
                             if ticker_sym_pf not in st.session_state.portfolio_stock_analysis: st.session_state.portfolio_stock_analysis[ticker_sym_pf] = {}
                             info_price_pf = fetch_ticker_info(ticker_sym_pf)
-                            current_price_val = info_price_pf.get("currentPrice")
-                            st.session_state.portfolio_stock_analysis[ticker_sym_pf]["current_price_display"] = current_price_val
+                            st.session_state.portfolio_stock_analysis[ticker_sym_pf]["current_price_display"] = info_price_pf.get("currentPrice") if info_price_pf else None
                 
                 header_cols_pf_disp = st.columns([2,1,1,1,1,1,1,2,0.5]) 
                 header_cols_pf_disp[0].markdown("**Ticker**"); header_cols_pf_disp[1].markdown("**Qty**"); header_cols_pf_disp[2].markdown("**Avg Price**")
@@ -846,7 +848,6 @@ with config_cont:
                 if st.button("📊 Analyze Entire Portfolio Holdings", key="analyze_portfolio_holdings_btn", type="primary", use_container_width=True):
                     if current_holdings_list:
                         with st.spinner("Analyzing portfolio stocks... This may take time."):
-                            # Use the portfolio-specific config toggles defined above this button
                             portfolio_analysis_configs = {"use_sentiment": pf_use_sentiment_config, "use_filings": pf_use_filings_config, "use_politician_filings": pf_use_politician_filings_config, "use_value_trades": pf_use_value_trades_config }
                             tickers_to_analyze_pf = [h['ticker'] for h in current_holdings_list]
                             analysis_batch_results_pf = run_live_analysis(tickers_to_analyze_pf, llm_client, portfolio_analysis_configs)
@@ -857,7 +858,7 @@ with config_cont:
 
 st.markdown("---") 
 
-# --- Results Display Area ---
+# --- Main Display Area ---
 if st.session_state.app_mode == "Live Analysis":
     if 'run_live_btn' in locals() and run_live_btn and 'tickers_in_live' in locals() and tickers_in_live:
         live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
@@ -867,7 +868,6 @@ if st.session_state.app_mode == "Live Analysis":
             if 'live_output' not in st.session_state: st.session_state.live_output = {}
             with st.spinner("⏳ Processing live analysis..."):
                 st.session_state.live_output = run_live_analysis(live_tickers, llm_client, live_configs)
-            
             st.header("📊 Live Analysis Summary"); n_tickers = len(live_tickers); cols_pr = min(n_tickers,3)
             for i in range(0,n_tickers,cols_pr):
                 row_t = live_tickers[i:i+cols_pr]; cols_ui = st.columns(len(row_t))
@@ -885,8 +885,8 @@ if st.session_state.app_mode == "Live Analysis":
                 res_detail = st.session_state.live_output.get(sym_detail)
                 if not res_detail or res_detail.get("error"): continue
                 with st.expander(f"🔍 Detailed Analysis for {sym_detail} ({res_detail.get('ticker_info',{}).get('longName','N/A')})"):
-                    # Display logic for tabs remains here... (omitted for brevity, but should be the same as your last version)
-                    st.json(res_detail) # Simple display of all results for this ticker as a placeholder
+                    # Display logic for tabs remains here...
+                    st.json(res_detail) 
 
 elif st.session_state.app_mode == "Backtesting":
     if 'run_bt_btn' in locals() and run_bt_btn and 'bt_ticker' in locals() and bt_ticker: 
@@ -895,7 +895,6 @@ elif st.session_state.app_mode == "Backtesting":
             bt_metrics_res, bt_log_df_res = run_backtest(bt_ticker, bt_start_str, bt_end_str, bt_capital, llm_client, bt_weights)
             st.session_state.backtest_results[bt_ticker] = {"metrics": bt_metrics_res, "log_df": bt_log_df_res}
     
-    # Display results for the last run backtest
     if 'bt_ticker' in locals() and bt_ticker and bt_ticker in st.session_state.backtest_results:
         bt_res_for_ticker = st.session_state.backtest_results[bt_ticker]
         metrics, log_df = bt_res_for_ticker.get("metrics"), bt_res_for_ticker.get("log_df")
