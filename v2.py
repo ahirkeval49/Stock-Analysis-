@@ -59,6 +59,7 @@ if 'portfolio_stock_analysis' not in st.session_state:
 if 'backtest_results' not in st.session_state:
     st.session_state.backtest_results = {}
 
+
 # --------------------------------
 # Data Fetchers
 # --------------------------------
@@ -773,6 +774,7 @@ except Exception as e: st.sidebar.error(f"LLM Unexpected Init Error: {e}"); llm_
 st.title("🚀 AI Hedge Fund Simulator")
 st.header("⚙️ Configuration"); config_cont = st.container(border=True)
 
+# Main App Mode Selection
 app_mode_options = ["Live Analysis", "Backtesting", "💼 Portfolio Management"] 
 if 'app_mode' not in st.session_state:
     st.session_state.app_mode = app_mode_options[0] 
@@ -798,11 +800,13 @@ with config_cont:
         st.subheader("Backtesting Settings"); bt_ticker = st.text_input("Ticker:", "AAPL", key="bt_ticker_in_bt").upper()
         bt_capital_source = st.radio("Capital Source:", ("Manual Input", "From Saved Portfolio"), horizontal=True, key="bt_capital_source_radio")
         bt_capital = 10000 
+        
         if bt_capital_source == "Manual Input":
              bt_capital = st.number_input("Initial Capital:", 1000, 1000000, 10000, 1000, key="bt_cap_in_bt", format="%d")
         else:
             portfolio_names_bt = list(st.session_state.portfolios_data.keys())
-            if not portfolio_names_bt: st.warning("No portfolios found. Create one in the Portfolio Management tab to use this feature.")
+            if not portfolio_names_bt:
+                st.warning("No portfolios found. Create one in the Portfolio Management tab to use this feature.")
             else:
                 sel_pf_bt = st.selectbox("Select Portfolio to use its total value:", portfolio_names_bt, key="bt_pf_select")
                 holdings_bt = st.session_state.portfolios_data.get(sel_pf_bt, [])
@@ -844,6 +848,7 @@ with config_cont:
         if st.session_state.selected_portfolio_name not in portfolio_names_list and portfolio_names_list:
              st.session_state.selected_portfolio_name = portfolio_names_list[0]
         elif not portfolio_names_list: st.session_state.selected_portfolio_name = None
+        
         selected_portfolio_sidebar = st.sidebar.selectbox("Select Portfolio", options=portfolio_names_list, 
             index=portfolio_names_list.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name in portfolio_names_list else 0, 
             key="portfolio_selector_sidebar")
