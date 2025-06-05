@@ -676,8 +676,8 @@ def display_detailed_analysis(res_detail):
     tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
     tabs = st.tabs(tab_titles)
     def get_signal_color(signal):
-        if signal == "BUY" or signal == "STRONG_BUY": return "green"
-        elif signal == "SELL": return "red"
+        if signal in ["BUY", "STRONG_BUY"]: return "green"
+        if signal == "SELL": return "red"
         return "orange"
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
@@ -698,7 +698,9 @@ def display_detailed_analysis(res_detail):
 
     with tabs[1]:
         st.subheader(f"Fundamental Overview: {ticker_info.get('longName', '')}"); st.caption(f"**Sector:** {ticker_info.get('sector', 'N/A')} | **Industry:** {ticker_info.get('industry', 'N/A')}")
-        with st.expander("Show Business Summary"): st.write(ticker_info.get('longBusinessSummary', 'No summary available.'))
+        if ticker_info.get('longBusinessSummary'):
+            with st.popover("Show Business Summary"): 
+                st.markdown(ticker_info.get('longBusinessSummary'))
         st.markdown("---"); fund_col1, fund_col2, fund_col3, fund_col4 = st.columns(4)
         fund_col1.metric("Market Cap", f"${ticker_info.get('marketCap', 0) / 1e12:.2f}T" if isinstance(ticker_info.get('marketCap'),(int,float)) else "N/A")
         fund_col2.metric("Trailing P/E", f"{ticker_info.get('trailingPE', 0):.2f}" if isinstance(ticker_info.get('trailingPE'),(int,float)) else "N/A")
@@ -723,7 +725,7 @@ def display_detailed_analysis(res_detail):
         with val_col2:
             st.subheader("Peter Lynch Fair Value (via VI.io)"); vi_signal = res_detail.get('vi_signal', 'hold').upper()
             vi_fv = res_detail.get('vi_fair_value_estimate'); up_val = res_detail.get('vi_upside_percent')
-            st.metric(label=f"VI.io Signal (Fair Value: ${vi_fv:,.2f})", value=vi_signal, delta=f"{up_val:.2f}% Upside" if isinstance(up_val,(int,float)) else None)
+            st.metric(label=f"VI.io Signal (Fair Value: ${vi_fv:,.2f})", value=vi_signal, delta=f"{up_val:.2f}% Upside" if isinstance(up_val,(int,float)) else None, delta_color="inverse")
             if res_detail.get('vi_valuation_text_display'): st.markdown(f"> *{res_detail.get('vi_valuation_text_display')}*")
     
     with tabs[3]:
@@ -774,7 +776,6 @@ except Exception as e: st.sidebar.error(f"LLM Unexpected Init Error: {e}"); llm_
 st.title("🚀 AI Hedge Fund Simulator")
 st.header("⚙️ Configuration"); config_cont = st.container(border=True)
 
-# Main App Mode Selection
 app_mode_options = ["Live Analysis", "Backtesting", "💼 Portfolio Management"] 
 if 'app_mode' not in st.session_state:
     st.session_state.app_mode = app_mode_options[0] 
@@ -800,13 +801,11 @@ with config_cont:
         st.subheader("Backtesting Settings"); bt_ticker = st.text_input("Ticker:", "AAPL", key="bt_ticker_in_bt").upper()
         bt_capital_source = st.radio("Capital Source:", ("Manual Input", "From Saved Portfolio"), horizontal=True, key="bt_capital_source_radio")
         bt_capital = 10000 
-        
         if bt_capital_source == "Manual Input":
              bt_capital = st.number_input("Initial Capital:", 1000, 1000000, 10000, 1000, key="bt_cap_in_bt", format="%d")
         else:
             portfolio_names_bt = list(st.session_state.portfolios_data.keys())
-            if not portfolio_names_bt:
-                st.warning("No portfolios found. Create one in the Portfolio Management tab to use this feature.")
+            if not portfolio_names_bt: st.warning("No portfolios found. Create one in the Portfolio Management tab to use this feature.")
             else:
                 sel_pf_bt = st.selectbox("Select Portfolio to use its total value:", portfolio_names_bt, key="bt_pf_select")
                 holdings_bt = st.session_state.portfolios_data.get(sel_pf_bt, [])
@@ -848,7 +847,6 @@ with config_cont:
         if st.session_state.selected_portfolio_name not in portfolio_names_list and portfolio_names_list:
              st.session_state.selected_portfolio_name = portfolio_names_list[0]
         elif not portfolio_names_list: st.session_state.selected_portfolio_name = None
-        
         selected_portfolio_sidebar = st.sidebar.selectbox("Select Portfolio", options=portfolio_names_list, 
             index=portfolio_names_list.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name in portfolio_names_list else 0, 
             key="portfolio_selector_sidebar")
@@ -975,6 +973,7 @@ if st.session_state.app_mode == "Live Analysis":
             if 'live_output' not in st.session_state: st.session_state.live_output = {}
             with st.spinner("⏳ Processing live analysis..."):
                 st.session_state.live_output = run_live_analysis(live_tickers, llm_client, live_configs)
+            
             st.header("📊 Live Analysis Summary"); n_tickers = len(live_tickers); cols_pr = min(n_tickers,3)
             for i in range(0,n_tickers,cols_pr):
                 row_t = live_tickers[i:i+cols_pr]; cols_ui = st.columns(len(row_t))
