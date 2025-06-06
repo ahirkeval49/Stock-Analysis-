@@ -675,10 +675,12 @@ def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A"); ticker_info = res_detail.get("ticker_info", {})
     tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
     tabs = st.tabs(tab_titles)
+    
     def get_signal_color(signal):
         if signal in ["BUY", "STRONG_BUY"]: return "green"
         if signal == "SELL": return "red"
         return "orange"
+
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
         price_hist_chart = fetch_price_history(ticker, period="1y")
@@ -732,8 +734,19 @@ def display_detailed_analysis(res_detail):
         st.subheader("News Analysis & Filings")
         if res_detail.get('news_summary'):
             with st.container(border=True):
-                st.markdown("**AI-Generated News Summary**"); st.write(res_detail.get('news_summary'))
-                if res_detail.get('sentiment_error'): st.warning(f"Sentiment Analysis Note: {res_detail.get('sentiment_error')}")
+                st.markdown("**AI-Generated News Summary**")
+                st.write(res_detail.get('news_summary'))
+
+                # --- NEW: POPOVER FOR NEWS LINKS ---
+                headlines = res_detail.get('news_headlines_for_popover', [])
+                if headlines:
+                    with st.popover("View News Sources & Links"):
+                        for line in headlines:
+                            st.markdown(f"- {line}")
+                
+                if res_detail.get('sentiment_error'):
+                    st.warning(f"Sentiment Analysis Note: {res_detail.get('sentiment_error')}")
+
         file_col1, file_col2 = st.columns(2)
         with file_col1:
             st.markdown("**SEC Filings**"); st.metric("Insider Signal", res_detail.get('sec_filings_signal', 'hold').upper())
@@ -748,10 +761,8 @@ def display_detailed_analysis(res_detail):
                 holders = res_detail.get('inst_top_holders', [])
                 if holders:
                     df_holders = pd.DataFrame(holders)
-                    # CORRECTED: Dynamically check for columns before displaying
                     available_cols = ["Holder", "Shares"]
-                    if '% Out' in df_holders.columns:
-                        available_cols.append('% Out')
+                    if '% Out' in df_holders.columns: available_cols.append('% Out')
                     
                     column_config = {}
                     if '% Out' in available_cols:
@@ -770,7 +781,6 @@ def display_detailed_analysis(res_detail):
         st.markdown("---")
         final_decision = res_detail.get('final_decision', 'hold').upper(); final_color = get_signal_color(final_decision)
         st.markdown(f"""<div style="border:2px solid {final_color}; border-radius:8px; padding:15px; text-align:center;"><p style="font-size:1.2em; margin-bottom:5px;">Final AI Decision</p><h2 style="color:{final_color}; margin-bottom:5px;">{final_decision}</h2><p style="font-size:1em;">Composite Score: <strong>{res_detail.get('composite_score', 0):.2f}</strong></p></div>""", unsafe_allow_html=True)
-
 
 # --- Streamlit UI ---
 llm_client = None
