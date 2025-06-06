@@ -675,12 +675,10 @@ def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A"); ticker_info = res_detail.get("ticker_info", {})
     tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
     tabs = st.tabs(tab_titles)
-    
     def get_signal_color(signal):
         if signal in ["BUY", "STRONG_BUY"]: return "green"
         if signal == "SELL": return "red"
         return "orange"
-
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
         price_hist_chart = fetch_price_history(ticker, period="1y")
@@ -723,13 +721,14 @@ def display_detailed_analysis(res_detail):
             st.metric(label=f"Analyst Signal (from {ticker_info.get('numberOfAnalystOpinions')} analysts)", value=analyst_signal)
             abp_val = res_detail.get('analyst_buy_pct_inferred',0.5); st.progress(abp_val, text=f"{abp_val*100:.0f}% Buy Rating")
             tm_val = ticker_info.get('targetMeanPrice'); tu_val = res_detail.get('target_upside')
+            # CORRECTED: Check if tm_val is a number before formatting
             st.metric("Mean Target Price", f"${tm_val:.2f}" if isinstance(tm_val,(int,float)) else "N/A", f"{tu_val*100:.2f}% Upside" if isinstance(tu_val,(int,float)) else None)
         with val_col2:
-            st.subheader("Peter Lynch Fair Value (via VI.io)")
-            # CORRECTED: Ensure the value is a string before calling .upper()
-            vi_signal = str(res_detail.get('vi_signal', 'hold')).upper()
+            st.subheader("Peter Lynch Fair Value (via VI.io)"); vi_signal = str(res_detail.get('vi_signal', 'hold')).upper()
             vi_fv = res_detail.get('vi_fair_value_estimate'); up_val = res_detail.get('vi_upside_percent')
-            st.metric(label=f"VI.io Signal (Fair Value: ${vi_fv:,.2f})", value=vi_signal, delta=f"{up_val:.2f}% Upside" if isinstance(up_val,(int,float)) else None, delta_color="inverse")
+            # CORRECTED: Check if vi_fv is a number before formatting in the label
+            vi_fv_label = f"${vi_fv:,.2f}" if isinstance(vi_fv, (int, float)) else "N/A"
+            st.metric(label=f"VI.io Signal (Fair Value: {vi_fv_label})", value=vi_signal, delta=f"{up_val:.2f}% Upside" if isinstance(up_val,(int,float)) else None, delta_color="inverse")
             if res_detail.get('vi_valuation_text_display'): st.markdown(f"> *{res_detail.get('vi_valuation_text_display')}*")
     
     with tabs[3]:
@@ -768,17 +767,7 @@ def display_detailed_analysis(res_detail):
 
     with tabs[4]:
         st.subheader("All Agent Signals at a Glance")
-        signals_data = {
-            "Price Signal (SMA/RSI)": str(res_detail.get("price_signal","N/A")).upper(), 
-            "Momentum Signal": str(res_detail.get("momentum_signal","N/A")).upper(), 
-            "Volatility Signal": str(res_detail.get("volatility_signal","N/A")).upper(), 
-            "Fundamental Signal": str(res_detail.get("fund_signal","N/A")).upper(), 
-            "Analyst Signal": str(res_detail.get("analyst_signal","N/A")).upper(), 
-            "ValueInvesting.io Signal": str(res_detail.get("vi_signal","N/A")).upper(), 
-            "News Sentiment Signal": str(res_detail.get("sentiment_signal","N/A")).upper(), 
-            "SEC Filings Signal": str(res_detail.get("sec_filings_signal","N/A")).upper(), 
-            "Institutional Signal": str(res_detail.get("inst_holdings_signal","N/A")).upper()
-        }
+        signals_data = {"Price Signal (SMA/RSI)": str(res_detail.get("price_signal","N/A")).upper(), "Momentum Signal": str(res_detail.get("momentum_signal","N/A")).upper(), "Volatility Signal": str(res_detail.get("volatility_signal","N/A")).upper(), "Fundamental Signal": str(res_detail.get("fund_signal","N/A")).upper(), "Analyst Signal": str(res_detail.get("analyst_signal","N/A")).upper(), "ValueInvesting.io Signal": str(res_detail.get("vi_signal","N/A")).upper(), "News Sentiment Signal": str(res_detail.get("sentiment_signal","N/A")).upper(), "SEC Filings Signal": str(res_detail.get("sec_filings_signal","N/A")).upper(), "Institutional Signal": str(res_detail.get("inst_holdings_signal","N/A")).upper()}
         df_signals = pd.DataFrame(signals_data.items(), columns=["Agent", "Signal"])
         st.dataframe(df_signals.style.applymap(lambda x: f'color: {get_signal_color(x)}', subset=['Signal']), hide_index=True, use_container_width=True)
         st.markdown("---")
