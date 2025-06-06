@@ -690,11 +690,11 @@ def display_detailed_analysis(res_detail):
         st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
-            st.subheader("Technical Indicators"); price_signal = res_detail.get('price_signal', 'hold').upper()
+            st.subheader("Technical Indicators"); price_signal = str(res_detail.get('price_signal', 'hold')).upper()
             st.metric(label=f"Price Signal (SMA/RSI)", value=price_signal)
             st.markdown(f"""<div style="font-size: 14px;"><li><b>50-Day SMA:</b> ${res_detail.get('sma50', 0):,.2f}</li><li><b>200-Day SMA:</b> ${res_detail.get('sma200', 0):,.2f}</li><li><b>14-Day RSI:</b> {res_detail.get('rsi14', 0):.2f}</li></div>""", unsafe_allow_html=True)
         with col2:
-            st.subheader("Momentum & Volatility"); momentum_signal = res_detail.get('momentum_signal', 'hold').upper()
+            st.subheader("Momentum & Volatility"); momentum_signal = str(res_detail.get('momentum_signal', 'hold')).upper()
             st.metric(label="Momentum Signal", value=momentum_signal)
             st.markdown(f"""<div style="font-size: 14px;"><li><b>1-Month Momentum:</b> {res_detail.get('momentum_1m', 0) * 100:.2f}%</li><li><b>12-Month Momentum:</b> {res_detail.get('momentum_12m', 0) * 100:.2f}%</li><li><b>Beta:</b> {res_detail.get('beta', 0):.2f}</li></div>""", unsafe_allow_html=True)
 
@@ -708,7 +708,7 @@ def display_detailed_analysis(res_detail):
         fund_col2.metric("Trailing P/E", f"{ticker_info.get('trailingPE', 0):.2f}" if isinstance(ticker_info.get('trailingPE'),(int,float)) else "N/A")
         fund_col3.metric("Forward P/E", f"{ticker_info.get('forwardPE', 0):.2f}" if isinstance(ticker_info.get('forwardPE'),(int,float)) else "N/A")
         fund_col4.metric("Price/Book", f"{ticker_info.get('priceToBook', 0):.2f}" if isinstance(ticker_info.get('priceToBook'),(int,float)) else "N/A")
-        st.markdown("---"); st.subheader("Financial Health"); fund_sig = res_detail.get('fund_signal', 'hold').upper()
+        st.markdown("---"); st.subheader("Financial Health"); fund_sig = str(res_detail.get('fund_signal', 'hold')).upper()
         f_col1, f_col2, f_col3 = st.columns(3)
         f_col1.metric("Fundamental Signal", fund_sig); f_col2.metric("Piotroski Score (0-3)", f"{res_detail.get('piotroski_score', 'N/A')}/3")
         fcy_val = res_detail.get('fcf_yield'); f_col3.metric("FCF Yield", f"{fcy_val * 100:.2f}%" if isinstance(fcy_val,(int,float)) else "N/A")
@@ -719,13 +719,15 @@ def display_detailed_analysis(res_detail):
     with tabs[2]:
         val_col1, val_col2 = st.columns(2)
         with val_col1:
-            st.subheader("Analyst Consensus"); analyst_signal = res_detail.get('analyst_signal', 'hold').upper()
+            st.subheader("Analyst Consensus"); analyst_signal = str(res_detail.get('analyst_signal', 'hold')).upper()
             st.metric(label=f"Analyst Signal (from {ticker_info.get('numberOfAnalystOpinions')} analysts)", value=analyst_signal)
             abp_val = res_detail.get('analyst_buy_pct_inferred',0.5); st.progress(abp_val, text=f"{abp_val*100:.0f}% Buy Rating")
             tm_val = ticker_info.get('targetMeanPrice'); tu_val = res_detail.get('target_upside')
             st.metric("Mean Target Price", f"${tm_val:.2f}" if isinstance(tm_val,(int,float)) else "N/A", f"{tu_val*100:.2f}% Upside" if isinstance(tu_val,(int,float)) else None)
         with val_col2:
-            st.subheader("Peter Lynch Fair Value (via VI.io)"); vi_signal = res_detail.get('vi_signal', 'hold').upper()
+            st.subheader("Peter Lynch Fair Value (via VI.io)")
+            # CORRECTED: Ensure the value is a string before calling .upper()
+            vi_signal = str(res_detail.get('vi_signal', 'hold')).upper()
             vi_fv = res_detail.get('vi_fair_value_estimate'); up_val = res_detail.get('vi_upside_percent')
             st.metric(label=f"VI.io Signal (Fair Value: ${vi_fv:,.2f})", value=vi_signal, delta=f"{up_val:.2f}% Upside" if isinstance(up_val,(int,float)) else None, delta_color="inverse")
             if res_detail.get('vi_valuation_text_display'): st.markdown(f"> *{res_detail.get('vi_valuation_text_display')}*")
@@ -734,54 +736,54 @@ def display_detailed_analysis(res_detail):
         st.subheader("News Analysis & Filings")
         if res_detail.get('news_summary'):
             with st.container(border=True):
-                st.markdown("**AI-Generated News Summary**")
-                st.write(res_detail.get('news_summary'))
-
-                # --- NEW: POPOVER FOR NEWS LINKS ---
+                st.markdown("**AI-Generated News Summary**"); st.write(res_detail.get('news_summary'))
                 headlines = res_detail.get('news_headlines_for_popover', [])
                 if headlines:
                     with st.popover("View News Sources & Links"):
-                        for line in headlines:
-                            st.markdown(f"- {line}")
-                
-                if res_detail.get('sentiment_error'):
-                    st.warning(f"Sentiment Analysis Note: {res_detail.get('sentiment_error')}")
-
+                        for line in headlines: st.markdown(f"- {line}")
+                if res_detail.get('sentiment_error'): st.warning(f"Sentiment Analysis Note: {res_detail.get('sentiment_error')}")
         file_col1, file_col2 = st.columns(2)
         with file_col1:
-            st.markdown("**SEC Filings**"); st.metric("Insider Signal", res_detail.get('sec_filings_signal', 'hold').upper())
+            st.markdown("**SEC Filings**"); st.metric("Insider Signal", str(res_detail.get('sec_filings_signal', 'hold')).upper())
             with st.popover("View Recent Filings"): 
                 filings = res_detail.get('sec_other_recent_filings', [])
                 if filings:
                     for f in filings: st.write(f"**{f.get('filing_date')}**: Form {f.get('form_type')} - [Link]({f.get('summary_link')})")
                 else: st.info("No recent SEC filings found.")
         with file_col2:
-            st.markdown("**Institutional Holdings**"); st.metric("Institutional Signal", res_detail.get('inst_holdings_signal', 'hold').upper())
+            st.markdown("**Institutional Holdings**"); st.metric("Institutional Signal", str(res_detail.get('inst_holdings_signal', 'hold')).upper())
             with st.popover("View Top 10 Institutional Holders"): 
                 holders = res_detail.get('inst_top_holders', [])
                 if holders:
                     df_holders = pd.DataFrame(holders)
                     available_cols = ["Holder", "Shares"]
                     if '% Out' in df_holders.columns: available_cols.append('% Out')
-                    
                     column_config = {}
                     if '% Out' in available_cols:
                         df_holders = df_holders.rename(columns={"% Out":"% of Outstanding"})
                         available_cols[available_cols.index('% Out')] = '% of Outstanding'
                         column_config["% of Outstanding"] = st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=0.10)
-                    
                     st.dataframe(df_holders[available_cols], column_config=column_config, hide_index=True, use_container_width=True)
                 else: st.info("No institutional holder data available.")
 
     with tabs[4]:
         st.subheader("All Agent Signals at a Glance")
-        signals_data = {"Price Signal (SMA/RSI)": res_detail.get("price_signal","N/A").upper(), "Momentum Signal": res_detail.get("momentum_signal","N/A").upper(), "Volatility Signal": res_detail.get("volatility_signal","N/A").upper(), "Fundamental Signal": res_detail.get("fund_signal","N/A").upper(), "Analyst Signal": res_detail.get("analyst_signal","N/A").upper(), "ValueInvesting.io Signal": res_detail.get("vi_signal","N/A").upper(), "News Sentiment Signal": res_detail.get("sentiment_signal","N/A").upper(), "SEC Filings Signal": res_detail.get("sec_filings_signal","N/A").upper(), "Institutional Signal": res_detail.get("inst_holdings_signal","N/A").upper()}
+        signals_data = {
+            "Price Signal (SMA/RSI)": str(res_detail.get("price_signal","N/A")).upper(), 
+            "Momentum Signal": str(res_detail.get("momentum_signal","N/A")).upper(), 
+            "Volatility Signal": str(res_detail.get("volatility_signal","N/A")).upper(), 
+            "Fundamental Signal": str(res_detail.get("fund_signal","N/A")).upper(), 
+            "Analyst Signal": str(res_detail.get("analyst_signal","N/A")).upper(), 
+            "ValueInvesting.io Signal": str(res_detail.get("vi_signal","N/A")).upper(), 
+            "News Sentiment Signal": str(res_detail.get("sentiment_signal","N/A")).upper(), 
+            "SEC Filings Signal": str(res_detail.get("sec_filings_signal","N/A")).upper(), 
+            "Institutional Signal": str(res_detail.get("inst_holdings_signal","N/A")).upper()
+        }
         df_signals = pd.DataFrame(signals_data.items(), columns=["Agent", "Signal"])
         st.dataframe(df_signals.style.applymap(lambda x: f'color: {get_signal_color(x)}', subset=['Signal']), hide_index=True, use_container_width=True)
         st.markdown("---")
-        final_decision = res_detail.get('final_decision', 'hold').upper(); final_color = get_signal_color(final_decision)
+        final_decision = str(res_detail.get('final_decision', 'hold')).upper(); final_color = get_signal_color(final_decision)
         st.markdown(f"""<div style="border:2px solid {final_color}; border-radius:8px; padding:15px; text-align:center;"><p style="font-size:1.2em; margin-bottom:5px;">Final AI Decision</p><h2 style="color:{final_color}; margin-bottom:5px;">{final_decision}</h2><p style="font-size:1em;">Composite Score: <strong>{res_detail.get('composite_score', 0):.2f}</strong></p></div>""", unsafe_allow_html=True)
-
 # --- Streamlit UI ---
 llm_client = None
 try:
