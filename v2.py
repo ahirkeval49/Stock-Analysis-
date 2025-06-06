@@ -64,7 +64,7 @@ if 'backtest_results' not in st.session_state:
 # Data Fetchers
 # --------------------------------
 @st.cache_data
-def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame: # CORRECTED: Default period is now "max"
+def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame:
     try:
         ticker_obj = yf.Ticker(ticker)
         df = ticker_obj.history(period=period, interval=interval)
@@ -812,13 +812,11 @@ with config_cont:
         st.subheader("Backtesting Settings"); bt_ticker = st.text_input("Ticker:", "AAPL", key="bt_ticker_in_bt").upper()
         bt_capital_source = st.radio("Capital Source:", ("Manual Input", "From Saved Portfolio"), horizontal=True, key="bt_capital_source_radio")
         bt_capital = 10000 
-        
         if bt_capital_source == "Manual Input":
              bt_capital = st.number_input("Initial Capital:", 1000, 1000000, 10000, 1000, key="bt_cap_in_bt", format="%d")
         else:
             portfolio_names_bt = list(st.session_state.portfolios_data.keys())
-            if not portfolio_names_bt:
-                st.warning("No portfolios found. Create one in the Portfolio Management tab to use this feature.")
+            if not portfolio_names_bt: st.warning("No portfolios found. Create one in the Portfolio Management tab to use this feature.")
             else:
                 sel_pf_bt = st.selectbox("Select Portfolio to use its total value:", portfolio_names_bt, key="bt_pf_select")
                 holdings_bt = st.session_state.portfolios_data.get(sel_pf_bt, [])
@@ -987,7 +985,6 @@ if st.session_state.app_mode == "Live Analysis":
             if 'live_output' not in st.session_state: st.session_state.live_output = {}
             with st.spinner("⏳ Processing live analysis..."):
                 st.session_state.live_output = run_live_analysis(live_tickers, llm_client, live_configs)
-            
             st.header("📊 Live Analysis Summary"); n_tickers = len(live_tickers); cols_pr = min(n_tickers,3)
             for i in range(0,n_tickers,cols_pr):
                 row_t = live_tickers[i:i+cols_pr]; cols_ui = st.columns(len(row_t))
@@ -1005,7 +1002,6 @@ if st.session_state.app_mode == "Live Analysis":
                 res_detail = st.session_state.live_output.get(sym_detail)
                 if not res_detail or res_detail.get("error"): continue
                 with st.expander(f"🔍 Detailed Analysis for {sym_detail} ({res_detail.get('ticker_info',{}).get('longName','N/A')})"):
-                    # This now calls the full display function, replacing the st.json placeholder
                     display_detailed_analysis(res_detail)
 
 elif st.session_state.app_mode == "Backtesting":
