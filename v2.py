@@ -1379,4 +1379,4 @@ elif st.session_state.app_mode == "🤖 Virtual Trading":
 
 st.sidebar.markdown("---")
 st.sidebar.info("Educational purposes only. Not financial advice.")
-st.sidebar.markdown
+
