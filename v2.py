@@ -4,14 +4,14 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any, Optional, Tuple
 import openai
 from openai import OpenAI
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
 import re
-from urllib.parse import urljoin, urlparse
-from newsapi import NewsApiClient
+from urllib.parse import urljoin
 import json
 
 # --- Page Config (Must be the first Streamlit command) ---
@@ -20,46 +20,54 @@ st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
 # Load environment variables (if running locally)
 load_dotenv()
 
-# SEC EDGAR User-Agent
-SEC_USER_AGENT = "KevalAhirApp/1.0 keval.ahir2019@gmail.com"
+# --- Application Configuration ---
+CONFIG = {
+    "SEC_USER_AGENT": "KevalAhirApp/1.0 keval.ahir2019@gmail.com",
+    "PORTFOLIOS_FILE": "portfolios.json",
+    "VIRTUAL_PORTFOLIO_FILE": "virtual_portfolio.json",
+    "AGENT_WEIGHTS": {
+        "price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.6,
+        "fund": 0.9, "valuation_dcf": 0.5, "valuation_pe": 0.5, "sec_filings": 0.6,
+        "inst_holdings": 0.3, "analyst": 0.7, "politician_filings": 0.4, "vi_signal": 0.8
+    },
+    "AI_TRADER_UNIVERSE": {
+        "safe": ['MSFT', 'AAPL', 'JNJ', 'V', 'PG', 'GOOGL', 'JPM'],
+        "risky": ['CRWD', 'PLTR', 'U', 'COIN', 'RBLX', 'SNOW', 'MDB']
+    }
+}
 
-PORTFOLIOS_FILE = "portfolios.json"
-VIRTUAL_PORTFOLIO_FILE = "virtual_portfolio.json"
-
-# --------------------------------
-# Portfolio Helper Functions
-# --------------------------------
-def load_portfolios():
-    if os.path.exists(PORTFOLIOS_FILE):
+# --- Portfolio Helper Functions ---
+def load_portfolios() -> Dict:
+    if os.path.exists(CONFIG["PORTFOLIOS_FILE"]):
         try:
-            with open(PORTFOLIOS_FILE, 'r') as f:
+            with open(CONFIG["PORTFOLIOS_FILE"], 'r') as f:
                 data = json.load(f)
                 return data if isinstance(data, dict) else {}
         except json.JSONDecodeError:
             return {}
     return {}
 
-def save_portfolios(portfolios_data):
+def save_portfolios(portfolios_data: Dict) -> None:
     if not isinstance(portfolios_data, dict):
         st.error("Error saving portfolios: Data is not in the correct format.")
         return
-    with open(PORTFOLIOS_FILE, 'w') as f:
+    with open(CONFIG["PORTFOLIOS_FILE"], 'w') as f:
         json.dump(portfolios_data, f, indent=4)
 
-def load_virtual_portfolio():
-    if os.path.exists(VIRTUAL_PORTFOLIO_FILE):
+def load_virtual_portfolio() -> Dict:
+    if os.path.exists(CONFIG["VIRTUAL_PORTFOLIO_FILE"]):
         try:
-            with open(VIRTUAL_PORTFOLIO_FILE, 'r') as f:
+            with open(CONFIG["VIRTUAL_PORTFOLIO_FILE"], 'r') as f:
                 return json.load(f)
         except json.JSONDecodeError:
             return get_default_virtual_portfolio()
     return get_default_virtual_portfolio()
 
-def save_virtual_portfolio(data):
-    with open(VIRTUAL_PORTFOLIO_FILE, 'w') as f:
-        json.dump(data, f, indent=4, default=str) # Use default=str to handle datetimes if they exist
+def save_virtual_portfolio(data: Dict) -> None:
+    with open(CONFIG["VIRTUAL_PORTFOLIO_FILE"], 'w') as f:
+        json.dump(data, f, indent=4, default=str)
 
-def get_default_virtual_portfolio():
+def get_default_virtual_portfolio() -> Dict:
     return {
         "cash": 3500.0,
         "holdings": [],
@@ -70,34 +78,25 @@ def get_default_virtual_portfolio():
 # --- Session State Initialization ---
 if 'portfolios_data' not in st.session_state:
     st.session_state.portfolios_data = load_portfolios()
-
 if 'selected_portfolio_name' not in st.session_state:
     st.session_state.selected_portfolio_name = None
     if st.session_state.portfolios_data:
         st.session_state.selected_portfolio_name = list(st.session_state.portfolios_data.keys())[0]
-
 if 'portfolio_stock_analysis' not in st.session_state:
     st.session_state.portfolio_stock_analysis = {}
-
 if 'backtest_results' not in st.session_state:
     st.session_state.backtest_results = {}
-
 if 'live_output' not in st.session_state:
     st.session_state.live_output = {}
-
 if 'virtual_portfolio' not in st.session_state:
     st.session_state.virtual_portfolio = load_virtual_portfolio()
-
-# Initialize flags for running analysis
 if 'live_analysis_triggered' not in st.session_state:
     st.session_state.live_analysis_triggered = False
 if 'backtest_triggered' not in st.session_state:
     st.session_state.backtest_triggered = False
 
 
-# --------------------------------
-# Data Fetchers (No changes)
-# --------------------------------
+# --- Data Fetchers ---
 @st.cache_data
 def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame:
     try:
@@ -109,10 +108,10 @@ def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") 
     except Exception: return pd.DataFrame()
 
 @st.cache_data
-def fetch_ticker_info(ticker: str) -> dict:
+def fetch_ticker_info(ticker: str) -> Dict[str, Any]:
     try:
         info = yf.Ticker(ticker).info
-        if not info or (info.get('regularMarketPrice') is None and info.get('currentPrice') is None and info.get('financialCurrency') is None):
+        if not info or info.get('quoteType') == "MUTUALFUND" or (info.get('regularMarketPrice') is None and info.get('currentPrice') is None):
             return {}
         return {
             "marketCap": info.get("marketCap"), "freeCashflow": info.get("freeCashflow"),
@@ -130,32 +129,43 @@ def fetch_ticker_info(ticker: str) -> dict:
     except Exception: return {}
 
 @st.cache_data
-def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
+def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> List[dict]:
     try:
         company_name = ticker_info_data.get('longName', ticker_info_data.get('shortName', ticker))
-        ticker_obj = yf.Ticker(ticker); raw_news = []
-        try: raw_news = ticker_obj.news
-        except TypeError as te: return [{"error": f"yfinance .news type error for {ticker}: {te}", "source_api": "Yahoo Finance"}]
-        except Exception as news_exc: return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
+        ticker_obj = yf.Ticker(ticker)
+        raw_news = []
+        try:
+            raw_news = ticker_obj.news
+        except Exception as news_exc:
+            return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
+        
         enriched_news_list = []
         if not raw_news: return []
         for news_item in raw_news:
             if not isinstance(news_item, dict): continue
-            enriched_item = news_item.copy(); enriched_item['ticker'] = ticker; enriched_item['company_name'] = company_name; enriched_item['source_api'] = 'Yahoo Finance'
+            enriched_item = news_item.copy()
+            enriched_item.update({'ticker': ticker, 'company_name': company_name, 'source_api': 'Yahoo Finance'})
             if 'providerPublishTime' in news_item and news_item['providerPublishTime'] is not None:
                 try:
                     dt_object_utc = datetime.fromtimestamp(int(news_item['providerPublishTime']), tz=timezone.utc)
-                    enriched_item['publish_datetime_utc'] = dt_object_utc; enriched_item['publish_time_readable'] = dt_object_utc.strftime('%Y-%m-%d %H:%M:%S %Z')
-                except (ValueError, TypeError, OSError) as e_ts: enriched_item['publish_datetime_utc'], enriched_item['publish_time_readable'], enriched_item['publish_time_error'] = None, "N/A", str(e_ts)
-            else: enriched_item['publish_datetime_utc'], enriched_item['publish_time_readable'] = None, "N/A"
-            for key in ['title', 'publisher', 'link', 'type']: enriched_item.setdefault(key, 'N/A' if key != 'link' else '#')
+                    enriched_item['publish_datetime_utc'] = dt_object_utc
+                    enriched_item['publish_time_readable'] = dt_object_utc.strftime('%Y-%m-%d %H:%M:%S %Z')
+                except (ValueError, TypeError, OSError) as e_ts:
+                    enriched_item.update({'publish_datetime_utc': None, 'publish_time_readable': "N/A", 'publish_time_error': str(e_ts)})
+            else:
+                enriched_item.update({'publish_datetime_utc': None, 'publish_time_readable': "N/A"})
+            
+            for key in ['title', 'publisher', 'link', 'type']:
+                enriched_item.setdefault(key, 'N/A' if key != 'link' else '#')
             enriched_news_list.append(enriched_item)
+            
         enriched_news_list.sort(key=lambda x: x.get('publish_datetime_utc') or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return enriched_news_list
-    except Exception as e: return [{"error": f"Processing Yahoo Finance news for {ticker} failed: {e}", "source_api": "Yahoo Finance"}]
+    except Exception as e:
+        return [{"error": f"Processing Yahoo Finance news for {ticker} failed: {e}", "source_api": "Yahoo Finance"}]
 
 @st.cache_data(ttl=1800)
-def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_days: int = 30) -> list[dict]:
+def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_days: int = 30) -> List[dict]:
     api_key = st.secrets.get("NEWSAPI_KEY")
     if not api_key: return [{"error": "NEWSAPI_KEY not found.", "source_api": "NewsAPI.org"}]
     newsapi = NewsApiClient(api_key=api_key)
@@ -169,180 +179,122 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
             for article in all_articles_response["articles"]:
                 dt_obj_utc, readable_time = None, "N/A"
                 if article.get('publishedAt'):
-                    try: dt_obj_utc = datetime.fromisoformat(article['publishedAt'].replace('Z', '+00:00')); readable_time = dt_obj_utc.strftime('%Y-%m-%d %H:%M:%S %Z')
-                    except ValueError: pass
-                articles_list.append({"uuid": article.get('url'), "title": article.get('title', 'No Title'), "publisher": article.get('source', {}).get('name', 'N/A'), "link": article.get('url', '#'), "publish_datetime_utc": dt_obj_utc, "publish_time_readable": readable_time, "description": article.get('description'), "content_snippet": article.get('content'), "company_name": company_name, "ticker": ticker, "source_api": "NewsAPI.org"})
-        elif all_articles_response.get("status") == "error": return [{"error": f"NewsAPI Error ({ticker}): {all_articles_response.get('code')} - {all_articles_response.get('message')}", "source_api": "NewsAPI.org"}]
-        else: return [{"error": f"NewsAPI ({ticker}): No articles or unexpected structure.", "source_api": "NewsAPI.org"}]
-    except requests.exceptions.RequestException as e: return [{"error": f"NewsAPI request failed for {ticker}: {e}", "source_api": "NewsAPI.org"}]
-    except Exception as e: return [{"error": f"Unexpected error with NewsAPI for {ticker}: {e}", "source_api": "NewsAPI.org"}]
+                    try:
+                        dt_obj_utc = datetime.fromisoformat(article['publishedAt'].replace('Z', '+00:00'))
+                        readable_time = dt_obj_utc.strftime('%Y-%m-%d %H:%M:%S %Z')
+                    except ValueError:
+                        pass
+                articles_list.append({
+                    "uuid": article.get('url'), "title": article.get('title', 'No Title'),
+                    "publisher": article.get('source', {}).get('name', 'N/A'), "link": article.get('url', '#'),
+                    "publish_datetime_utc": dt_obj_utc, "publish_time_readable": readable_time,
+                    "description": article.get('description'), "content_snippet": article.get('content'),
+                    "company_name": company_name, "ticker": ticker, "source_api": "NewsAPI.org"
+                })
+        elif all_articles_response.get("status") == "error":
+            return [{"error": f"NewsAPI Error ({ticker}): {all_articles_response.get('code')} - {all_articles_response.get('message')}", "source_api": "NewsAPI.org"}]
+        else:
+            return [{"error": f"NewsAPI ({ticker}): No articles or unexpected structure.", "source_api": "NewsAPI.org"}]
+    except requests.exceptions.RequestException as e:
+        return [{"error": f"NewsAPI request failed for {ticker}: {e}", "source_api": "NewsAPI.org"}]
+    except Exception as e:
+        return [{"error": f"Unexpected error with NewsAPI for {ticker}: {e}", "source_api": "NewsAPI.org"}]
     return articles_list
 
-@st.cache_data(ttl=24*3600)
-def get_all_cik_ticker_mappings():
+@st.cache_data(ttl=24 * 3600)
+def get_all_cik_ticker_mappings() -> Dict[str, str]:
     try:
         url = "https://www.sec.gov/files/company_tickers.json"
-        response = requests.get(url, headers={'User-Agent': SEC_USER_AGENT}); response.raise_for_status()
+        response = requests.get(url, headers={'User-Agent': CONFIG["SEC_USER_AGENT"]})
+        response.raise_for_status()
         return {item['ticker']: str(item['cik_str']).zfill(10) for item in response.json() if 'ticker' in item and 'cik_str' in item}
-    except Exception as e: st.error(f"CRITICAL: Failed CIK mappings: {e}."); return {}
+    except Exception as e:
+        st.error(f"CRITICAL: Failed to fetch CIK mappings: {e}.")
+        return {}
 TICKER_TO_CIK_MAP = get_all_cik_ticker_mappings()
 
-def get_cik_for_ticker(ticker: str) -> str | None: return TICKER_TO_CIK_MAP.get(ticker.upper())
+def get_cik_for_ticker(ticker: str) -> Optional[str]:
+    return TICKER_TO_CIK_MAP.get(ticker.upper())
 
-@st.cache_data(ttl=4*3600)
-def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]:
+@st.cache_data(ttl=4 * 3600)
+def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> List[dict]:
     cik = get_cik_for_ticker(ticker_symbol)
     if not cik:
-        try:
-            headers = {'User-Agent': SEC_USER_AGENT}
-            lookup_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={ticker_symbol.upper()}&owner=exclude&count=10"
-            response = requests.get(lookup_url, headers=headers, timeout=10); response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
-            cik_anchor = soup.find('a', href=re.compile(r"CIK=(\d{10})"))
-            if cik_anchor:
-                match = re.search(r"CIK=(\d{10})", cik_anchor['href'])
-                if match: cik = match.group(1)
-            if not cik:
-                cik_text_match = re.search(r"CIK:\s*(\d{10})", soup.get_text(), re.IGNORECASE)
-                if cik_text_match: cik = cik_text_match.group(1)
-        except Exception: pass
-    if not cik: return [{"error": f"SEC: CIK not found for {ticker_symbol}."}]
-    cik_padded = str(cik).zfill(10)
-    submissions_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
-    headers = {'User-Agent': SEC_USER_AGENT}; filings_list = []
+        return [{"error": f"SEC: CIK not found for {ticker_symbol} in local map."}]
+    
+    headers = {'User-Agent': CONFIG["SEC_USER_AGENT"]}
+    submissions_url = f"https://data.sec.gov/submissions/CIK{str(cik).zfill(10)}.json"
+    
     try:
-        response = requests.get(submissions_url, headers=headers, timeout=20); response.raise_for_status()
+        response = requests.get(submissions_url, headers=headers, timeout=20)
+        response.raise_for_status()
         submissions_data = response.json()
-        today, date_limit = datetime.now(timezone.utc), datetime.now(timezone.utc) - timedelta(days=lookback_days)
-        if 'filings' in submissions_data and 'recent' in submissions_data['filings']:
-            recent = submissions_data['filings']['recent']
-            forms, dates, acc_nos, docs = recent.get('form',[]), recent.get('filingDate',[]), recent.get('accessionNumber',[]), recent.get('primaryDocument',[])
-            metadata = []
-            for i in range(len(forms)):
-                try:
-                    if datetime.strptime(dates[i], '%Y-%m-%d').replace(tzinfo=timezone.utc) >= date_limit:
-                        metadata.append({"form_type": forms[i], "filing_date_str": dates[i], "accession_number": acc_nos[i], "primary_document": docs[i]})
-                except (ValueError, IndexError): continue
-            xml_fetches, max_xml, max_other = 0, 20, 15
-            for info in metadata:
-                form, date_str, acc_no, doc_name = info["form_type"], info["filing_date_str"], info["accession_number"], info["primary_document"]
+    except requests.exceptions.RequestException as e:
+        return [{"error": f"SEC Request error for {ticker_symbol}: {e}"}]
+    except Exception as e:
+        return [{"error": f"SEC Unexpected error for {ticker_symbol}: {e}"}]
+        
+    filings_list = []
+    if 'filings' in submissions_data and 'recent' in submissions_data['filings']:
+        recent = submissions_data['filings']['recent']
+        date_limit = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        
+        for i in range(len(recent.get('form', []))):
+            try:
+                filing_date = datetime.strptime(recent['filingDate'][i], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                if filing_date < date_limit: continue
+                
+                form_type = recent['form'][i]
+                acc_no = recent['accessionNumber'][i]
+                cik_padded = str(cik).zfill(10)
                 acc_no_dashless = acc_no.replace('-', '')
                 idx_link = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{acc_no}-index.html"
-                if form == '4' and doc_name.lower().endswith(('.xml', '.xsd')):
-                    if xml_fetches >= max_xml: continue
-                    xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}"
-                    try:
-                        filing_resp = requests.get(xml_url, headers=headers, timeout=10)
-                        if filing_resp.status_code != 200: continue
-                        soup_xml = BeautifulSoup(filing_resp.content, 'xml'); xml_fetches += 1
-                        owner_tag = soup_xml.find('reportingOwner'); owner_name, owner_rel = "N/A", "N/A"
-                        if owner_tag:
-                            if owner_tag.find('reportingOwnerId') and owner_tag.find('reportingOwnerId').find('rptOwnerName'): owner_name = owner_tag.find('reportingOwnerId').find('rptOwnerName').text.strip()
-                            rel_tag = owner_tag.find('reportingOwnerRelationship'); rels = []
-                            if rel_tag:
-                                if rel_tag.find('isDirector') and rel_tag.find('isDirector').text in ['1','true']: rels.append("Director")
-                                if rel_tag.find('isOfficer') and rel_tag.find('isOfficer').text in ['1','true']: rels.append(f"Officer ({rel_tag.find('officerTitle').text.strip() if rel_tag.find('officerTitle') and rel_tag.find('officerTitle').text else ''})")
-                                if rel_tag.find('isTenPercentOwner') and rel_tag.find('isTenPercentOwner').text in ['1','true']: rels.append(">10% Owner")
-                                if rels: owner_rel = ", ".join(filter(None, rels))
-                        for table_name in ['nonDerivativeTable', 'derivativeTable']:
-                            table = soup_xml.find(table_name)
-                            if not table: continue
-                            for tx in table.find_all(['nonDerivativeTransaction', 'derivativeTransaction']):
-                                tx_date_tag, tx_code_tag = tx.find('transactionDate'), tx.find('transactionCoding')
-                                tx_date = tx_date_tag.find('value').text.strip() if tx_date_tag and tx_date_tag.find('value') else "N/A"
-                                tx_code = tx_code_tag.find('transactionCode').text.strip().upper() if tx_code_tag and tx_code_tag.find('transactionCode') else "N/A"
-                                shares, price = 0.0, None
-                                amounts = tx.find('transactionAmounts')
-                                if amounts and amounts.find('transactionShares') and amounts.find('transactionShares').find('value'):
-                                    try: shares = float(amounts.find('transactionShares').find('value').text.strip())
-                                    except ValueError: continue
-                                price_node = tx.find('transactionPricePerShare')
-                                if price_node and price_node.find('value'):
-                                    try: price = float(price_node.find('value').text.strip())
-                                    except ValueError: price = None
-                                ad_node = tx.find('transactionAcquiredDisposedCode'); ad_code = ad_node.find('value').text.strip().upper() if ad_node and ad_node.find('value') else "N/A"
-                                if shares != 0: filings_list.append({"is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": date_str, "transaction_date": tx_date, "reporting_owner": owner_name, "owner_relationship": owner_rel, "transaction_code": tx_code, "acq_disp_code": ad_code, "shares": shares, "price_per_share": price, "link_to_filing": idx_link})
-                    except: pass
-                elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other:
-                    filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": date_str, "form_type": form, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}", "summary_link": idx_link})
-            if not filings_list and xml_fetches > 0: return [{"error": f"SEC: {xml_fetches} Form 4s for {ticker_symbol}, but no tx parsed."}]
-            if not filings_list: return [{"error": f"SEC: No relevant filings for {ticker_symbol} (CIK:{cik_padded})."}]
-        else: return [{"error": f"SEC: No recent filings data for {ticker_symbol} (CIK:{cik_padded})."}]
-    except requests.exceptions.HTTPError as e: return [{"error": f"SEC HTTP error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
-    except requests.exceptions.RequestException as e: return [{"error": f"SEC Request error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
-    except Exception as e: return [{"error": f"SEC Unexpected error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
-    filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True); return filings_list
+                
+                filing_data = {
+                    "ticker": ticker_symbol,
+                    "filing_date_str": recent['filingDate'][i],
+                    "form_type": form_type,
+                    "summary_link": idx_link,
+                }
+                filings_list.append(filing_data)
 
-@st.cache_data(ttl=6*3600)
-def fetch_inst_filings(ticker: str) -> list[dict]:
+            except (ValueError, IndexError):
+                continue
+    else:
+        return [{"error": f"SEC: No recent filings data found for {ticker_symbol}."}]
+        
+    filings_list.sort(key=lambda x: x.get('filing_date_str', '1900-01-01'), reverse=True)
+    return filings_list
+
+@st.cache_data(ttl=6 * 3600)
+def fetch_inst_filings(ticker: str) -> List[dict]:
     try:
         df_holders = yf.Ticker(ticker).institutional_holders
         if df_holders is not None and not df_holders.empty:
-            if 'Shares' in df_holders.columns: df_holders['Shares'] = pd.to_numeric(df_holders['Shares'], errors='coerce').fillna(0)
-            if '% Out' in df_holders.columns: df_holders['% Out'] = pd.to_numeric(df_holders['% Out'], errors='coerce').fillna(0.0)
-            if 'Date Reported' in df_holders.columns: df_holders['Date Reported'] = df_holders['Date Reported'].astype(str)
+            for col in ['Shares', '% Out']:
+                if col in df_holders.columns:
+                    df_holders[col] = pd.to_numeric(df_holders[col], errors='coerce').fillna(0)
+            if 'Date Reported' in df_holders.columns:
+                df_holders['Date Reported'] = df_holders['Date Reported'].astype(str)
             return df_holders.to_dict("records")
-        return [{"error": f"No yfinance institutional holder data for {ticker}."}]
-    except Exception as e: return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
+        return [{"error": f"No institutional holder data for {ticker}."}]
+    except Exception as e:
+        return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
 
-@st.cache_data(ttl=4 * 3600)
-def fetch_value_investing_io_data(ticker: str) -> dict:
-    url = f"https://valueinvesting.io/{ticker.upper()}/valuation/fair-value"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36'}
+@st.cache_data(ttl=6 * 3600)
+def fetch_recommendations(ticker: str) -> pd.DataFrame:
     try:
-        response = requests.get(url, headers=headers, timeout=15); response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser'); target_text = None
-        for p in soup.find_all('p'):
-            text = p.get_text(strip=True)
-            if ticker.upper() in text and "Fair Value" in text and ("Peter Lynch" in text or "based on" in text or "valuation model" in text):
-                target_text = text; break
-        if not target_text: return {"error": f"VI.io: Peter Lynch Fair Value paragraph not found for {ticker}."}
-        pattern = re.compile(r"As of (?P<date>[\d]{4}-[\d]{2}-[\d]{2}), the Fair Value of .*?\(.*?" + re.escape(ticker.upper()) + r".*?\) is (?P<fair_value>[\d\.]+) USD\.?" + r"(?:.*?With the current market price of (?P<market_price>[\d\.]+) USD, the upside of .*? is (?P<upside_percent>[-+]?\d+\.?\d*)%\.?)?")
-        match = pattern.search(target_text)
-        if match:
-            data = match.groupdict()
-            return {"ticker": ticker, "vi_valuation_date": data.get("date"), "vi_fair_value": float(data.get("fair_value")) if data.get("fair_value") else None, "vi_site_market_price": float(data.get("market_price")) if data.get("market_price") else None, "vi_upside_percent": float(data.get("upside_percent")) if data.get("upside_percent") else None, "vi_full_text": target_text, "vi_data_source_url": url, "error": None}
-        else:
-            fv_match = re.search(r"Fair Value.*?is ([\d\.]+) USD", target_text)
-            if fv_match: return {"ticker": ticker, "vi_valuation_date": "N/A (generic)", "vi_fair_value": float(fv_match.group(1)) if fv_match.group(1) else None, "vi_site_market_price": None, "vi_upside_percent": None, "vi_full_text": target_text, "vi_data_source_url": url, "error": None, "note": "Generic parse."}
-            return {"error": f"VI.io: Could not parse details for {ticker} from: '{target_text[:200]}...'"}
-    except requests.exceptions.HTTPError as http_err: return {"error": f"VI.io: HTTP error for {ticker} ({http_err.response.status_code if http_err.response else 'Unknown'}): {url}"}
-    except requests.exceptions.RequestException as req_err: return {"error": f"VI.io: Request error for {ticker}: {req_err}"}
-    except Exception as e: return {"error": f"VI.io: Unexpected error for {ticker}: {e}"}
+        recs = yf.Ticker(ticker).recommendations
+        if recs is not None and not recs.empty:
+            recs.index = pd.to_datetime(recs.index).tz_localize(None)
+            last_12_months = datetime.now() - pd.DateOffset(months=12)
+            recs = recs[recs.index >= last_12_months].sort_index(ascending=False)
+            recs.rename(columns={"Firm": "Firm", "To Grade": "Rating"}, inplace=True, errors='ignore')
+            return recs
+        return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
-@st.cache_data(ttl=3600)
-def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
-    url = f"https://www.capitoltrades.com/trades?asset={ticker.upper()}&pageSize=100&perPage=100"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'}
-    trades_list = []
-    try:
-        response = requests.get(url, headers=headers, timeout=20); response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
-        trade_rows = soup.select("a[href^='/trades/'][class*='trade-row'], a[href^='/trades/'][class*='issuer-trade-row']")
-        if not trade_rows: trade_rows = soup.find_all('a', href=lambda href: href and href.startswith('/trades/'))
-        if not trade_rows: return [{"error": f"CT: No trade rows found for {ticker}. Website HTML structure may have changed or scraping blocked. This feature is experimental."}]
-        for row in trade_rows[:20]:
-            name_tag = row.find(['div','span'], class_=lambda x: x and ('politician-name' in x or 'filer-name' in x))
-            type_tag = row.find(['div','span'], class_=lambda x: x and ('tx-type' in x or 'transaction-type' in x))
-            val_tag = row.find(['div','span'], class_=lambda x: x and ('tx-value' in x or 'transaction-value' in x))
-            date_tag = row.find(['div','span'], class_=lambda x: x and ('tx-date' in x or 'transaction-date' in x))
-            if all([name_tag, type_tag, val_tag, date_tag]):
-                name, tx_type_text = name_tag.text.strip(), type_tag.text.strip().lower()
-                tx_type = "purchase" if "purchase" in tx_type_text else ("sale" if "sale" in tx_type_text else "other")
-                val_range, date_str, val_est = val_tag.text.strip(), date_tag.text.strip(), 0
-                matches = re.findall(r'\$([\d,]+)', val_range)
-                if matches:
-                    try: val_est = int(matches[0].replace(',',''))
-                    except ValueError: pass
-                trades_list.append({"politician_name": name, "transaction_type": tx_type, "value_range": val_range, "value_estimate_lower": val_est, "date_str": date_str, "source_url": urljoin("https://www.capitoltrades.com", row['href'])})
-        if not trades_list and trade_rows: return [{"error": f"CT: Found rows for {ticker}, but failed parsing. HTML details may have changed."}]
-        return trades_list
-    except requests.exceptions.Timeout: return [{"error": f"CT: Timeout fetching {ticker}."}]
-    except requests.exceptions.HTTPError as e: return [{"error": f"CT: HTTP error {e.response.status_code if e.response else ''} for {ticker}."}]
-    except requests.exceptions.RequestException as e: return [{"error": f"CT: Request error for {ticker}: {e}."}]
-    except Exception as e: return [{"error": f"CT: Parsing error for {ticker}: {e}."}]
-
-# --- LLM Client and Agent Classes ---
 class ModelClient:
     def __init__(self, api_key: str, provider: str = "openai"):
         self.api_key, self.provider = api_key, provider
@@ -507,21 +459,21 @@ class AnalystRatingAgent:
 
 class SECFilingAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        filings = data.get("sec_all_filings_raw", [])
-        if not filings or (isinstance(filings[0], dict) and "error" in filings[0]):
-            error_msg = filings[0].get("error") if filings else f"SEC: No raw filings for {ticker}."
-            return {
-                "ticker": ticker, "sec_filings_signal": "hold", "sec_filings_error": error_msg,
-                "sec_recent_form4_transactions": [], "sec_other_recent_filings": []
-            }
+        filings, err = data.get("sec_all_filings_raw",[]), None
+        if not filings or (isinstance(filings[0],dict) and "error" in filings[0]):
+            err = filings[0].get("error") if filings and isinstance(filings[0],dict) else f"SEC: No raw filings for {ticker}."
+            return {"ticker":ticker, "sec_filings_signal":"hold", "sec_filings_error":err, "sec_recent_form4_transactions":[], "sec_other_recent_filings":[]}
         
-        # This logic can be expanded. For now, it separates Form 4s from others.
         form4_filings = [f for f in filings if f.get("form_type") == '4']
         other_filings = [f for f in filings if f.get("form_type") != '4']
         
+        insider_signal = "hold"
+        if any(f.get('form_type') == '4' for f in form4_filings):
+            insider_signal = "hold" 
+
         return {
             "ticker": ticker,
-            "sec_filings_signal": "hold",
+            "sec_filings_signal": insider_signal,
             "sec_filings_error": None,
             "sec_recent_form4_transactions": form4_filings,
             "sec_other_recent_filings": other_filings
