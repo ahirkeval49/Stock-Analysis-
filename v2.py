@@ -831,7 +831,7 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     trades = (log_df.signal != log_df.signal.shift()).fillna(False).sum()//2
     return {"Initial Capital":f"${initial_capital:,.2f}", "Final Portfolio Value":f"${log_df.portfolio_value.iloc[-1]:,.2f}", "Total Return (%)":f"{total_ret:.2f}%", "Annualized Return (%)":f"{ann_ret:.2f}%", "Annualized Volatility (%)":f"{ann_vol:.2f}%", "Sharpe Ratio":f"{sharpe:.2f}", "Max Drawdown (%)":f"{max_dd:.2f}%", "Number of Trades (approx)":f"{trades}"}, log_df
 
-# --- Detailed Analysis Display Function ---
+# Replace your entire display_detailed_analysis function with this one.
 def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A"); ticker_info = res_detail.get("ticker_info", {})
     tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
@@ -843,6 +843,7 @@ def display_detailed_analysis(res_detail):
         if signal == "SELL": return "red"
         return "orange"
 
+    # --- TAB 1: Chart & Core (Unchanged) ---
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
         price_hist_chart = fetch_price_history(ticker, period="1y")
@@ -860,6 +861,7 @@ def display_detailed_analysis(res_detail):
             st.metric(label="Momentum Signal", value=momentum_signal)
             st.markdown(f"""<div style="font-size: 14px;"><li><b>1-Month Momentum:</b> {res_detail.get('momentum_1m', 0) * 100:.2f}%</li><li><b>12-Month Momentum:</b> {res_detail.get('momentum_12m', 0) * 100:.2f}%</li><li><b>Beta:</b> {res_detail.get('beta', 0):.2f}</li></div>""", unsafe_allow_html=True)
 
+    # --- TAB 2: Fundamentals (Unchanged) ---
     with tabs[1]:
         st.subheader(f"Fundamental Overview: {ticker_info.get('longName', '')}"); st.caption(f"**Sector:** {ticker_info.get('sector', 'N/A')} | **Industry:** {ticker_info.get('industry', 'N/A')}")
         if ticker_info.get('longBusinessSummary'):
@@ -883,6 +885,7 @@ def display_detailed_analysis(res_detail):
         health_data = {"Return on Equity (ROE)": f"{roe_val * 100:.2f}%" if isinstance(roe_val,(int,float)) else "N/A", "Debt to Equity": f"{de_val:.2f}" if isinstance(de_val,(int,float)) else "N/A", "EV/Revenue": f"{etr_val:.2f}" if isinstance(etr_val,(int,float)) else "N/A", "EV/EBITDA": f"{ete_val:.2f}" if isinstance(ete_val,(int,float)) else "N/A"}
         st.table(pd.DataFrame(health_data.items(), columns=["Metric", "Value"]))
 
+    # --- TAB 3: Analyst & Fair Value (Unchanged) ---
     with tabs[2]:
         val_col1, val_col2 = st.columns(2)
         with val_col1:
@@ -898,38 +901,66 @@ def display_detailed_analysis(res_detail):
             st.metric(label=f"VI.io Signal (Fair Value: {vi_fv_label})", value=vi_signal, delta=f"{up_val:.2f}% Upside" if isinstance(up_val,(int,float)) else None, delta_color="inverse")
             if res_detail.get('vi_valuation_text_display'): st.markdown(f"> *{res_detail.get('vi_valuation_text_display')}*")
 
+    # --- TAB 4: News & Filings (UPDATED) ---
     with tabs[3]:
-        st.subheader("News Analysis & Filings")
+        st.subheader("News, Filings & Ownership")
         if res_detail.get('news_summary'):
             with st.container(border=True):
                 st.markdown("**AI-Generated News Summary**"); st.write(res_detail.get('news_summary'))
-                headlines = res_detail.get('news_headlines_for_popover', [])
-                if headlines:
-                    with st.popover("View News Sources & Links"):
-                        for line in headlines: st.markdown(f"- {line}")
-                if res_detail.get('sentiment_error'): st.warning(f"Sentiment Analysis Note: {res_detail.get('sentiment_error')}")
-        file_col1, file_col2 = st.columns(2)
-        with file_col1:
-            st.markdown("**SEC Filings**"); st.metric("Insider Signal", str(res_detail.get('sec_filings_signal', 'hold')).upper())
-            with st.popover("View Recent Filings"):
-                filings = res_detail.get('sec_other_recent_filings', [])
-                if filings:
-                    for f in filings: st.write(f"**{f.get('filing_date')}**: Form {f.get('form_type')} - [Link]({f.get('summary_link')})")
-                else: st.info("No recent SEC filings found.")
-        with file_col2:
-            st.markdown("**Institutional Holdings**"); st.metric("Institutional Signal", str(res_detail.get('inst_holdings_signal', 'hold')).upper())
-            with st.popover("View Top 10 Institutional Holders"):
-                holders = res_detail.get('inst_top_holders', [])
-                if holders:
-                    df_holders = pd.DataFrame(holders)
-                    df_holders = df_holders.rename(columns={"% Out":"% of Outstanding"})
-                    available_cols = [col for col in ["Holder", "Shares", "% of Outstanding"] if col in df_holders.columns]
-                    column_config = {}
-                    if "% of Outstanding" in df_holders.columns:
-                        column_config["% of Outstanding"] = st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=max(0.10, df_holders["% of Outstanding"].max()))
-                    st.dataframe(df_holders[available_cols], column_config=column_config, hide_index=True, use_container_width=True)
-                else: st.info("No institutional holder data available.")
+        
+        st.markdown("---")
 
+        # --- Section for All Company SEC Filings ---
+        st.subheader("All Recent Company Filings (1-Year)")
+        other_filings = res_detail.get('sec_other_recent_filings', [])
+        if other_filings:
+            df_other_filings = pd.DataFrame(other_filings)
+            df_other_display = df_other_filings.rename(columns={
+                "filing_date": "Filing Date", "form_type": "Form Type", "summary_link": "SEC Link"
+            })
+            st.dataframe(df_other_display[["Filing Date", "Form Type", "SEC Link"]],
+                         use_container_width=True, hide_index=True,
+                         column_config={"SEC Link": st.column_config.LinkColumn("🔗 Link")})
+        else:
+            st.info("No other major company filings (like 10-K, 10-Q, 8-K) found in the last year.")
+        
+        st.markdown("---")
+        
+        # --- Section for Insider Transactions ---
+        st.subheader(f"Insider Transactions (Form 4)")
+        st.metric("Overall Insider Signal (1-Year)", str(res_detail.get('sec_filings_signal', 'hold')).upper())
+        form4_tx = res_detail.get('sec_recent_form4_transactions', [])
+        if form4_tx:
+            df_form4 = pd.DataFrame(form4_tx)
+            def get_tx_type(row):
+                if row.get('transaction_code') == 'P': return "Purchase"
+                if row.get('transaction_code') == 'S': return "Sale"
+                return row.get('transaction_code')
+            df_form4['type'] = df_form4.apply(get_tx_type, axis=1)
+            df_form4_display = df_form4[["transaction_date", "reporting_owner", "owner_relationship", "type", "shares", "price_per_share", "link_to_filing"]].rename(columns={"transaction_date": "Date", "reporting_owner": "Insider Name", "owner_relationship": "Relationship", "type": "Type", "shares": "Shares", "price_per_share": "Price/Share", "link_to_filing": "SEC Filing"})
+            st.dataframe(df_form4_display, use_container_width=True, hide_index=True,
+                         column_config={"Shares": st.column_config.NumberColumn(format="%.0f"), "Price/Share": st.column_config.NumberColumn(format="$%.2f"), "SEC Filing": st.column_config.LinkColumn("🔗 Link")})
+        else:
+            st.info("No insider transactions (Form 4) found in the last year.")
+
+        st.markdown("---")
+
+        # --- Section for Institutional Holdings ---
+        st.subheader("Top Institutional Holdings")
+        st.metric("Overall Institutional Signal", str(res_detail.get('inst_holdings_signal', 'hold')).upper())
+        st.caption("Data derived from quarterly 13F filings submitted by institutions.")
+        holders = res_detail.get('inst_top_holders', [])
+        if holders:
+            df_holders = pd.DataFrame(holders)
+            cols_to_display = ["Holder", "Shares", "% Out", "Date Reported"]
+            available_cols = [col for col in cols_to_display if col in df_holders.columns]
+            df_holders_display = df_holders[available_cols].rename(columns={"% Out": "% of Outstanding", "Date Reported": "As Of Date"})
+            st.dataframe(df_holders_display, hide_index=True, use_container_width=True,
+                         column_config={"% of Outstanding": st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=max(0.10, df_holders_display["% of Outstanding"].max()) if not df_holders_display.empty else 0.1), "Shares": st.column_config.NumberColumn(format="%.0f")})
+        else:
+            st.info("No institutional holder data available from primary data source.")
+
+    # --- TAB 5: All Signals (Unchanged) ---
     with tabs[4]:
         st.subheader("All Agent Signals at a Glance")
         signals_data = {"Price Signal (SMA/RSI)": str(res_detail.get("price_signal","N/A")).upper(), "Momentum Signal": str(res_detail.get("momentum_signal","N/A")).upper(), "Volatility Signal": str(res_detail.get("volatility_signal","N/A")).upper(), "Fundamental Signal": str(res_detail.get("fund_signal","N/A")).upper(), "Analyst Signal": str(res_detail.get("analyst_signal","N/A")).upper(), "ValueInvesting.io Signal": str(res_detail.get("vi_signal","N/A")).upper(), "News Sentiment Signal": str(res_detail.get("sentiment_signal","N/A")).upper(), "SEC Filings Signal": str(res_detail.get("sec_filings_signal","N/A")).upper(), "Institutional Signal": str(res_detail.get("inst_holdings_signal","N/A")).upper()}
@@ -938,7 +969,6 @@ def display_detailed_analysis(res_detail):
         st.markdown("---")
         final_decision = str(res_detail.get('final_decision', 'hold')).upper(); final_color = get_signal_color(final_decision)
         st.markdown(f"""<div style="border:2px solid {final_color}; border-radius:8px; padding:15px; text-align:center;"><p style="font-size:1.2em; margin-bottom:5px;">Final AI Decision</p><h2 style="color:{final_color}; margin-bottom:5px;">{final_decision}</h2><p style="font-size:1em;">Composite Score: <strong>{res_detail.get('composite_score', 0):.2f}</strong></p></div>""", unsafe_allow_html=True)
-
 # --- Streamlit UI ---
 llm_client = None
 try:
