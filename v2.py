@@ -1377,6 +1377,4 @@ elif st.session_state.app_mode == "🤖 Virtual Trading":
         else:
             st.info("No transactions have been made yet.")
 
-st.sidebar.markdown("---")
-st.sidebar.info("Educational purposes only. Not financial advice.")
 
