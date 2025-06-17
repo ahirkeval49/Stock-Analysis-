@@ -297,18 +297,48 @@ def fetch_recommendations(ticker: str) -> pd.DataFrame:
 
 # ... (All Agent classes are unchanged and should be pasted here)
 
-# --- Display Function (Corrected and Final) ---
+def run_live_analysis(tickers, llm_client, configs):
+    results = {}
+    progress_bar = st.progress(0, text="Starting analysis...")
+    for i, t in enumerate(tickers):
+        progress_text = f"Analyzing {t}... ({i+1}/{len(tickers)})"
+        progress_bar.progress((i + 1) / len(tickers), text=progress_text)
+        price_history_full = fetch_price_history(t, period="max")
+        if price_history_full.empty:
+            results[t] = {"error": f"Price history unavailable for {t}.", "ticker": t, "final_decision":"error", "composite_score":0}; continue
+        ticker_info = fetch_ticker_info(t)
+        if not ticker_info or not ticker_info.get("financialCurrency"):
+            err_msg = f"Core ticker info unavailable. Invalid/delisted ticker for {t}."
+            results[t] = {"error": err_msg, "ticker": t, "final_decision":"error", "composite_score":0}; continue
+        
+        current_price_for_ticker = ticker_info.get("currentPrice") or price_history_full["Close"].iloc[-1]
+        
+        data_bundle = {
+            "price_history": price_history_full,
+            "ticker_info": ticker_info,
+            "news": fetch_enriched_news(t, ticker_info) if configs.get("use_sentiment") else [],
+            "sec_all_filings_raw": fetch_all_sec_filings(t) if configs.get("use_filings") else [],
+            "institutional_holdings": fetch_inst_filings(t) if configs.get("use_filings") else [],
+            "recommendations": fetch_recommendations(t)
+        }
+        
+        final_analysis = {
+            "ticker": t,
+            "current_price_display": current_price_for_ticker,
+            "final_decision": "HOLD",
+            "composite_score": 0.0
+        }
+        final_analysis.update(data_bundle)
+        results[t] = final_analysis
+        
+    progress_bar.empty()
+    return results
+
 def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A")
     ticker_info = res_detail.get("ticker_info", {})
     tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
     tabs = st.tabs(tab_titles)
-
-    def get_signal_color(signal):
-        signal = str(signal).upper()
-        if signal in ["BUY", "STRONG_BUY"]: return "green"
-        if signal == "SELL": return "red"
-        return "orange"
 
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
@@ -317,17 +347,16 @@ def display_detailed_analysis(res_detail):
             st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
         else:
             st.warning("Price chart data not available.")
-        # ... (Placeholder for the rest of this tab's content)
 
     with tabs[1]:
         st.subheader(f"Fundamental Overview: {ticker_info.get('longName', '')}")
         st.caption(f"**Sector:** {ticker_info.get('sector', 'N/A')} | **Industry:** {ticker_info.get('industry', 'N/A')}")
-        # ... (Placeholder for the rest of this tab's content)
+        if ticker_info.get('longBusinessSummary'):
+            with st.popover("Show Business Summary"):
+                st.markdown(ticker_info.get('longBusinessSummary'))
 
     with tabs[2]:
         st.subheader("Analyst & Fair Value Analysis")
-        # ... (Placeholder for the rest of this tab's content)
-        st.markdown("---")
         st.subheader("Recent Analyst Rating Changes (1-Year)")
         recommendations_df = res_detail.get('recommendations')
         if recommendations_df is not None and not recommendations_df.empty:
@@ -337,7 +366,6 @@ def display_detailed_analysis(res_detail):
 
     with tabs[3]:
         st.subheader("News, Filings & Ownership")
-        st.markdown("---")
         st.subheader("All Recent Company Filings (1-Year)")
         all_filings = res_detail.get('sec_all_filings_raw', [])
         if all_filings and isinstance(all_filings, list) and not (isinstance(all_filings[0], dict) and all_filings[0].get("error")):
@@ -350,12 +378,9 @@ def display_detailed_analysis(res_detail):
             if final_cols:
                 st.dataframe(df_display[final_cols], use_container_width=True, hide_index=True,
                              column_config={"SEC Link": st.column_config.LinkColumn("🔗 Link", validate=True)})
-            else:
-                st.info("Found filings, but could not display them due to missing column data.")
         else:
             st.info("No major company filings found in the last year.")
-            
-        st.markdown("---")
+        
         st.subheader("Top Institutional Holdings")
         holders = res_detail.get('institutional_holdings', [])
         if holders and isinstance(holders, list) and not (isinstance(holders[0], dict) and holders[0].get("error")):
@@ -376,9 +401,32 @@ def display_detailed_analysis(res_detail):
 
     with tabs[4]:
         st.subheader("All Agent Signals at a Glance")
-        # ... (Placeholder for the rest of this tab's content)
 
-
-# --- Main UI Logic ---
+# --- Main UI ---
 st.title("🚀 AI Hedge Fund Simulator")
-# ... (The rest of your UI code, as it was in the last full version, should be pasted here)
+st.header("⚙️ Configuration")
+with st.container(border=True):
+    app_mode = st.radio("Select Mode:", ["Live Analysis", "Backtesting", "Virtual Trading"], horizontal=True)
+    st.markdown("---")
+
+    if app_mode == "Live Analysis":
+        st.subheader("Live Analysis Settings")
+        tickers_in_live = st.text_input("Tickers (comma-separated):", "AAPL,MSFT,GOOG,CRWD")
+        use_filings = st.checkbox("SEC & Inst. Filings", value=True)
+        use_sentiment = st.checkbox("News & Sentiment", value=True)
+        
+        if st.button("🚀 Run Live Analysis", use_container_width=True, type="primary"):
+            live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
+            if live_tickers:
+                with st.spinner("⏳ Processing live analysis..."):
+                    st.session_state.live_output = run_live_analysis(None, None, {"use_filings": use_filings, "use_sentiment": use_sentiment, "tickers": live_tickers})
+                    st.session_state.live_analysis_triggered = True
+                    st.rerun()
+
+st.markdown("---")
+if st.session_state.get('live_analysis_triggered'):
+    st.header("📊 Live Analysis Summary")
+    for ticker, res_detail in st.session_state.live_output.items():
+        if res_detail and not res_detail.get("error"):
+            with st.expander(f"🔍 Detailed Analysis for {ticker}", expanded=True):
+                display_detailed_analysis(res_detail)
