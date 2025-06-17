@@ -1035,18 +1035,197 @@ with config_cont:
         # This section remains self-contained and does not need a separate results area.
         # The logic is unchanged.
         st.subheader("💼 Portfolio Management")
-        # ... (all the portfolio management UI code from your original script) ...
-        # (For brevity, I'm omitting the full code here, but it's the same as before)
-        st.sidebar.subheader("Portfolio Actions")
+        # --- Portfolio Selection ---
         portfolio_names_list = list(st.session_state.portfolios_data.keys())
-        # ... the rest of your portfolio management code
+
         if not portfolio_names_list:
-            st.session_state.portfolios_data["My First Portfolio"] = []
+            # Create a default portfolio if none exist
+            st.session_state.portfolios_data["My First Portfolio"] = {"holdings": [], "cash": 10000.0} # Initialize with cash
             st.session_state.selected_portfolio_name = "My First Portfolio"
-            save_portfolios(st.session_state.portfolios_data); st.rerun()
-        if st.session_state.selected_portfolio_name not in portfolio_names_list and portfolio_names_list:
-            st.session_state.selected_portfolio_name = portfolio_names_list[0]
-        # ... and so on.
+            save_portfolios(st.session_state.portfolios_data)
+            st.rerun() # Rerun to show the newly created portfolio
+
+        col_pf1, col_pf2, col_pf3 = st.columns([3, 1, 1])
+
+        st.session_state.selected_portfolio_name = col_pf1.selectbox(
+            "Select Portfolio:",
+            portfolio_names_list,
+            index=portfolio_names_list.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name in portfolio_names_list else 0,
+            key="portfolio_selector"
+        )
+        current_portfolio = st.session_state.portfolios_data.get(st.session_state.selected_portfolio_name, {"holdings": [], "cash": 0.0})
+
+        new_portfolio_name = col_pf2.text_input("New Portfolio Name:", "", key="new_pf_name")
+        if col_pf3.button("➕ Create Portfolio", key="create_pf_btn"):
+            if new_portfolio_name and new_portfolio_name not in st.session_state.portfolios_data:
+                st.session_state.portfolios_data[new_portfolio_name] = {"holdings": [], "cash": 10000.0} # New portfolios start with cash
+                save_portfolios(st.session_state.portfolios_data)
+                st.session_state.selected_portfolio_name = new_portfolio_name
+                st.success(f"Portfolio '{new_portfolio_name}' created!")
+                st.rerun()
+            else:
+                st.error("Portfolio name is empty or already exists.")
+
+        st.markdown("---")
+        st.subheader(f"Holdings for '{st.session_state.selected_portfolio_name}'")
+
+        # Display current cash
+        st.metric("Cash Balance", f"${current_portfolio['cash']:,.2f}")
+
+        # Fetch current prices for holdings to calculate market value and P&L
+        holdings_display_data = []
+        total_market_value = 0.0
+        total_unrealized_pnl = 0.0
+        total_invested_cost = 0.0
+
+        if current_portfolio['holdings']:
+            with st.spinner(f"Fetching live prices for {st.session_state.selected_portfolio_name} holdings..."):
+                for holding in current_portfolio['holdings']:
+                    ticker = holding['ticker']
+                    quantity = holding['quantity']
+                    avg_price = holding['avg_price']
+
+                    info = fetch_ticker_info(ticker)
+                    current_price = info.get("currentPrice") or (fetch_price_history(ticker, period="1d").iloc[-1]["Close"] if not fetch_price_history(ticker, period="1d").empty else None)
+
+                    if isinstance(current_price, (int, float)):
+                        market_value = current_price * quantity
+                        unrealized_pnl = (current_price - avg_price) * quantity
+                        total_market_value += market_value
+                        total_unrealized_pnl += unrealized_pnl
+                        total_invested_cost += avg_price * quantity # Track total invested for overall P&L %
+                        holdings_display_data.append({
+                            "Ticker": ticker,
+                            "Quantity": quantity,
+                            "Avg. Cost": avg_price,
+                            "Current Price": current_price,
+                            "Market Value": market_value,
+                            "Unrealized P&L": unrealized_pnl,
+                            "P&L (%)": (unrealized_pnl / (avg_price * quantity) * 100) if (avg_price * quantity) != 0 else 0.0
+                        })
+                    else:
+                        holdings_display_data.append({
+                            "Ticker": ticker,
+                            "Quantity": quantity,
+                            "Avg. Cost": avg_price,
+                            "Current Price": "N/A",
+                            "Market Value": "N/A",
+                            "Unrealized P&L": "N/A",
+                            "P&L (%)": "N/A"
+                        })
+        
+        # Display overall portfolio metrics
+        overall_total_value = current_portfolio['cash'] + total_market_value
+        overall_pnl_percent = (total_unrealized_pnl / total_invested_cost * 100) if total_invested_cost != 0 else 0.0
+        overall_pnl_color = "normal" if total_unrealized_pnl >= 0 else "inverse"
+
+        st.columns(3)[0].metric("Total Portfolio Value", f"${overall_total_value:,.2f}")
+        st.columns(3)[1].metric("Total Holdings Value", f"${total_market_value:,.2f}")
+        st.columns(3)[2].metric("Total Unrealized P&L", f"${total_unrealized_pnl:,.2f}", f"{overall_pnl_percent:.2f}%", delta_color=overall_pnl_color)
+
+
+        if holdings_display_data:
+            holdings_df = pd.DataFrame(holdings_display_data)
+            st.dataframe(holdings_df, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Quantity": st.column_config.NumberColumn(format="%.4f"),
+                             "Avg. Cost": st.column_config.NumberColumn(format="$%.2f"),
+                             "Current Price": st.column_config.NumberColumn(format="$%.2f"),
+                             "Market Value": st.column_config.NumberColumn(format="$%.2f"),
+                             "Unrealized P&L": st.column_config.NumberColumn(format="$%.2f", help="Unrealized Profit & Loss"),
+                             "P&L (%)": st.column_config.ProgressColumn(format="%.2f%%", min_value=-100, max_value=100)
+                         })
+        else:
+            st.info("This portfolio currently has no stock holdings. Use the 'Add Stock' section below.")
+
+        st.markdown("---")
+        st.subheader("Add/Remove Stocks")
+        col_add1, col_add2, col_add3 = st.columns(3)
+        add_ticker = col_add1.text_input("Ticker to Add:", "", key="add_ticker_input").upper()
+        add_quantity = col_add2.number_input("Quantity:", min_value=0.01, value=1.0, step=0.1, key="add_quantity_input")
+        add_price = col_add3.number_input("Purchase Price (optional, current if 0):", min_value=0.0, value=0.0, step=0.01, key="add_price_input")
+
+        if st.button("➕ Add Stock to Portfolio", key="add_stock_btn"):
+            if add_ticker and add_quantity > 0:
+                # Fetch current price if not provided
+                if add_price == 0:
+                    info = fetch_ticker_info(add_ticker)
+                    current_price_for_add = info.get("currentPrice") or (fetch_price_history(add_ticker, period="1d").iloc[-1]["Close"] if not fetch_price_history(add_ticker, period="1d").empty else None)
+                    if not current_price_for_add:
+                        st.error(f"Could not fetch current price for {add_ticker}. Please enter a purchase price manually.")
+                        st.stop() # Stop execution to allow user to input price
+                    purchase_price = current_price_for_add
+                else:
+                    purchase_price = add_price
+
+                # Check if holding already exists
+                existing_holding_index = -1
+                for i, h in enumerate(current_portfolio['holdings']):
+                    if h['ticker'] == add_ticker:
+                        existing_holding_index = i
+                        break
+
+                if current_portfolio['cash'] >= (purchase_price * add_quantity):
+                    current_portfolio['cash'] -= (purchase_price * add_quantity)
+                    if existing_holding_index != -1:
+                        # Update existing holding
+                        existing_holding = current_portfolio['holdings'][existing_holding_index]
+                        new_total_quantity = existing_holding['quantity'] + add_quantity
+                        new_avg_price = ((existing_holding['avg_price'] * existing_holding['quantity']) + (purchase_price * add_quantity)) / new_total_quantity
+                        existing_holding['quantity'] = new_total_quantity
+                        existing_holding['avg_price'] = new_avg_price
+                    else:
+                        # Add new holding
+                        current_portfolio['holdings'].append({"ticker": add_ticker, "quantity": add_quantity, "avg_price": purchase_price})
+                    
+                    save_portfolios(st.session_state.portfolios_data)
+                    st.success(f"Added {add_quantity:.2f} shares of {add_ticker} to '{st.session_state.selected_portfolio_name}'.")
+                    st.rerun()
+                else:
+                    st.error(f"Insufficient cash to buy {add_quantity:.2f} shares of {add_ticker} at ${purchase_price:.2f}. Available cash: ${current_portfolio['cash']:.2f}")
+            else:
+                st.error("Please enter a valid ticker and quantity.")
+
+        col_rem1, col_rem2 = st.columns([1,2])
+        remove_ticker = col_rem1.text_input("Ticker to Remove:", "", key="remove_ticker_input").upper()
+        if col_rem2.button("➖ Remove Stock from Portfolio", key="remove_stock_btn"):
+            if remove_ticker:
+                initial_holdings_count = len(current_portfolio['holdings'])
+                # Find the holding to remove and process sale to cash
+                removed_holding = None
+                for i, h in enumerate(current_portfolio['holdings']):
+                    if h['ticker'] == remove_ticker:
+                        removed_holding = current_portfolio['holdings'].pop(i)
+                        break
+
+                if removed_holding:
+                    info = fetch_ticker_info(removed_holding['ticker'])
+                    current_price_for_remove = info.get("currentPrice") or (fetch_price_history(removed_holding['ticker'], period="1d").iloc[-1]["Close"] if not fetch_price_history(removed_holding['ticker'], period="1d").empty else None)
+                    
+                    if isinstance(current_price_for_remove, (int,float)):
+                        sale_value = current_price_for_remove * removed_holding['quantity']
+                        current_portfolio['cash'] += sale_value
+                        st.success(f"Removed {removed_holding['quantity']:.2f} shares of {remove_ticker} from '{st.session_state.selected_portfolio_name}'. Sold for ${sale_value:,.2f}.")
+                    else:
+                        st.warning(f"Removed {removed_holding['quantity']:.2f} shares of {remove_ticker}. Could not fetch current price, so cash balance not updated for sale.")
+                    save_portfolios(st.session_state.portfolios_data)
+                    st.rerun()
+                else:
+                    st.error(f"{remove_ticker} not found in '{st.session_state.selected_portfolio_name}' holdings.")
+            else:
+                st.error("Please enter a ticker to remove.")
+        
+        st.markdown("---")
+        if st.button("🗑️ Delete Current Portfolio", key="delete_portfolio_btn", type="secondary"):
+            if st.session_state.selected_portfolio_name and st.session_state.selected_portfolio_name in st.session_state.portfolios_data:
+                del st.session_state.portfolios_data[st.session_state.selected_portfolio_name]
+                save_portfolios(st.session_state.portfolios_data)
+                st.session_state.selected_portfolio_name = None # Reset selected portfolio
+                st.success(f"Portfolio '{st.session_state.selected_portfolio_name}' deleted.")
+                st.rerun()
+            else:
+                st.error("No portfolio selected or found to delete.")
+
 
     elif st.session_state.app_mode == "🤖 Virtual Trading":
         st.subheader("🤖 AI Virtual Trader Controls")
@@ -1096,6 +1275,7 @@ with config_cont:
                     elif trade['type'] == 'sell':
                         st.toast(f"AI is selling {trade['ticker']}...", icon="📉")
                         st.session_state.virtual_portfolio['cash'] += trade['price'] * trade['quantity']
+                        # Ensure we remove only the exact quantity if partial sale or remove the whole holding
                         st.session_state.virtual_portfolio['holdings'] = [h for h in st.session_state.virtual_portfolio['holdings'] if h['ticker'] != trade['ticker']]
                     st.session_state.virtual_portfolio['transaction_history'].insert(0, {"date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ticker": trade['ticker'], "type": trade['type'].upper(), "quantity": f"{trade['quantity']:.4f}", "price": f"${trade['price']:.2f}", "reason": trade['reason']})
             
