@@ -782,7 +782,7 @@ def run_live_analysis(tickers, llm_client, configs):
             "politician_trades":fetch_politician_trades(t) if configs["use_politician_filings"] else [],
             "value_investing_io_data":fetch_value_investing_io_data(t) if configs["use_value_trades"] else {"error":"VI.io: Skipped."},
             "institutional_holdings":fetch_inst_filings(t) if configs["use_filings"] else [],
-            "sec_all_filings_raw":fetch_all_sec_filings(t) if configs["use_filings"] else []
+            "sec_all_filings_raw":fetch_all_sec_filings(t) if configs["use_filings"] else [],
             "recommendations": fetch_recommendations(t)
         }
         agents = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()]
