@@ -898,47 +898,171 @@ class ValuationAgent:
         return {"ticker":ticker, "forward_pe":pe, "relative_pe_signal":rel_sig, "dcf_fair_price":float(fp_est) if pd.notna(fp_est) else np.nan, "dcf_signal":dcf_sig, "valuation_error":None}
 
 class AnalystRatingAgent:
+    """
+    Analyzes analyst ratings and price targets.
+    - IMPROVEMENT: Uses a scoring system for both recommendation and upside to handle conflicts and nuance.
+    - IMPROVEMENT: Signal is based on a combined final score, making the logic more robust.
+    """
     def run(self, ticker: str, data: dict) -> dict:
-        info, hist = data.get("ticker_info",{}), data.get("price_history"); price_v = info.get("currentPrice")
-        if price_v is None and hist is not None and not hist.empty: price_v = hist.Close.iloc[-1]
-        curr_p = float(price_v) if isinstance(price_v,(int,float)) and price_v > 0 else None
-        if curr_p is None: return {"ticker":ticker, "analyst_buy_pct_inferred":0.5, "target_upside":0.0, "yfinance_recommendation":"N/A", "analyst_signal":"hold", "analyst_error":"Current price unavailable."}
-        target_v = info.get("targetMeanPrice"); target_m = float(target_v) if isinstance(target_v,(int,float)) else None
-        rec = str(info.get("recommendationKey","hold")).lower(); upside = 0.0
-        if target_m is not None and curr_p > 0: upside = (target_m / curr_p) -1
-        sig = "hold"
-        if rec in ["buy","strong_buy"] and upside > 0.10: sig = "buy"
-        elif rec == "buy" and upside > 0.05: sig = "buy"
-        elif rec in ["sell","strong_sell","underperform"] and upside < -0.05: sig = "sell"
-        elif upside > 0.20: sig = "buy"
-        elif upside < -0.15: sig = "sell"
-        buy_pct = {"strong_buy":0.9, "buy":0.7, "hold":0.5, "underperform":0.3, "sell":0.1}.get(rec,0.5)
-        return {"ticker":ticker, "analyst_buy_pct_inferred":float(buy_pct), "target_upside":float(upside), "yfinance_recommendation":rec, "analyst_signal":sig, "analyst_error":None}
+        info, hist = data.get("ticker_info", {}), data.get("price_history")
+        price_v = info.get("currentPrice")
+        if price_v is None and hist is not None and not hist.empty:
+            price_v = hist.Close.iloc[-1]
+        
+        curr_p = float(price_v) if isinstance(price_v, (int, float)) and price_v > 0 else None
+        if curr_p is None:
+            return {"ticker": ticker, "analyst_buy_pct_inferred": 0.5, "target_upside": 0.0, "yfinance_recommendation": "N/A", "analyst_signal": "hold", "analyst_error": "Current price unavailable."}
 
+        target_v = info.get("targetMeanPrice")
+        target_m = float(target_v) if isinstance(target_v, (int, float)) else None
+        rec = str(info.get("recommendationKey", "hold")).lower()
+        
+        upside = 0.0
+        if target_m is not None and curr_p > 0:
+            upside = (target_m / curr_p) - 1
+
+        # --- Improved Scoring Logic ---
+        rating_map = {"strong_buy": 1.0, "buy": 0.75, "hold": 0.0, "underperform": -0.75, "sell": -1.0}
+        rating_score = rating_map.get(rec, 0.0)
+
+        # Score the upside potential
+        if upside > 0.50: upside_score = 1.0
+        elif upside > 0.20: upside_score = 0.75
+        elif upside > 0.05: upside_score = 0.25
+        elif upside < -0.30: upside_score = -1.0
+        elif upside < -0.15: upside_score = -0.75
+        else: upside_score = 0.0
+
+        # Combine scores (giving slightly more weight to the explicit rating)
+        final_score = (rating_score * 0.6) + (upside_score * 0.4)
+
+        # Determine signal from final score
+        if final_score >= 0.75: sig = "strong_buy"
+        elif final_score >= 0.35: sig = "buy"
+        elif final_score <= -0.75: sig = "strong_sell"
+        elif final_score <= -0.35: sig = "sell"
+        else: sig = "hold"
+        
+        buy_pct = (final_score + 1.0) / 2.0 # Normalize score from [-1, 1] to [0, 1]
+
+        return {"ticker": ticker, "analyst_buy_pct_inferred": float(buy_pct), "target_upside": float(upside), "yfinance_recommendation": rec, "analyst_signal": sig, "analyst_error": None}
+        
 class SECFilingAgent:
+    """
+    Analyzes a broad range of SEC filings for comprehensive ownership signals.
+    - NEW: Processes Forms 4, 5, Schedule 13D/G, and Form 144.
+    - NEW: Extracts and returns recent filings of each type for user review.
+    - IMPROVEMENT: Signal is now based on a combination of insider net buying/selling, activist stakes (13D), and intent-to-sell filings (144).
+    """
     def run(self, ticker: str, data: dict) -> dict:
-        filings, err = data.get("sec_all_filings_raw",[]), None
-        if not filings or (isinstance(filings[0],dict) and "error" in filings[0]):
-            err = filings[0].get("error") if filings and isinstance(filings[0],dict) else f"SEC: No raw filings for {ticker}."
-            return {"ticker":ticker, "sec_net_insider_shares_1y":0, "sec_insider_buy_value_1y":0, "sec_insider_sell_value_1y":0, "sec_filings_signal":"hold", "sec_filings_error":err, "sec_recent_form4_transactions":[], "sec_other_recent_filings":[]}
-        net_s, buy_v, sell_v, form4, others = 0,0,0,[],[]
-        for f in filings:
-            if not isinstance(f,dict) or "error" in f: continue
-            if f.get("is_form4_transaction"):
-                form4.append(f); s,p = f.get("shares",0.0), f.get("price_per_share")
-                if not isinstance(s,(int,float)): s = 0.0
-                if f.get("transaction_code")=="P" and f.get("acq_disp_code")=="A":
-                    net_s += s;
-                    if isinstance(p,(int,float)) and s!=0: buy_v += s*p
-                elif f.get("transaction_code")=="S" and f.get("acq_disp_code")=="D":
-                    net_s -= s;
-                    if isinstance(p,(int,float)) and s!=0: sell_v += s*p
-            else: others.append(f)
-        sig = "hold"
-        if net_s > 2000 or buy_v > 200000: sig = "buy"
-        elif net_s < -2000 or sell_v > 200000: sig = "sell"
-        return {"ticker":ticker, "sec_net_insider_shares_1y":int(net_s), "sec_insider_buy_value_1y":round(buy_v,2), "sec_insider_sell_value_1y":round(sell_v,2), "sec_filings_signal":sig, "sec_filings_error":None, "sec_recent_form4_transactions":form4[:10], "sec_other_recent_filings":others[:10]}
+        filings = data.get("sec_all_filings_raw", [])
+        info = data.get("ticker_info", {})
+        err = None
 
+        if not filings or (isinstance(filings[0], dict) and "error" in filings[0]):
+            err = filings[0].get("error") if filings and isinstance(filings[0], dict) else f"SEC: No raw filings for {ticker}."
+            # Return a default structure even on error
+            return {
+                "ticker": ticker, "sec_filings_signal": "hold", "sec_filings_error": err,
+                "sec_net_insider_shares_1y": 0, "sec_insider_buy_value_1y": 0, "sec_insider_sell_value_1y": 0,
+                "sec_recent_form4_5_transactions": [], "sec_recent_13d_filings": [], "sec_recent_13g_filings": [], "sec_recent_144_filings": []
+            }
+
+        # --- Data processing variables ---
+        net_s, buy_v, sell_v = 0, 0, 0
+        net_shares_proposed_sale_144 = 0
+        
+        # Lists to hold detailed filing info
+        form4_5_tx, filings_13d, filings_13g, filings_144, other_filings = [], [], [], [], []
+
+        # Flags for significant events
+        new_activist_stake = False
+        one_year_ago = (dt.datetime.now() - dt.timedelta(days=365)).strftime('%Y-%m-%d')
+
+        for f in filings:
+            if not isinstance(f, dict) or "error" in f:
+                continue
+
+            form_type = f.get('form_type', '').upper()
+            filing_date = f.get('filing_date', '')
+            
+            # --- Process Form 4 and Form 5 (Insider Transactions) ---
+            if form_type in ['4', '5'] or f.get("is_form4_transaction"):
+                # You can add the filer's name/relationship to the appended dict
+                form4_5_tx.append(f) 
+                s, p = f.get("shares", 0.0), f.get("price_per_share")
+                if not isinstance(s, (int, float)): s = 0.0
+                
+                # 'P' = Purchase, 'A' = Acquisition
+                if f.get("transaction_code") == "P" and f.get("acq_disp_code") == "A":
+                    net_s += s
+                    if isinstance(p, (int, float)) and s != 0: buy_v += s * p
+                # 'S' = Sale, 'D' = Disposition
+                elif f.get("transaction_code") == "S" and f.get("acq_disp_code") == "D":
+                    net_s -= s
+                    if isinstance(p, (int, float)) and s != 0: sell_v += s * p
+            
+            # --- Process Schedule 13D (Activist Stake) ---
+            elif '13D' in form_type:
+                filings_13d.append(f)
+                if filing_date >= one_year_ago:
+                    new_activist_stake = True
+
+            # --- Process Schedule 13G (Passive Stake) ---
+            elif '13G' in form_type:
+                filings_13g.append(f)
+
+            # --- Process Form 144 (Intent to Sell) ---
+            elif '144' in form_type:
+                filings_144.append(f)
+                if filing_date >= one_year_ago:
+                    shares_to_sell = f.get('shares_proposed_to_be_sold', 0)
+                    if isinstance(shares_to_sell, (int, float)):
+                        net_shares_proposed_sale_144 += shares_to_sell
+            else:
+                other_filings.append(f)
+
+        # --- Enhanced Signal Logic ---
+        shares_outstanding = info.get("sharesOutstanding")
+        net_shares_pct = 0.0
+        proposed_sale_pct = 0.0
+        if shares_outstanding and shares_outstanding > 0:
+            net_shares_pct = net_s / shares_outstanding
+            proposed_sale_pct = net_shares_proposed_sale_144 / shares_outstanding
+        
+        buy_sell_ratio = buy_v / sell_v if sell_v > 0 else float('inf')
+
+        sig = "hold"
+        # Strong Buy Signals: New activist investor OR very significant insider net purchases.
+        if new_activist_stake or net_shares_pct > 0.01: # 1% of company bought by insiders
+            sig = "strong_buy"
+        # Regular Buy Signals: Significant insider buying ratio OR >0.5% net purchase.
+        elif (buy_v > 250000 and buy_sell_ratio > 5.0) or net_shares_pct > 0.005:
+            sig = "buy"
+        # Strong Sell Signals: Significant portion of company planned for sale OR large insider selling.
+        elif proposed_sale_pct > 0.02 or net_shares_pct < -0.02: # 2% of company up for sale or sold
+            sig = "strong_sell"
+        # Regular Sell Signals: Moderate planned sales or high insider selling ratio.
+        elif proposed_sale_pct > 0.01 or (sell_v > 250000 and buy_v < (sell_v * 0.2)):
+            sig = "sell"
+
+        return {
+            "ticker": ticker, 
+            "sec_filings_signal": sig, 
+            "sec_filings_error": None,
+            "sec_net_insider_shares_1y": int(net_s), 
+            "sec_net_insider_pct_outstanding_1y": round(net_shares_pct, 6),
+            "sec_insider_buy_value_1y": round(buy_v, 2), 
+            "sec_insider_sell_value_1y": round(sell_v, 2),
+            "sec_shares_proposed_for_sale_1y": int(net_shares_proposed_sale_144),
+            "sec_shares_proposed_for_sale_pct_1y": round(proposed_sale_pct, 6),
+            "sec_new_activist_stake_1y": new_activist_stake,
+            # Return the details of recent filings for user inspection
+            "sec_recent_form4_5_transactions": sorted(form4_5_tx, key=lambda x: x.get('filing_date', ''), reverse=True)[:10],
+            "sec_recent_13d_filings": sorted(filings_13d, key=lambda x: x.get('filing_date', ''), reverse=True)[:5],
+            "sec_recent_13g_filings": sorted(filings_13g, key=lambda x: x.get('filing_date', ''), reverse=True)[:5],
+            "sec_recent_144_filings": sorted(filings_144, key=lambda x: x.get('filing_date', ''), reverse=True)[:5],
+        }
 class InstitutionalHoldingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
         holdings, err = data.get("institutional_holdings",[]), None
