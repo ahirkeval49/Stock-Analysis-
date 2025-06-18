@@ -1063,27 +1063,102 @@ class SECFilingAgent:
             "sec_recent_13g_filings": sorted(filings_13g, key=lambda x: x.get('filing_date', ''), reverse=True)[:5],
             "sec_recent_144_filings": sorted(filings_144, key=lambda x: x.get('filing_date', ''), reverse=True)[:5],
         }
+        
 class InstitutionalHoldingsAgent:
+    """
+    Analyzes institutional ownership from both a static snapshot and dynamic SEC filings.
+    - RETAINS: Original logic to analyze the overall list of institutional holders.
+    - NEW: Directly parses SEC filings (13D, 13G) to detect recent changes in ownership from major (>5%) holders.
+    - IMPROVEMENT: The signal is now a hybrid, considering both the broad ownership landscape and recent, actionable buying/selling activity from the most significant institutions.
+    """
     def run(self, ticker: str, data: dict) -> dict:
+        # --- 1. Static Analysis (from original agent) ---
         holdings, err = data.get("institutional_holdings",[]), None
         if holdings and isinstance(holdings[0],dict) and "error" in holdings[0]:
             err = holdings[0]["error"]
+            # Return a default structure with the error
             return {"ticker":ticker, "inst_num_holders":0, "inst_total_shares_held":0, "inst_total_pct_out":0.0, "inst_holdings_signal":"hold", "inst_holdings_error":err, "inst_top_holders":[]}
-        num_h, total_s, total_pct, top_h = 0,0,0.0,[]
+
+        num_h, total_s, total_pct, top_h = 0, 0, 0.0, []
         if holdings:
-            valid_h = [d for d in holdings if isinstance(d,dict) and "error" not in d]
+            valid_h = [d for d in holdings if isinstance(d, dict) and "error" not in d]
             if valid_h:
                 num_h = len(valid_h)
                 try:
-                    total_s = sum(d.get('Shares',0) for d in valid_h); total_pct = sum(d.get('% Out',0.0) for d in valid_h)
-                    top_h = sorted(valid_h, key=lambda x: x.get('Shares',0), reverse=True)[:10]
-                except Exception as e: err = f"Error processing inst holdings: {e}"
-            elif not err: err = "No valid inst holdings."
-        sig = "hold"
-        if total_pct > 0.50: sig = "buy"
-        elif total_pct < 0.05 and num_h > 0: sig = "sell"
-        return {"ticker":ticker, "inst_num_holders":num_h, "inst_total_shares_held":int(total_s), "inst_total_pct_out":float(total_pct), "inst_holdings_signal":sig, "inst_holdings_error":err, "inst_top_holders":top_h}
+                    total_s = sum(d.get('Shares', 0) for d in valid_h)
+                    total_pct = sum(d.get('% Out', 0.0) for d in valid_h)
+                    top_h = sorted(valid_h, key=lambda x: x.get('Shares', 0), reverse=True)[:10]
+                except Exception as e:
+                    err = f"Error processing inst holdings: {e}"
+            elif not err:
+                err = "No valid institutional holdings."
 
+        # --- 2. Dynamic SEC Filing Analysis for Institutional Activity ---
+        sec_filings = data.get("sec_all_filings_raw", [])
+        
+        recent_new_filers = []
+        recent_amendment_filers = []
+        num_new_holders_6m = 0
+        num_activist_events_6m = 0
+        
+        six_months_ago = (dt.datetime.now() - dt.timedelta(days=182)).strftime('%Y-%m-%d')
+
+        if sec_filings and not (isinstance(sec_filings[0], dict) and "error" in sec_filings[0]):
+            for f in sec_filings:
+                form_type = f.get('form_type', '').upper()
+                filing_date = f.get('filing_date', '')
+
+                # We are interested in 13D and 13G forms
+                if '13G' in form_type or '13D' in form_type:
+                    # Check if the filing is recent
+                    if filing_date >= six_months_ago:
+                        filer_info = {
+                            "filer_name": f.get("filer_name", "N/A"),
+                            "filing_date": filing_date,
+                            "form_type": form_type,
+                            "reported_pct": f.get("reported_ownership_pct", "N/A")
+                        }
+                        
+                        # A filing with "/A" is an Amendment to an existing position
+                        if "/A" in form_type:
+                            recent_amendment_filers.append(filer_info)
+                        # A filing without "/A" is a New position
+                        else:
+                            recent_new_filers.append(filer_info)
+                            num_new_holders_6m += 1
+                            # A new 13D is a significant activist event
+                            if '13D' in form_type:
+                                num_activist_events_6m += 1
+
+        # --- 3. Hybrid Signal Logic ---
+        sig = "hold"
+        
+        # Strong Buy: Multiple new activist investors are a very powerful signal.
+        if num_activist_events_6m >= 2:
+            sig = "strong_buy"
+        # Buy: A single new activist or a flurry of new passive investors is a bullish sign.
+        elif num_activist_events_6m == 1 or num_new_holders_6m >= 3:
+            sig = "buy"
+        # Sell: Very low institutional ownership remains a red flag.
+        elif total_pct > 0 and total_pct < 0.05 and num_h > 5:
+            sig = "sell"
+        # A future improvement could analyze amendments to see if they represent increases or decreases.
+
+        return {
+            "ticker": ticker,
+            "inst_holdings_signal": sig,
+            "inst_holdings_error": err,
+            # Static Data
+            "inst_num_holders": num_h,
+            "inst_total_shares_held": int(total_s),
+            "inst_total_pct_out": float(total_pct),
+            "inst_top_holders": top_h,
+            # Dynamic Data from SEC Filings
+            "inst_new_5pct_holders_6m": num_new_holders_6m,
+            "inst_activist_events_6m": num_activist_events_6m,
+            "inst_recent_new_filers": sorted(recent_new_filers, key=lambda x: x.get('filing_date', ''), reverse=True),
+            "inst_recent_amendment_filers": sorted(recent_amendment_filers, key=lambda x: x.get('filing_date', ''), reverse=True)
+        }
 class PoliticianFilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
         trades, err = data.get("politician_trades",[]), None
