@@ -628,45 +628,214 @@ class MomentumAgent:
 
 class VolatilityAgent:
     def run(self, ticker: str, data: dict, price_data_slice: pd.DataFrame = None) -> dict:
-        beta_val = data.get("ticker_info", {}).get("beta"); beta = float(beta_val) if isinstance(beta_val, (int,float)) else 1.0
-        sig = "sell" if beta > 1.5 else ("buy" if beta < 0.8 else "hold"); ann_vol, vol_weight = np.nan, 0.0
+        beta_val = data.get("ticker_info", {}).get("beta")
+        # Ensure beta is a float; default to 1.0 (market-like) if unavailable or invalid
+        beta = float(beta_val) if isinstance(beta_val, (int, float)) else 1.0
+
+        ann_vol = np.nan
+        vol_weight = 0.0 # Will be higher for lower volatility
+        volatility_signal = "hold"
+        volatility_confidence_score = 0.0
+        volatility_error = None
+
+        # --- Calculate Annualized Historical Volatility ---
         if price_data_slice is not None and not price_data_slice.empty and len(price_data_slice) > 1:
-            ret = np.log(price_data_slice.Close / price_data_slice.Close.shift(1)).dropna()
-            if not ret.empty: ann_vol = float(ret.std() * np.sqrt(252)); vol_weight = float(1 / ann_vol) if ann_vol > 0 else 0.0
-        return {"ticker": ticker, "beta": beta, "annual_vol": ann_vol, "vol_weight": vol_weight, "volatility_signal": sig}
+            # Ensure 'Close' column is present and numeric
+            if 'Close' not in price_data_slice.columns or not pd.api.types.is_numeric_dtype(price_data_slice['Close']):
+                volatility_error = "Price data is missing 'Close' column or not numeric for volatility calculation."
+            else:
+                # Calculate daily log returns
+                ret = np.log(price_data_slice.Close / price_data_slice.Close.shift(1)).dropna()
+
+                if not ret.empty:
+                    daily_std = ret.std()
+                    if daily_std > 0:
+                        ann_vol = float(daily_std * np.sqrt(252)) # Annualized volatility
+                        vol_weight = float(1 / ann_vol) # Inverse volatility (higher for lower vol)
+                    else:
+                        volatility_error = "Daily returns standard deviation is zero (no price movement)."
+                else:
+                    volatility_error = "Not enough valid returns to calculate historical volatility."
+        else:
+            volatility_error = "Not enough price data for historical volatility calculation."
+
+
+        # --- Generate Volatility Signal and Confidence Score ---
+
+        # Base signal from Beta
+        # Lower beta is generally 'safer' -> buy. Higher beta is 'riskier' -> sell.
+        if beta > 1.2: # More volatile than market
+            volatility_signal = "sell" # Risk-off for high beta
+            volatility_confidence_score -= (beta - 1.2) * 0.5 # Score decreases as beta increases
+        elif beta < 0.8: # Less volatile than market
+            volatility_signal = "buy" # Risk-on for low beta
+            volatility_confidence_score += (0.8 - beta) * 0.5 # Score increases as beta decreases
+        else:
+            volatility_signal = "hold" # Market-like volatility
+            # confidence_score remains 0 from beta for hold range
+
+        # Incorporate Annualized Volatility into confidence
+        # Typical interpretation: high volatility is risky (negative signal), low volatility is stable (positive signal)
+        if pd.notna(ann_vol):
+            # Define thresholds for what's considered high/low volatility (these are examples)
+            HIGH_VOL_THRESHOLD = 0.30 # 30% annualized volatility
+            LOW_VOL_THRESHOLD = 0.15  # 15% annualized volatility
+
+            if ann_vol > HIGH_VOL_THRESHOLD:
+                # Strongly negative impact on confidence for high volatility
+                volatility_confidence_score -= (ann_vol - HIGH_VOL_THRESHOLD) * 1.0 # Scale by 1.0
+            elif ann_vol < LOW_VOL_THRESHOLD:
+                # Positive impact on confidence for low volatility
+                volatility_confidence_score += (LOW_VOL_THRESHOLD - ann_vol) * 1.0 # Scale by 1.0
+
+        # Clamp confidence score to the range [-1.0, 1.0]
+        volatility_confidence_score = max(-1.0, min(1.0, volatility_confidence_score))
+
+        # Re-evaluate signal based on combined confidence score
+        if volatility_confidence_score > 0.2: # Tunable threshold for a "buy" signal
+            volatility_signal = "buy"
+        elif volatility_confidence_score < -0.2: # Tunable threshold for a "sell" signal
+            volatility_signal = "sell"
+        else:
+            volatility_signal = "hold"
+
+
+        return {
+            "ticker": ticker,
+            "beta": float(beta),
+            "annual_vol": float(ann_vol) if pd.notna(ann_vol) else np.nan,
+            "vol_weight": float(vol_weight) if pd.notna(vol_weight) else np.nan,
+            "volatility_signal": volatility_signal, # Overall combined signal
+            "volatility_confidence_score": float(volatility_confidence_score), # New: Quantified confidence
+            "volatility_error": volatility_error
+        }
 
 class SentimentAgent:
-    def __init__(self, client): self.client = client
+    def __init__(self, client):
+        self.client = client
+
     def run(self, ticker: str, data: dict) -> dict:
         news, news_err = data.get("news", []), data.get("news_fetch_status_error")
-        if news_err: return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": news_err}
+
+        if news_err:
+            return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": news_err}
+
+        # Filter out news items that are explicitly marked with an "error"
         valid_news = [item for item in news if isinstance(item, dict) and "error" not in item]
+
         if not valid_news:
-            err_msg = news[0].get("error") if news and isinstance(news[0],dict) and "error" in news[0] else "No valid news."
+            # More precise error message if the entire news list was empty or only contained errors
+            err_msg = news[0].get("error") if news and isinstance(news[0], dict) and "error" in news[0] else "No valid news articles found for sentiment analysis."
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": err_msg}
-        content_llm, co_name = [], data.get("ticker_info",{}).get('longName', ticker)
-        for item in valid_news[:7]:
-            title, pub, desc, cont = item.get('title',''), item.get('publisher',''), item.get('description',''), item.get('content_snippet','')
-            snippet = f"Headline: {title}"
-            if cont and isinstance(cont,str) and len(cont)>10: snippet += f" | Content: {cont.replace('[+... chars]','').strip()}"
-            elif desc and isinstance(desc,str): snippet += f" | Description: {desc.strip()}"
-            if pub and pub!='N/A': snippet += f" (Source: {pub} via {item.get('source_api','Unknown')})"
-            content_llm.append(snippet)
-        if not content_llm: return {"ticker":ticker, "sentiment_score":0.0, "sentiment_signal":"hold", "sentiment_error":"No processable news."}
-        prompt = f"Analyze sentiment for {co_name} ({ticker})...Output only number...\n\nNews:\n" + "\n".join(f"- {c}" for c in content_llm)
-        score, llm_err = 0.0, None
+
+        content_for_llm = []
+        co_name = data.get("ticker_info", {}).get('longName', ticker)
+        
+        # Sort news by recency and prioritize longer snippets
+        # News are already sorted by publish_datetime_utc descending, which is good.
+        # We'll just iterate and build content.
+        
+        # --- MODIFICATION HERE: Set MAX_NEWS_ARTICLES_FOR_LLM to 10 ---
+        MAX_NEWS_ARTICLES_FOR_LLM = 10 
+
+        for item in valid_news[:MAX_NEWS_ARTICLES_FOR_LLM]:
+            title = item.get('title', '').strip()
+            description = item.get('description', '').strip()
+            content_snippet = item.get('content_snippet', '').replace('[+... chars]', '').strip()
+            publisher = item.get('publisher', 'N/A').strip()
+            source_api = item.get('source_api', 'Unknown').strip()
+            publish_time = item.get('publish_time_readable', 'N/A').strip()
+
+            # Prefer content_snippet if substantial, otherwise use description
+            main_text = ""
+            if content_snippet and len(content_snippet) > 50: # Require a minimum length for content
+                main_text = f"Content: {content_snippet}"
+            elif description and len(description) > 50: # Require a minimum length for description
+                main_text = f"Description: {description}"
+            
+            # Only add to LLM input if there's substantial text
+            if main_text:
+                snippet = f"Headline: {title}"
+                if main_text:
+                    snippet += f" | {main_text}"
+                if publisher != 'N/A':
+                    snippet += f" (Source: {publisher} via {source_api})"
+                if publish_time != 'N/A':
+                    snippet += f" (Published: {publish_time})"
+                
+                content_for_llm.append(snippet)
+
+        if not content_for_llm:
+            return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": "No processable news articles with sufficient content for sentiment analysis."}
+
+        # --- LLM Prompt Engineering ---
+        prompt = f"""
+        As a financial sentiment analyst, analyze the following news articles for {co_name} ({ticker}).
+        Your task is to determine the overall sentiment of these articles towards the company's stock value.
+
+        Output a single numerical score between -1.0 and 1.0 (inclusive).
+        - A score of 1.0 indicates extremely positive sentiment (strong buy).
+        - A score of 0.5 indicates moderately positive sentiment (buy).
+        - A score of 0.0 indicates neutral sentiment (hold).
+        - A score of -0.5 indicates moderately negative sentiment (sell).
+        - A score of -1.0 indicates extremely negative sentiment (strong sell).
+
+        Focus on information that could impact the stock price (e.g., earnings, product news, analyst ratings, market outlook).
+        **Output ONLY the numerical score, nothing else.**
+
+        News Articles:
+        """ + "\n".join(f"- {c}" for c in content_for_llm)
+
+        score = 0.0
+        llm_err = None
+
         try:
             resp = self.client.generate(prompt).strip()
-            if resp.startswith("Error:"): llm_err = resp
+            
+            # --- Robust LLM Response Parsing ---
+            match = re.search(r"([-+]?\d*\.\d+)|([-+]?\d+)", resp)
+            
+            if match:
+                extracted_score = float(match.group(0))
+                score = max(-1.0, min(1.0, extracted_score))
+                
+                if len(resp.split()) > 5 and not resp.strip().replace('-', '').replace('.', '').isdigit():
+                    llm_err = f"LLM responded with extra text: '{resp[:50]}...'"
             else:
-                match = re.search(r"([-+]?\d*\.\d+)|([-+]?\d+)", resp)
-                if match: score = max(-1.0, min(1.0, float(match.group(0))))
-                else: llm_err = f"LLM non-numeric sent.: '{resp[:50]}...'"
-        except Exception as e: llm_err = f"LLM sent. call failed: {str(e)[:150]}"
-        final_err = llm_err
-        if news_err and ("Error" in news_err or "failed" in news_err.lower()): final_err = f"News: {news_err}" + (f" | LLM: {llm_err}" if llm_err else "")
-        sig = "buy" if score > 0.25 and not llm_err else ("sell" if score < -0.25 and not llm_err else "hold")
-        return {"ticker": ticker, "sentiment_score": score, "sentiment_signal": sig, "sentiment_error": final_err}
+                llm_err = f"LLM did not output a recognizable number: '{resp[:50]}...'"
+                score = 0.0
+
+        except Exception as e:
+            llm_err = f"LLM sentiment analysis call failed: {str(e)[:150]}"
+            score = 0.0
+
+        # Consolidate error messages
+        final_err = None
+        if news_err:
+            final_err = f"News fetch issues: {news_err}"
+        if llm_err:
+            final_err = (f"{final_err} | LLM issues: {llm_err}" if final_err else f"LLM issues: {llm_err}")
+
+
+        # --- Sentiment Confidence and Signal Generation ---
+        sentiment_confidence_score = abs(score)
+
+        BUY_THRESHOLD = 0.45
+        SELL_THRESHOLD = -0.45
+
+        sentiment_signal = "hold"
+        if score >= BUY_THRESHOLD and not final_err:
+            sentiment_signal = "buy"
+        elif score <= SELL_THRESHOLD and not final_err:
+            sentiment_signal = "sell"
+
+        return {
+            "ticker": ticker,
+            "sentiment_score": float(score),
+            "sentiment_signal": sentiment_signal,
+            "sentiment_confidence_score": float(sentiment_confidence_score),
+            "sentiment_error": final_err
+        }
 
 class NewsSummaryAgent:
     def __init__(self, client): self.client = client
