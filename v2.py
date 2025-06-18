@@ -193,6 +193,7 @@ def get_cik_for_ticker(ticker: str) -> str | None: return TICKER_TO_CIK_MAP.get(
 @st.cache_data(ttl=6*3600)
 def fetch_inst_filings(ticker: str) -> list[dict]:
   @st.cache_data(ttl=4*3600)
+    
 def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]:
     # --- This function is heavily modified for robustness ---
     cik = get_cik_for_ticker(ticker_symbol)
