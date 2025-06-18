@@ -1007,23 +1007,19 @@ class SECFilingAgent:
 
         if not filings or (isinstance(filings[0], dict) and "error" in filings[0]):
             err = filings[0].get("error") if filings and isinstance(filings[0], dict) else f"SEC: No raw filings for {ticker}."
-            # Return a default structure even on error
             return {
                 "ticker": ticker, "sec_filings_signal": "hold", "sec_filings_error": err,
                 "sec_net_insider_shares_1y": 0, "sec_insider_buy_value_1y": 0, "sec_insider_sell_value_1y": 0,
                 "sec_recent_form4_5_transactions": [], "sec_recent_13d_filings": [], "sec_recent_13g_filings": [], "sec_recent_144_filings": []
             }
 
-        # --- Data processing variables ---
         net_s, buy_v, sell_v = 0, 0, 0
         net_shares_proposed_sale_144 = 0
-        
-        # Lists to hold detailed filing info
         form4_5_tx, filings_13d, filings_13g, filings_144, other_filings = [], [], [], [], []
-
-        # Flags for significant events
         new_activist_stake = False
-        one_year_ago = (dt.datetime.now() - dt.timedelta(days=365)).strftime('%Y-%m-%d')
+        
+        # --- FIX: Using 'datetime' and 'timedelta' directly as imported ---
+        one_year_ago = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 
         for f in filings:
             if not isinstance(f, dict) or "error" in f:
@@ -1032,43 +1028,35 @@ class SECFilingAgent:
             form_type = f.get('form_type', '').upper()
             filing_date = f.get('filing_date', '')
             
-            # --- Process Form 4 and Form 5 (Insider Transactions) ---
             if form_type in ['4', '5'] or f.get("is_form4_transaction"):
-                # You can add the filer's name/relationship to the appended dict
-                form4_5_tx.append(f) 
+                form4_5_tx.append(f)
                 s, p = f.get("shares", 0.0), f.get("price_per_share")
                 if not isinstance(s, (int, float)): s = 0.0
                 
-                # 'P' = Purchase, 'A' = Acquisition
                 if f.get("transaction_code") == "P" and f.get("acq_disp_code") == "A":
                     net_s += s
                     if isinstance(p, (int, float)) and s != 0: buy_v += s * p
-                # 'S' = Sale, 'D' = Disposition
                 elif f.get("transaction_code") == "S" and f.get("acq_disp_code") == "D":
                     net_s -= s
                     if isinstance(p, (int, float)) and s != 0: sell_v += s * p
             
-            # --- Process Schedule 13D (Activist Stake) ---
             elif '13D' in form_type:
                 filings_13d.append(f)
-                if filing_date >= one_year_ago:
+                if filing_date and filing_date >= one_year_ago:
                     new_activist_stake = True
 
-            # --- Process Schedule 13G (Passive Stake) ---
             elif '13G' in form_type:
                 filings_13g.append(f)
 
-            # --- Process Form 144 (Intent to Sell) ---
             elif '144' in form_type:
                 filings_144.append(f)
-                if filing_date >= one_year_ago:
+                if filing_date and filing_date >= one_year_ago:
                     shares_to_sell = f.get('shares_proposed_to_be_sold', 0)
                     if isinstance(shares_to_sell, (int, float)):
                         net_shares_proposed_sale_144 += shares_to_sell
             else:
                 other_filings.append(f)
 
-        # --- Enhanced Signal Logic ---
         shares_outstanding = info.get("sharesOutstanding")
         net_shares_pct = 0.0
         proposed_sale_pct = 0.0
@@ -1079,31 +1067,21 @@ class SECFilingAgent:
         buy_sell_ratio = buy_v / sell_v if sell_v > 0 else float('inf')
 
         sig = "hold"
-        # Strong Buy Signals: New activist investor OR very significant insider net purchases.
-        if new_activist_stake or net_shares_pct > 0.01: # 1% of company bought by insiders
+        if new_activist_stake or net_shares_pct > 0.01:
             sig = "strong_buy"
-        # Regular Buy Signals: Significant insider buying ratio OR >0.5% net purchase.
         elif (buy_v > 250000 and buy_sell_ratio > 5.0) or net_shares_pct > 0.005:
             sig = "buy"
-        # Strong Sell Signals: Significant portion of company planned for sale OR large insider selling.
-        elif proposed_sale_pct > 0.02 or net_shares_pct < -0.02: # 2% of company up for sale or sold
+        elif proposed_sale_pct > 0.02 or net_shares_pct < -0.02:
             sig = "strong_sell"
-        # Regular Sell Signals: Moderate planned sales or high insider selling ratio.
         elif proposed_sale_pct > 0.01 or (sell_v > 250000 and buy_v < (sell_v * 0.2)):
             sig = "sell"
 
         return {
-            "ticker": ticker, 
-            "sec_filings_signal": sig, 
-            "sec_filings_error": None,
-            "sec_net_insider_shares_1y": int(net_s), 
-            "sec_net_insider_pct_outstanding_1y": round(net_shares_pct, 6),
-            "sec_insider_buy_value_1y": round(buy_v, 2), 
-            "sec_insider_sell_value_1y": round(sell_v, 2),
-            "sec_shares_proposed_for_sale_1y": int(net_shares_proposed_sale_144),
-            "sec_shares_proposed_for_sale_pct_1y": round(proposed_sale_pct, 6),
+            "ticker": ticker, "sec_filings_signal": sig, "sec_filings_error": None,
+            "sec_net_insider_shares_1y": int(net_s), "sec_net_insider_pct_outstanding_1y": round(net_shares_pct, 6),
+            "sec_insider_buy_value_1y": round(buy_v, 2), "sec_insider_sell_value_1y": round(sell_v, 2),
+            "sec_shares_proposed_for_sale_1y": int(net_shares_proposed_sale_144), "sec_shares_proposed_for_sale_pct_1y": round(proposed_sale_pct, 6),
             "sec_new_activist_stake_1y": new_activist_stake,
-            # Return the details of recent filings for user inspection
             "sec_recent_form4_5_transactions": sorted(form4_5_tx, key=lambda x: x.get('filing_date', ''), reverse=True)[:10],
             "sec_recent_13d_filings": sorted(filings_13d, key=lambda x: x.get('filing_date', ''), reverse=True)[:5],
             "sec_recent_13g_filings": sorted(filings_13g, key=lambda x: x.get('filing_date', ''), reverse=True)[:5],
@@ -1113,16 +1091,11 @@ class SECFilingAgent:
 class InstitutionalHoldingsAgent:
     """
     Analyzes institutional ownership from both a static snapshot and dynamic SEC filings.
-    - RETAINS: Original logic to analyze the overall list of institutional holders.
-    - NEW: Directly parses SEC filings (13D, 13G) to detect recent changes in ownership from major (>5%) holders.
-    - IMPROVEMENT: The signal is now a hybrid, considering both the broad ownership landscape and recent, actionable buying/selling activity from the most significant institutions.
     """
     def run(self, ticker: str, data: dict) -> dict:
-        # --- 1. Static Analysis (from original agent) ---
         holdings, err = data.get("institutional_holdings",[]), None
         if holdings and isinstance(holdings[0],dict) and "error" in holdings[0]:
             err = holdings[0]["error"]
-            # Return a default structure with the error
             return {"ticker":ticker, "inst_num_holders":0, "inst_total_shares_held":0, "inst_total_pct_out":0.0, "inst_holdings_signal":"hold", "inst_holdings_error":err, "inst_top_holders":[]}
 
         num_h, total_s, total_pct, top_h = 0, 0, 0.0, []
@@ -1139,69 +1112,44 @@ class InstitutionalHoldingsAgent:
             elif not err:
                 err = "No valid institutional holdings."
 
-        # --- 2. Dynamic SEC Filing Analysis for Institutional Activity ---
         sec_filings = data.get("sec_all_filings_raw", [])
+        recent_new_filers, recent_amendment_filers = [], []
+        num_new_holders_6m, num_activist_events_6m = 0, 0
         
-        recent_new_filers = []
-        recent_amendment_filers = []
-        num_new_holders_6m = 0
-        num_activist_events_6m = 0
-        
-        six_months_ago = (dt.datetime.now() - dt.timedelta(days=182)).strftime('%Y-%m-%d')
+        # --- FIX: Using 'datetime' and 'timedelta' directly as imported ---
+        six_months_ago = (datetime.now() - timedelta(days=182)).strftime('%Y-%m-%d')
 
         if sec_filings and not (isinstance(sec_filings[0], dict) and "error" in sec_filings[0]):
             for f in sec_filings:
                 form_type = f.get('form_type', '').upper()
                 filing_date = f.get('filing_date', '')
 
-                # We are interested in 13D and 13G forms
-                if '13G' in form_type or '13D' in form_type:
-                    # Check if the filing is recent
-                    if filing_date >= six_months_ago:
-                        filer_info = {
-                            "filer_name": f.get("filer_name", "N/A"),
-                            "filing_date": filing_date,
-                            "form_type": form_type,
-                            "reported_pct": f.get("reported_ownership_pct", "N/A")
-                        }
-                        
-                        # A filing with "/A" is an Amendment to an existing position
-                        if "/A" in form_type:
-                            recent_amendment_filers.append(filer_info)
-                        # A filing without "/A" is a New position
-                        else:
-                            recent_new_filers.append(filer_info)
-                            num_new_holders_6m += 1
-                            # A new 13D is a significant activist event
-                            if '13D' in form_type:
-                                num_activist_events_6m += 1
-
-        # --- 3. Hybrid Signal Logic ---
-        sig = "hold"
+                if ('13G' in form_type or '13D' in form_type) and filing_date and filing_date >= six_months_ago:
+                    filer_info = {
+                        "filer_name": f.get("filer_name", "N/A"), "filing_date": filing_date,
+                        "form_type": form_type, "reported_pct": f.get("reported_ownership_pct", "N/A")
+                    }
+                    if "/A" in form_type:
+                        recent_amendment_filers.append(filer_info)
+                    else:
+                        recent_new_filers.append(filer_info)
+                        num_new_holders_6m += 1
+                        if '13D' in form_type:
+                            num_activist_events_6m += 1
         
-        # Strong Buy: Multiple new activist investors are a very powerful signal.
+        sig = "hold"
         if num_activist_events_6m >= 2:
             sig = "strong_buy"
-        # Buy: A single new activist or a flurry of new passive investors is a bullish sign.
         elif num_activist_events_6m == 1 or num_new_holders_6m >= 3:
             sig = "buy"
-        # Sell: Very low institutional ownership remains a red flag.
         elif total_pct > 0 and total_pct < 0.05 and num_h > 5:
             sig = "sell"
-        # A future improvement could analyze amendments to see if they represent increases or decreases.
 
         return {
-            "ticker": ticker,
-            "inst_holdings_signal": sig,
-            "inst_holdings_error": err,
-            # Static Data
-            "inst_num_holders": num_h,
-            "inst_total_shares_held": int(total_s),
-            "inst_total_pct_out": float(total_pct),
-            "inst_top_holders": top_h,
-            # Dynamic Data from SEC Filings
-            "inst_new_5pct_holders_6m": num_new_holders_6m,
-            "inst_activist_events_6m": num_activist_events_6m,
+            "ticker": ticker, "inst_holdings_signal": sig, "inst_holdings_error": err,
+            "inst_num_holders": num_h, "inst_total_shares_held": int(total_s),
+            "inst_total_pct_out": float(total_pct), "inst_top_holders": top_h,
+            "inst_new_5pct_holders_6m": num_new_holders_6m, "inst_activist_events_6m": num_activist_events_6m,
             "inst_recent_new_filers": sorted(recent_new_filers, key=lambda x: x.get('filing_date', ''), reverse=True),
             "inst_recent_amendment_filers": sorted(recent_amendment_filers, key=lambda x: x.get('filing_date', ''), reverse=True)
         }
