@@ -512,17 +512,119 @@ class PriceAgent:
 
 class MomentumAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
-        if price_data_slice.empty or len(price_data_slice) < 253: return {"ticker": ticker, "momentum_signal": "hold", "momentum_1m": np.nan, "momentum_12m": np.nan, "momentum_error": "Not enough data"}
-        P_t = price_data_slice.Close.iloc[-1]
-        P_1m = price_data_slice.Close.shift(21).iloc[-1] if len(price_data_slice) > 21 else np.nan
-        P_12m = price_data_slice.Close.shift(252).iloc[-1]
+        # Minimum data required for 12-month momentum (252 trading days for a year)
+        # We need at least 253 points to calculate a 252-period shift (current price + 252 past prices)
+        required_data_points = 253
+
+        if price_data_slice.empty or len(price_data_slice) < required_data_points:
+            return {
+                "ticker": ticker,
+                "momentum_signal": "hold",
+                "momentum_1m": np.nan,
+                "momentum_12m": np.nan,
+                "momentum_confidence_score": 0.0, # Add a confidence score initialized to 0
+                "momentum_error": "Not enough data for 1-year and 1-month momentum."
+            }
+
+        df = price_data_slice.copy()
+
+        # Ensure 'Close' column exists and is numeric
+        if 'Close' not in df.columns or not pd.api.types.is_numeric_dtype(df['Close']):
+            return {
+                "ticker": ticker,
+                "momentum_signal": "hold",
+                "momentum_1m": np.nan,
+                "momentum_12m": np.nan,
+                "momentum_confidence_score": 0.0,
+                "momentum_error": "Price data is missing 'Close' column or not numeric."
+            }
+
+        # Calculate momentum for 1 month (approx. 21 trading days) and 12 months (approx. 252 trading days)
+        # Using .iloc[-1] for current price and .iloc[-22] for 1-month ago (21 trading days prior)
+        # and .iloc[-253] for 12-month ago (252 trading days prior)
+        # This assumes the index is ordered by time, and there are no missing dates that would break iloc indexing.
+        P_t = df["Close"].iloc[-1]
+
+        # Use .shift() and .iloc[-1] to get values from specific past *trading* days,
+        # and then dropna() to ensure valid numerical prices for calculation.
+        # This handles cases where data might be sparse at the beginning of the slice.
+        # We fetch enough initial data to allow for shifting.
+        
+        # Shifted prices. Use .dropna() to ensure previous_price is a scalar and not NaN if data is insufficient for that specific shift.
+        # If the shift results in NaN, the subsequent pd.notna(P_1m) will handle it.
+        P_1m_series = df["Close"].shift(21)
+        P_12m_series = df["Close"].shift(252)
+
+        # Get the latest shifted values. If the shift went beyond available data, these will be NaN.
+        P_1m = P_1m_series.iloc[-1]
+        P_12m = P_12m_series.iloc[-1]
+
+        # Calculate momentum percentages
+        # Ensure division by zero is explicitly handled or avoided for P_1m, P_12m
         m1 = ((P_t / P_1m) - 1) if pd.notna(P_1m) and P_1m != 0 else np.nan
         m12 = ((P_t / P_12m) - 1) if pd.notna(P_12m) and P_12m != 0 else np.nan
+
         signal = "hold"
+        confidence_score = 0.0 # Initial confidence score
+
+        # Define momentum thresholds (can be optimized via backtesting)
+        STRONG_POSITIVE_MOMENTUM_THRESHOLD = 0.10 # 10% gain over period
+        MODERATE_POSITIVE_MOMENTUM_THRESHOLD = 0.03 # 3% gain over period
+        STRONG_NEGATIVE_MOMENTUM_THRESHOLD = -0.10 # 10% loss over period
+        MODERATE_NEGATIVE_MOMENTUM_THRESHOLD = -0.03 # 3% loss over period
+
+        # Signal Logic: Combination of short-term and long-term momentum
         if pd.notna(m1) and pd.notna(m12):
-            if m12 > 0.01 and m1 > 0.01: signal = "buy"
-            elif m12 < -0.01 and m1 < -0.01: signal = "sell"
-        return {"ticker": ticker, "momentum_1m": float(m1) if pd.notna(m1) else np.nan, "momentum_12m": float(m12) if pd.notna(m12) else np.nan, "momentum_signal": signal}
+            # Strong Buy: Both short and long-term strong positive momentum
+            if m12 > STRONG_POSITIVE_MOMENTUM_THRESHOLD and m1 > MODERATE_POSITIVE_MOMENTUM_THRESHOLD:
+                signal = "buy"
+                confidence_score = 0.8 # High confidence
+            # Moderate Buy: Long-term positive, short-term positive (but maybe not strong)
+            elif m12 > MODERATE_POSITIVE_MOMENTUM_THRESHOLD and m1 > 0:
+                signal = "buy"
+                confidence_score = 0.5 # Moderate confidence
+            # Strong Sell: Both short and long-term strong negative momentum
+            elif m12 < STRONG_NEGATIVE_MOMENTUM_THRESHOLD and m1 < MODERATE_NEGATIVE_MOMENTUM_THRESHOLD:
+                signal = "sell"
+                confidence_score = -0.8 # High negative confidence
+            # Moderate Sell: Long-term negative, short-term negative (but maybe not strong)
+            elif m12 < MODERATE_NEGATIVE_MOMENTUM_THRESHOLD and m1 < 0:
+                signal = "sell"
+                confidence_score = -0.5 # Moderate negative confidence
+            else:
+                signal = "hold"
+                confidence_score = 0.0 # Neutral
+
+        # Adjust confidence based on how far from 0.0 the momentum values are
+        # This gives a continuous score, not just discrete levels
+        if pd.notna(m1) and pd.notna(m12):
+            # Combined momentum score (could be weighted or simple average)
+            # Normalize to roughly -1 to 1 range for consistency with other agents
+            raw_combined_momentum = (m1 + m12) / 2 # Simple average, adjust if needed
+            
+            # Simple linear scaling for confidence based on raw_combined_momentum
+            # Example: -0.1 to 0.1 range for raw_combined_momentum maps to -0.5 to 0.5 confidence
+            # Adjust scaling factor (e.g., 5.0) based on desired sensitivity
+            scaled_confidence = raw_combined_momentum * 5.0 
+            confidence_score = max(-1.0, min(1.0, scaled_confidence)) # Clamp between -1 and 1
+
+            # Override discrete signal based on clamped confidence
+            if confidence_score > 0.3: # Threshold for a buy signal based on confidence
+                signal = "buy"
+            elif confidence_score < -0.3: # Threshold for a sell signal based on confidence
+                signal = "sell"
+            else:
+                signal = "hold"
+
+
+        return {
+            "ticker": ticker,
+            "momentum_1m": float(m1) if pd.notna(m1) else np.nan,
+            "momentum_12m": float(m12) if pd.notna(m12) else np.nan,
+            "momentum_signal": signal,
+            "momentum_confidence_score": float(confidence_score), # New: Quantified confidence
+            "momentum_error": None # Clear error if successful
+        }
 
 class VolatilityAgent:
     def run(self, ticker: str, data: dict, price_data_slice: pd.DataFrame = None) -> dict:
