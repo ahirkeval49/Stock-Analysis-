@@ -345,7 +345,7 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
 class ModelClient:
     def __init__(self, api_key: str, provider: str = "openai"):
         self.api_key, self.provider = api_key, provider
-        models = {"openai": "gpt-4o", "deepseek": "deepseek-chat"}
+        models = {"openai": "gpt-4o", "deepseek": "deepseek-reasoner"}
         if not api_key: raise ValueError("API key required.")
         self.model_name = models.get(provider)
         if not self.model_name: raise ValueError(f"Unsupported provider: {provider}")
@@ -360,14 +360,155 @@ class ModelClient:
 
 class PriceAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
-        if price_data_slice.empty or len(price_data_slice) < 200: return {"ticker": ticker, "price_signal": "hold", "sma50": np.nan, "sma200": np.nan, "rsi14": np.nan, "price_error": "Not enough data"}
-        df = price_data_slice.copy(); df["SMA50"] = df["Close"].rolling(50).mean(); df["SMA200"] = df["Close"].rolling(200).mean()
-        delta = df["Close"].diff(); gain = delta.clip(lower=0).rolling(14).mean(); loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss.replace(0, np.nan); df["RSI14"] = 100 - (100 / (1 + rs)); latest = df.iloc[-1]; signal = "hold"
-        if not (pd.isna(latest.SMA50) or pd.isna(latest.SMA200) or pd.isna(latest.RSI14)):
-            if latest.SMA50 > latest.SMA200 and latest.RSI14 < 70: signal = "buy"
-            elif latest.SMA50 < latest.SMA200 and latest.RSI14 > 30: signal = "sell"
-        return {"ticker": ticker, "sma50": float(latest.SMA50) if pd.notna(latest.SMA50) else np.nan, "sma200": float(latest.SMA200) if pd.notna(latest.SMA200) else np.nan, "rsi14": float(latest.RSI14) if pd.notna(latest.RSI14) else np.nan, "price_signal": signal}
+        # Minimum data required for SMA200 and Bollinger Bands (approx. 20 periods)
+        # RSI needs 14 periods, SMA50 needs 50. SMA200 needs 200. Bollinger Bands typically use 20 periods.
+        # Let's ensure enough data for all, so 200 is a good base for SMA200, and 20 for Bollinger.
+        # Ensure at least 200 periods for all indicators to be meaningful.
+        required_data_points = 200 # For SMA200, which is the longest period currently.
+
+        if price_data_slice.empty or len(price_data_slice) < required_data_points:
+            return {
+                "ticker": ticker,
+                "price_signal": "hold",
+                "sma50": np.nan,
+                "sma200": np.nan,
+                "rsi14": np.nan,
+                "bb_upper": np.nan,
+                "bb_lower": np.nan,
+                "bb_signal": "hold",
+                "price_confidence_score": 0.0,
+                "price_error": "Not enough data for comprehensive analysis."
+            }
+
+        df = price_data_slice.copy()
+        
+        # --- Calculate Indicators ---
+        # Simple Moving Averages
+        df["SMA50"] = df["Close"].rolling(50).mean()
+        df["SMA200"] = df["Close"].rolling(200).mean()
+
+        # Relative Strength Index (RSI)
+        delta = df["Close"].diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        # Handle division by zero for RS by replacing 0 with np.nan for robust calculation
+        rs = gain / loss.replace(0, np.nan)
+        df["RSI14"] = 100 - (100 / (1 + rs))
+
+        # Bollinger Bands (typically 20-period SMA, 2 standard deviations)
+        bb_period = 20
+        bb_std_dev = 2
+        df["BB_SMA"] = df["Close"].rolling(bb_period).mean()
+        df["BB_STD"] = df["Close"].rolling(bb_period).std()
+        df["BB_Upper"] = df["BB_SMA"] + (df["BB_STD"] * bb_std_dev)
+        df["BB_Lower"] = df["BB_SMA"] - (df["BB_STD"] * bb_std_dev)
+
+        # Get latest valid data point
+        latest = df.iloc[-1]
+        
+        # Initialize signals and score
+        signal = "hold"
+        confidence_score = 0.0
+        bb_signal = "hold"
+
+        # --- Apply Signal Logic ---
+        
+        # Check for NaN values in latest indicators before making decisions
+        if pd.isna(latest.SMA50) or pd.isna(latest.SMA200) or pd.isna(latest.RSI14) or \
+           pd.isna(latest.BB_Upper) or pd.isna(latest.BB_Lower):
+            return {
+                "ticker": ticker,
+                "price_signal": "hold", # Fallback to hold if indicators are NaN at latest point
+                "sma50": float(latest.SMA50) if pd.notna(latest.SMA50) else np.nan,
+                "sma200": float(latest.SMA200) if pd.notna(latest.SMA200) else np.nan,
+                "rsi14": float(latest.RSI14) if pd.notna(latest.RSI14) else np.nan,
+                "bb_upper": float(latest.BB_Upper) if pd.notna(latest.BB_Upper) else np.nan,
+                "bb_lower": float(latest.BB_Lower) if pd.notna(latest.BB_Lower) else np.nan,
+                "bb_signal": "hold",
+                "price_confidence_score": 0.0,
+                "price_error": "Some key indicators are NaN at the latest data point."
+            }
+
+        current_close = latest.Close
+
+        # 1. SMA Crossover + Price Confirmation
+        # Golden Cross (Bullish)
+        if latest.SMA50 > latest.SMA200 and current_close > latest.SMA50:
+            # Check if recent cross occurred for stronger signal (optional, requires looking back)
+            # Example: Was SMA50 below SMA200 5 days ago, and now it's above?
+            if len(df) >= 205 and df["SMA50"].iloc[-5] < df["SMA200"].iloc[-5]: # Check 5 days ago for cross
+                 signal = "buy"
+                 confidence_score += 0.4 # Higher confidence for confirmed cross and price above SMAs
+            else:
+                 signal = "buy" # Weaker buy if no recent cross but alignment
+                 confidence_score += 0.2
+        # Death Cross (Bearish)
+        elif latest.SMA50 < latest.SMA200 and current_close < latest.SMA50:
+            if len(df) >= 205 and df["SMA50"].iloc[-5] > df["SMA200"].iloc[-5]: # Check 5 days ago for cross
+                signal = "sell"
+                confidence_score -= 0.4
+            else:
+                signal = "sell"
+                confidence_score -= 0.2
+
+        # 2. RSI Signal (Secondary Confirmation/Overbought/Oversold)
+        if latest.RSI14 < 30: # Oversold
+            if signal == "buy": confidence_score += 0.2 # RSI confirms buy
+            elif signal == "hold":
+                signal = "buy" # RSI alone triggers a buy (reversal play)
+                confidence_score += 0.1
+        elif latest.RSI14 > 70: # Overbought
+            if signal == "sell": confidence_score -= 0.2 # RSI confirms sell
+            elif signal == "hold":
+                signal = "sell" # RSI alone triggers a sell (reversal play)
+                confidence_score -= 0.1
+
+        # 3. Bollinger Bands Signal
+        # Price crossing below lower band (often buy opportunity after pullback)
+        if current_close < latest.BB_Lower:
+            bb_signal = "buy"
+            if signal == "buy": confidence_score += 0.1 # Adds to existing buy
+            elif signal == "hold":
+                signal = "buy" # BB alone triggers buy
+                confidence_score += 0.05
+        # Price crossing above upper band (often sell opportunity, or strong momentum)
+        elif current_close > latest.BB_Upper:
+            bb_signal = "sell"
+            if signal == "sell": confidence_score -= 0.1 # Adds to existing sell
+            elif signal == "hold":
+                signal = "sell" # BB alone triggers sell
+                confidence_score -= 0.05
+        
+        # If signal is still 'hold', but RSI is extreme (and not yet acted upon)
+        if signal == "hold":
+            if latest.RSI14 < 40 and latest.RSI14 > 30: # Approaching oversold
+                confidence_score += 0.05
+            elif latest.RSI14 > 60 and latest.RSI14 < 70: # Approaching overbought
+                confidence_score -= 0.05
+
+        # Final decision based on refined logic and confidence
+        if confidence_score > 0.3:
+            final_price_signal = "buy"
+        elif confidence_score < -0.3:
+            final_price_signal = "sell"
+        else:
+            final_price_signal = "hold"
+            
+        # Cap confidence score between -1.0 and 1.0 (or whatever range makes sense)
+        confidence_score = max(-1.0, min(1.0, confidence_score))
+
+        return {
+            "ticker": ticker,
+            "sma50": float(latest.SMA50),
+            "sma200": float(latest.SMA200),
+            "rsi14": float(latest.RSI14),
+            "bb_upper": float(latest.BB_Upper) if pd.notna(latest.BB_Upper) else np.nan,
+            "bb_lower": float(latest.BB_Lower) if pd.notna(latest.BB_Lower) else np.nan,
+            "bb_signal": bb_signal, # Individual BB signal
+            "price_signal": final_price_signal, # Overall aggregated signal
+            "price_confidence_score": float(confidence_score), # New: Quantified confidence
+            "price_error": None # Clear error if successful
+        }
 
 class MomentumAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
