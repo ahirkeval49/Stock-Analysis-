@@ -192,10 +192,29 @@ def get_cik_for_ticker(ticker: str) -> str | None: return TICKER_TO_CIK_MAP.get(
 
 @st.cache_data(ttl=6*3600)
 def fetch_inst_filings(ticker: str) -> list[dict]:
-  @st.cache_data(ttl=4*3600)
-    
+    """
+    Fetches institutional holder data from Yahoo Finance.
+    """
+    try:
+        df_holders = yf.Ticker(ticker).institutional_holders
+        if df_holders is not None and not df_holders.empty:
+            if 'Shares' in df_holders.columns:
+                df_holders['Shares'] = pd.to_numeric(df_holders['Shares'], errors='coerce').fillna(0)
+            if '% Out' in df_holders.columns:
+                df_holders['% Out'] = pd.to_numeric(df_holders['% Out'], errors='coerce').fillna(0.0)
+            if 'Date Reported' in df_holders.columns:
+                df_holders['Date Reported'] = df_holders['Date Reported'].astype(str)
+            return df_holders.to_dict("records")
+        return [{"error": f"No yfinance institutional holder data for {ticker}."}]
+    except Exception as e:
+        return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
+
+@st.cache_data(ttl=4*3600)
 def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]:
-    # --- This function is heavily modified for robustness ---
+    """
+    Fetches all recent SEC filings from EDGAR and parses Form 4 for transactions.
+    This version is modified for robustness.
+    """
     cik = get_cik_for_ticker(ticker_symbol)
     if not cik: return [{"error": f"SEC: CIK not found for {ticker_symbol}."}]
 
@@ -214,7 +233,7 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
     if 'filings' in submissions_data and 'recent' in submissions_data['filings']:
         recent = submissions_data['filings']['recent']
         forms, dates, acc_nos, docs = recent.get('form',[]), recent.get('filingDate',[]), recent.get('accessionNumber',[]), recent.get('primaryDocument',[])
-        
+
         for i in range(len(forms)):
             try:
                 filing_date_dt = datetime.strptime(dates[i], '%Y-%m-%d').replace(tzinfo=timezone.utc)
@@ -226,15 +245,17 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                 doc_name = docs[i]
                 cik_padded = str(cik).zfill(10)
                 base_url = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no}"
+                summary_link = f"{base_url}/{acc_nos[i]}-index.html"
+                doc_link = f"{base_url}/{doc_name}"
 
                 # Handle Form 4 transactions
                 if form_type == '4' and doc_name.lower().endswith(('.xml', '.xsd')):
-                    xml_url = f"{base_url}/{doc_name}"
+                    xml_url = doc_link
                     try:
                         filing_resp = requests.get(xml_url, headers=headers, timeout=10)
                         if filing_resp.status_code != 200: continue
                         soup_xml = BeautifulSoup(filing_resp.content, 'xml')
-                        
+
                         owner_tag = soup_xml.find('reportingOwner')
                         owner_name = owner_tag.find('rptOwnerName').text.strip() if owner_tag and owner_tag.find('rptOwnerName') else "N/A"
 
@@ -260,36 +281,26 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                                     "is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": dates[i],
                                     "transaction_date": tx_date, "reporting_owner": owner_name, "transaction_code": tx_code,
                                     "acq_disp_code": ad_code, "shares": shares, "price_per_share": price,
-                                    "link_to_filing": f"{base_url}/{acc_nos[i]}-index.html"
+                                    "link_to_filing": summary_link
                                 })
                     except Exception:
                         # If XML parsing fails, add it as a general filing so it's not missed
                         filings_list.append({
                             "is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": dates[i],
-                            "form_type": form_type, "document_link": f"{base_url}/{doc_name}",
-                            "summary_link": f"{base_url}/{acc_nos[i]}-index.html"
+                            "form_type": form_type, "document_link": doc_link, "summary_link": summary_link
                         })
                 else: # For all other forms, just log them
                     filings_list.append({
                         "is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": dates[i],
-                        "form_type": form_type, "document_link": f"{base_url}/{doc_name}",
-                        "summary_link": f"{base_url}/{acc_nos[i]}-index.html"
+                        "form_type": form_type, "document_link": doc_link, "summary_link": summary_link
                     })
             except Exception:
                 continue # Skip if there's an error with a single filing record
 
     if not filings_list: return [{"error": f"SEC: No relevant filings found within the last year for {ticker_symbol}."}]
-    
+
     filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True)
-    return filings_list  try:
-        df_holders = yf.Ticker(ticker).institutional_holders
-        if df_holders is not None and not df_holders.empty:
-            if 'Shares' in df_holders.columns: df_holders['Shares'] = pd.to_numeric(df_holders['Shares'], errors='coerce').fillna(0)
-            if '% Out' in df_holders.columns: df_holders['% Out'] = pd.to_numeric(df_holders['% Out'], errors='coerce').fillna(0.0)
-            if 'Date Reported' in df_holders.columns: df_holders['Date Reported'] = df_holders['Date Reported'].astype(str)
-            return df_holders.to_dict("records")
-        return [{"error": f"No yfinance institutional holder data for {ticker}."}]
-    except Exception as e: return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
+    return filings_list
 
 @st.cache_data(ttl=4 * 3600)
 def fetch_value_investing_io_data(ticker: str) -> dict:
