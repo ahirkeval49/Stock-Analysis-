@@ -791,69 +791,48 @@ class SentimentAgent:
         if news_err:
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": news_err}
 
-        # Filter out news items that are explicitly marked with an "error"
         valid_news = [item for item in news if isinstance(item, dict) and "error" not in item]
 
         if not valid_news:
-            # More precise error message if the entire news list was empty or only contained errors
-            err_msg = news[0].get("error") if news and isinstance(news[0], dict) and "error" in news[0] else "No valid news articles found for sentiment analysis."
+            err_msg = news[0].get("error") if news and isinstance(news[0], dict) and "error" in news[0] else "No valid news articles for sentiment."
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": err_msg}
 
         content_for_llm = []
         co_name = data.get("ticker_info", {}).get('longName', ticker)
         
-        # Sort news by recency and prioritize longer snippets
-        # News are already sorted by publish_datetime_utc descending, which is good.
-        # We'll just iterate and build content.
-        
-        # --- MODIFICATION HERE: Set MAX_NEWS_ARTICLES_FOR_LLM to 10 ---
         MAX_NEWS_ARTICLES_FOR_LLM = 10 
 
         for item in valid_news[:MAX_NEWS_ARTICLES_FOR_LLM]:
-            title = item.get('title', '').strip()
-            description = item.get('description', '').strip()
-            content_snippet = item.get('content_snippet', '').replace('[+... chars]', '').strip()
-            publisher = item.get('publisher', 'N/A').strip()
-            source_api = item.get('source_api', 'Unknown').strip()
-            publish_time = item.get('publish_time_readable', 'N/A').strip()
-
-            # Prefer content_snippet if substantial, otherwise use description
+            # --- FIX: Handle potential None values from the API before stripping ---
+            title = (item.get('title') or '').strip()
+            description = (item.get('description') or '').strip()
+            content_snippet = (item.get('content_snippet') or '').replace('[+... chars]', '').strip()
+            publisher = (item.get('publisher') or 'N/A').strip()
+            
             main_text = ""
-            if content_snippet and len(content_snippet) > 50: # Require a minimum length for content
+            if content_snippet and len(content_snippet) > 50:
                 main_text = f"Content: {content_snippet}"
-            elif description and len(description) > 50: # Require a minimum length for description
+            elif description and len(description) > 50:
                 main_text = f"Description: {description}"
             
-            # Only add to LLM input if there's substantial text
             if main_text:
-                snippet = f"Headline: {title}"
-                if main_text:
-                    snippet += f" | {main_text}"
+                snippet = f"Headline: {title} | {main_text}"
                 if publisher != 'N/A':
-                    snippet += f" (Source: {publisher} via {source_api})"
-                if publish_time != 'N/A':
-                    snippet += f" (Published: {publish_time})"
-                
+                    snippet += f" (Source: {publisher})"
                 content_for_llm.append(snippet)
 
         if not content_for_llm:
-            return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": "No processable news articles with sufficient content for sentiment analysis."}
+            return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": "No news with sufficient content."}
 
-        # --- LLM Prompt Engineering ---
         prompt = f"""
         As a financial sentiment analyst, analyze the following news articles for {co_name} ({ticker}).
         Your task is to determine the overall sentiment of these articles towards the company's stock value.
-
         Output a single numerical score between -1.0 and 1.0 (inclusive).
         - A score of 1.0 indicates extremely positive sentiment (strong buy).
-        - A score of 0.5 indicates moderately positive sentiment (buy).
         - A score of 0.0 indicates neutral sentiment (hold).
-        - A score of -0.5 indicates moderately negative sentiment (sell).
         - A score of -1.0 indicates extremely negative sentiment (strong sell).
-
         Focus on information that could impact the stock price (e.g., earnings, product news, analyst ratings, market outlook).
         **Output ONLY the numerical score, nothing else.**
-
         News Articles:
         """ + "\n".join(f"- {c}" for c in content_for_llm)
 
@@ -862,38 +841,19 @@ class SentimentAgent:
 
         try:
             resp = self.client.generate(prompt).strip()
-            
-            # --- Robust LLM Response Parsing ---
             match = re.search(r"([-+]?\d*\.\d+)|([-+]?\d+)", resp)
-            
             if match:
                 extracted_score = float(match.group(0))
                 score = max(-1.0, min(1.0, extracted_score))
-                
-                if len(resp.split()) > 5 and not resp.strip().replace('-', '').replace('.', '').isdigit():
-                    llm_err = f"LLM responded with extra text: '{resp[:50]}...'"
             else:
                 llm_err = f"LLM did not output a recognizable number: '{resp[:50]}...'"
-                score = 0.0
-
         except Exception as e:
             llm_err = f"LLM sentiment analysis call failed: {str(e)[:150]}"
-            score = 0.0
 
-        # Consolidate error messages
-        final_err = None
-        if news_err:
-            final_err = f"News fetch issues: {news_err}"
-        if llm_err:
-            final_err = (f"{final_err} | LLM issues: {llm_err}" if final_err else f"LLM issues: {llm_err}")
-
-
-        # --- Sentiment Confidence and Signal Generation ---
-        sentiment_confidence_score = abs(score)
+        final_err = news_err or llm_err
 
         BUY_THRESHOLD = 0.45
         SELL_THRESHOLD = -0.45
-
         sentiment_signal = "hold"
         if score >= BUY_THRESHOLD and not final_err:
             sentiment_signal = "buy"
@@ -904,43 +864,52 @@ class SentimentAgent:
             "ticker": ticker,
             "sentiment_score": float(score),
             "sentiment_signal": sentiment_signal,
-            "sentiment_confidence_score": float(sentiment_confidence_score),
+            "sentiment_confidence_score": abs(score),
             "sentiment_error": final_err
         }
-
 class NewsSummaryAgent:
     def __init__(self, client): self.client = client
+    
     def run(self, ticker: str, data: dict) -> dict:
         news, co_name, news_fetch_err = data.get("news",[]), data.get("ticker_info",{}).get('longName',ticker), data.get("news_fetch_status_error")
         if news_fetch_err: return {"ticker":ticker, "news_summary":"Summary skipped due to news fetch issues.", "news_summary_error":news_fetch_err}
-        if not news or (isinstance(news[0],dict) and "error" in news[0] and not any("error" not in item for item in news)):
+        
+        valid_news = [item for item in news if isinstance(item, dict) and "error" not in item]
+        if not valid_news:
             err = news[0]["error"] if news and isinstance(news[0],dict) and "error" in news[0] else "No news for summary."
             return {"ticker":ticker, "news_summary":"No news for summary.", "news_summary_error":err}
-        y_news = [item for item in news if item.get('source_api')=='Yahoo Finance' and "error" not in item][:5]
-        n_news = [item for item in news if item.get('source_api')=='NewsAPI.org' and "error" not in item][:5]
-        sel_news, y_len, n_len = [], len(y_news), len(n_news)
-        for i in range(max(y_len, n_len)):
-            if i < y_len: sel_news.append(y_news[i])
-            if i < n_len: sel_news.append(n_news[i])
+
         final_snips, titles = [], set()
-        for item in sel_news:
-            if len(final_snips) >= 7: break
-            title, desc, cont = item.get('title',''), item.get('description',''), item.get('content_snippet','').replace('[+... chars]','').strip()
-            if title in titles: continue; titles.add(title)
+        for item in valid_news[:10]: # Use up to 10 valid articles
+            # --- FIX: Handle potential None values from the API before stripping ---
+            title = (item.get('title') or '').strip()
+            desc = (item.get('description') or '').strip()
+            cont = (item.get('content_snippet') or '').replace('[+... chars]','').strip()
+
+            if not title or title in titles: continue
+            titles.add(title)
+            
             text = f"Title: {title}"
             if cont: text += f" | Content: {cont}"
             elif desc: text += f" | Description: {desc}"
             final_snips.append(text)
+            
+            if len(final_snips) >= 7: break
+
         if not final_snips: return {"ticker":ticker, "news_summary":"No content for summary.", "news_summary_error":"No articles with content/desc."}
-        prompt = f"Concise summary (max 200 words) for {co_name} ({ticker})...\n\nArticles:\n" + "\n".join(f"- {s}" for s in final_snips)
+        
+        prompt = f"Provide a concise financial summary (max 150 words) for {co_name} ({ticker}) based on these headlines...\n\nArticles:\n" + "\n".join(f"- {s}" for s in final_snips)
         summary, err_msg = "Could not generate summary.", None
         try:
             resp = self.client.generate(prompt).strip()
-            if resp.startswith("Error:"): err_msg = resp
-            else: summary = resp
-        except Exception as e: err_msg = f"LLM summary call failed: {str(e)[:150]}"
+            if resp.startswith("Error:") or len(resp) < 20: 
+                err_msg = resp if resp else "LLM returned empty summary."
+            else: 
+                summary = resp
+        except Exception as e:
+            err_msg = f"LLM summary call failed: {str(e)[:150]}"
+            
         return {"ticker":ticker, "news_summary":summary, "news_summary_error":err_msg}
-
 class FundamentalsAgent:
     def run(self, ticker: str, data: dict) -> dict:
         s = data.get("ticker_info",{}); mc, fcf, roe, de = s.get("marketCap"), s.get("freeCashflow"), s.get("returnOnEquity"), s.get("debtToEquity")
