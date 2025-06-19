@@ -1259,10 +1259,10 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     max_dd = log_df.drawdown.min()*100 if not log_df.drawdown.empty and pd.notna(log_df.drawdown.min()) else 0
     trades = (log_df.signal != log_df.signal.shift()).fillna(False).sum()//2
     return {"Initial Capital":f"${initial_capital:,.2f}", "Final Portfolio Value":f"${log_df.portfolio_value.iloc[-1]:,.2f}", "Total Return (%)":f"{total_ret:.2f}%", "Annualized Return (%)":f"{ann_ret:.2f}%", "Annualized Volatility (%)":f"{ann_vol:.2f}%", "Sharpe Ratio":f"{sharpe:.2f}", "Max Drawdown (%)":f"{max_dd:.2f}%", "Number of Trades (approx)":f"{trades}"}, log_df
+
 def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A")
     ticker_info = res_detail.get("ticker_info", {})
-    # Restoring the "All Signals" tab as it's useful for debugging
     tab_titles = ["📈 Chart & Core", "📊 Fundamentals & Value", "📰 News & Filings", "⚙️ All Signals"]
     tabs = st.tabs(tab_titles)
 
@@ -1283,41 +1283,33 @@ def display_detailed_analysis(res_detail):
 
     with tabs[0]: # Technicals & Momentum
         st.markdown("#### Price Chart (1-Year)")
-        st.line_chart(fetch_price_history(ticker, period="1y")["Close"], use_container_width=True, color="#0072F0")
+        price_hist_chart = fetch_price_history(ticker, period="1y")
+        if not price_hist_chart.empty:
+            st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
+        
         t_col1, t_col2 = st.columns(2)
         with t_col1:
             st.markdown("##### Technical Signal")
             st.info(f"**Signal:** {str(res_detail.get('price_signal', 'N/A')).upper()}")
-            st.caption(f"50D SMA: ${res_detail.get('sma50', 0):,.2f} | 200D SMA: ${res_detail.get('sma200', 0):,.2f} | RSI: {res_detail.get('rsi14', 0):.2f}")
         with t_col2:
             st.markdown("##### Momentum Signal")
             st.info(f"**Signal:** {str(res_detail.get('momentum_signal', 'N/A')).upper()}")
-            st.caption(f"1-Month: {res_detail.get('momentum_1m', 0) * 100:.2f}% | 12-Month: {res_detail.get('momentum_12m', 0) * 100:.2f}%")
 
     with tabs[1]: # Fundamentals & Value
         f_col1, f_col2 = st.columns(2)
         with f_col1:
             st.markdown("##### Core Fundamentals")
+            st.info(f"**Signal:** {str(res_detail.get('fund_signal', 'N/A')).upper()}")
             cap_str = f"${ticker_info.get('marketCap', 0) / 1e9:.2f}B" if isinstance(ticker_info.get('marketCap'), (int, float)) else "N/A"
-            fcy_val = res_detail.get('fcf_yield')
-            st.metric("Market Cap", cap_str)
-            st.metric("FCF Yield", f"{fcy_val * 100:.2f}%" if isinstance(fcy_val, (int, float)) else "N/A")
-            # <<< RESTORED: Financial Health Table >>>
-            roe_val = ticker_info.get('returnOnEquity'); de_val = ticker_info.get('debtToEquity');
-            st.table(pd.DataFrame({
-                "Return on Equity": [f"{roe_val * 100:.2f}%" if isinstance(roe_val,(int,float)) else "N/A"],
-                "Debt to Equity": [f"{de_val:.2f}" if isinstance(de_val,(int,float)) else "N/A"]
-            }))
+            roe_val = ticker_info.get('returnOnEquity')
+            st.caption(f"Market Cap: {cap_str}")
+            st.caption(f"Return on Equity: {roe_val * 100:.2f}%" if isinstance(roe_val, (int,float)) else "ROE: N/A")
         with f_col2:
-            st.markdown("##### Valuation Metrics")
-            st.metric("Forward P/E", f"{ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'), (int, float)) else "N/A")
+            st.markdown("##### Valuation")
+            st.info(f"**VI.io Signal:** {str(res_detail.get('vi_signal', 'N/A')).upper()}")
             up_val = res_detail.get('vi_upside_percent')
-            st.metric("VI.io Upside", f"{up_val:.1f}%" if isinstance(up_val, (int, float)) else "N/A")
-            # <<< RESTORED: Fair Value Comment >>>
-            vi_text = res_detail.get('vi_valuation_text_display')
-            if vi_text:
-                with st.expander("Show Fair Value Rationale"):
-                    st.markdown(f"> *{vi_text}*")
+            st.caption(f"Forward P/E: {ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'), (int,float)) else "P/E: N/A")
+            st.caption(f"VI.io Upside: {up_val:.1f}%" if isinstance(up_val, (int,float)) else "VI.io Upside: N/A")
 
     with tabs[2]: # News & Filings
         news_col, file_col = st.columns([3, 2])
@@ -1325,33 +1317,48 @@ def display_detailed_analysis(res_detail):
             st.markdown("##### News Summary & Sentiment")
             st.info(f"**Sentiment Signal:** {str(res_detail.get('sentiment_signal','N/A')).upper()}")
             st.write(res_detail.get('news_summary', 'No summary available.'))
-            # <<< RESTORED: News Links Popover >>>
-            headlines = res_detail.get('news_headlines_for_popover', [])
-            if headlines:
-                with st.popover("View News Sources & Links"):
-                    for line in headlines:
-                        st.markdown(f"- {line}")
+        
         with file_col:
             st.markdown("##### Corporate Filings")
-            with st.expander("SEC Filings"):
+            with st.expander("View All Recent Filings"):
                 all_filings = res_detail.get('sec_all_filings_raw', [])
                 if not all_filings or (isinstance(all_filings[0], dict) and 'error' in all_filings[0]):
                     st.warning(all_filings[0]['error'] if all_filings else "Filings could not be fetched.")
                 else:
-                    st.dataframe(pd.DataFrame(all_filings), hide_index=True, use_container_width=True)
-            
-            # <<< RESTORED: Institutional Holdings List >>>
+                    st.dataframe(pd.DataFrame(all_filings), use_container_width=True, hide_index=True)
+
             with st.expander("Institutional Holders"):
-                holders = res_detail.get('inst_top_holders', [])
-                if holders:
-                    st.dataframe(pd.DataFrame(holders)[["Holder", "Shares", "% Out", "Date Reported"]].rename(columns={"% Out":"% of Outstanding"}), hide_index=True, use_container_width=True)
-                else: st.info("Institutional holder data not available.")
+                # <<< FIX: Flexible column selection to prevent KeyError >>>
+                def display_holders_df(holders_data):
+                    if not holders_data:
+                        st.info("No data available for this section.")
+                        return
+                    
+                    df_holders = pd.DataFrame(holders_data)
+                    # Rename column if it exists
+                    if '% Out' in df_holders.columns:
+                        df_holders = df_holders.rename(columns={"% Out": "% of Outstanding"})
+                    
+                    # Define desired columns and find which ones actually exist
+                    desired_cols = ["Holder", "Shares", "% of Outstanding", "Date Reported"]
+                    available_cols = [col for col in desired_cols if col in df_holders.columns]
+                    
+                    if not available_cols:
+                        st.warning("Holder data is in an unexpected format.")
+                        st.dataframe(df_holders) # Show raw dataframe as a fallback
+                    else:
+                        st.dataframe(df_holders[available_cols], hide_index=True, use_container_width=True)
+
+                st.markdown("###### Top 10 Holders")
+                display_holders_df(res_detail.get('inst_top_holders', []))
+                
+                st.markdown("###### Recently Reported")
+                display_holders_df(res_detail.get('inst_recently_reported_holders', []))
 
     with tabs[3]: # All Signals (Raw Data)
-        st.subheader("Raw Agent Outputs")
+        st.subheader("All Agent Raw Outputs")
         filtered_results = {k: v for k, v in res_detail.items() if not isinstance(v, (dict, list))}
         st.dataframe(pd.DataFrame(filtered_results.items(), columns=["Metric", "Value"]), use_container_width=True, hide_index=True)
-
 # --- Streamlit UI ---
 llm_client = None
 try:
