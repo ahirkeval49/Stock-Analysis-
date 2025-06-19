@@ -188,77 +188,101 @@ TICKER_TO_CIK_MAP = get_all_cik_ticker_mappings()
 
 def get_cik_for_ticker(ticker: str) -> str | None: return TICKER_TO_CIK_MAP.get(ticker.upper())
 
-
+@st.cache_data(ttl=4*3600)
+def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]:
+    cik = get_cik_for_ticker(ticker_symbol)
+    if not cik:
+        try:
+            headers = {'User-Agent': SEC_USER_AGENT}
+            lookup_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={ticker_symbol.upper()}&owner=exclude&count=10"
+            response = requests.get(lookup_url, headers=headers, timeout=10); response.raise_for_status()
+            soup = BeautifulSoup(response.content, 'html.parser')
+            cik_anchor = soup.find('a', href=re.compile(r"CIK=(\d{10})"))
+            if cik_anchor:
+                match = re.search(r"CIK=(\d{10})", cik_anchor['href'])
+                if match: cik = match.group(1)
+            if not cik:
+                cik_text_match = re.search(r"CIK:\s*(\d{10})", soup.get_text(), re.IGNORECASE)
+                if cik_text_match: cik = cik_text_match.group(1)
+        except Exception: pass
+    if not cik: return [{"error": f"SEC: CIK not found for {ticker_symbol}."}]
+    cik_padded = str(cik).zfill(10)
+    submissions_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+    headers = {'User-Agent': SEC_USER_AGENT}; filings_list = []
+    try:
+        response = requests.get(submissions_url, headers=headers, timeout=20); response.raise_for_status()
+        submissions_data = response.json()
+        today, date_limit = datetime.now(timezone.utc), datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        if 'filings' in submissions_data and 'recent' in submissions_data['filings']:
+            recent = submissions_data['filings']['recent']
+            forms, dates, acc_nos, docs = recent.get('form',[]), recent.get('filingDate',[]), recent.get('accessionNumber',[]), recent.get('primaryDocument',[])
+            metadata = []
+            for i in range(len(forms)):
+                try:
+                    if datetime.strptime(dates[i], '%Y-%m-%d').replace(tzinfo=timezone.utc) >= date_limit:
+                        metadata.append({"form_type": forms[i], "filing_date_str": dates[i], "accession_number": acc_nos[i], "primary_document": docs[i]})
+                except (ValueError, IndexError): continue
+            xml_fetches, max_xml, max_other = 0, 20, 15
+            for info in metadata:
+                form, date_str, acc_no, doc_name = info["form_type"], info["filing_date_str"], info["accession_number"], info["primary_document"]
+                acc_no_dashless = acc_no.replace('-', '')
+                idx_link = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{acc_no}-index.html"
+                if form == '4' and doc_name.lower().endswith(('.xml', '.xsd')):
+                    if xml_fetches >= max_xml: continue
+                    xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}"
+                    try:
+                        filing_resp = requests.get(xml_url, headers=headers, timeout=10)
+                        if filing_resp.status_code != 200: continue
+                        soup_xml = BeautifulSoup(filing_resp.content, 'xml'); xml_fetches += 1
+                        owner_tag = soup_xml.find('reportingOwner'); owner_name, owner_rel = "N/A", "N/A"
+                        if owner_tag:
+                            if owner_tag.find('reportingOwnerId') and owner_tag.find('reportingOwnerId').find('rptOwnerName'): owner_name = owner_tag.find('reportingOwnerId').find('rptOwnerName').text.strip()
+                            rel_tag = owner_tag.find('reportingOwnerRelationship'); rels = []
+                            if rel_tag:
+                                if rel_tag.find('isDirector') and rel_tag.find('isDirector').text in ['1','true']: rels.append("Director")
+                                if rel_tag.find('isOfficer') and rel_tag.find('isOfficer').text in ['1','true']: rels.append(f"Officer ({rel_tag.find('officerTitle').text.strip() if rel_tag.find('officerTitle') and rel_tag.find('officerTitle').text else ''})")
+                                if rel_tag.find('isTenPercentOwner') and rel_tag.find('isTenPercentOwner').text in ['1','true']: rels.append(">10% Owner")
+                                if rels: owner_rel = ", ".join(filter(None, rels))
+                        for table_name in ['nonDerivativeTable', 'derivativeTable']:
+                            table = soup_xml.find(table_name)
+                            if not table: continue
+                            for tx in table.find_all(['nonDerivativeTransaction', 'derivativeTransaction']):
+                                tx_date_tag, tx_code_tag = tx.find('transactionDate'), tx.find('transactionCoding')
+                                tx_date = tx_date_tag.find('value').text.strip() if tx_date_tag and tx_date_tag.find('value') else "N/A"
+                                tx_code = tx_code_tag.find('transactionCode').text.strip().upper() if tx_code_tag and tx_code_tag.find('transactionCode') else "N/A"
+                                shares, price = 0.0, None
+                                amounts = tx.find('transactionAmounts')
+                                if amounts and amounts.find('transactionShares') and amounts.find('transactionShares').find('value'):
+                                    try: shares = float(amounts.find('transactionShares').find('value').text.strip())
+                                    except ValueError: continue
+                                price_node = tx.find('transactionPricePerShare')
+                                if price_node and price_node.find('value'):
+                                    try: price = float(price_node.find('value').text.strip())
+                                    except ValueError: price = None
+                                ad_node = tx.find('transactionAcquiredDisposedCode'); ad_code = ad_node.find('value').text.strip().upper() if ad_node and ad_node.find('value') else "N/A"
+                                if shares != 0: filings_list.append({"is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": date_str, "transaction_date": tx_date, "reporting_owner": owner_name, "owner_relationship": owner_rel, "transaction_code": tx_code, "acq_disp_code": ad_code, "shares": shares, "price_per_share": price, "link_to_filing": idx_link})
+                    except: pass
+                elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other:
+                    filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": date_str, "form_type": form, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}", "summary_link": idx_link})
+            if not filings_list and xml_fetches > 0: return [{"error": f"SEC: {xml_fetches} Form 4s for {ticker_symbol}, but no tx parsed."}]
+            if not filings_list: return [{"error": f"SEC: No relevant filings for {ticker_symbol} (CIK:{cik_padded})."}]
+        else: return [{"error": f"SEC: No recent filings data for {ticker_symbol} (CIK:{cik_padded})."}]
+    except requests.exceptions.HTTPError as e: return [{"error": f"SEC HTTP error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
+    except requests.exceptions.RequestException as e: return [{"error": f"SEC Request error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
+    except Exception as e: return [{"error": f"SEC Unexpected error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
+    filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True); return filings_list
 
 @st.cache_data(ttl=6*3600)
 def fetch_inst_filings(ticker: str) -> list[dict]:
-    """
-    Fetches institutional holder data from Yahoo Finance.
-    """
     try:
         df_holders = yf.Ticker(ticker).institutional_holders
         if df_holders is not None and not df_holders.empty:
-            if 'Shares' in df_holders.columns:
-                df_holders['Shares'] = pd.to_numeric(df_holders['Shares'], errors='coerce').fillna(0)
-            if '% Out' in df_holders.columns:
-                df_holders['% Out'] = pd.to_numeric(df_holders['% Out'], errors='coerce').fillna(0.0)
-            if 'Date Reported' in df_holders.columns:
-                df_holders['Date Reported'] = df_holders['Date Reported'].astype(str)
+            if 'Shares' in df_holders.columns: df_holders['Shares'] = pd.to_numeric(df_holders['Shares'], errors='coerce').fillna(0)
+            if '% Out' in df_holders.columns: df_holders['% Out'] = pd.to_numeric(df_holders['% Out'], errors='coerce').fillna(0.0)
+            if 'Date Reported' in df_holders.columns: df_holders['Date Reported'] = df_holders['Date Reported'].astype(str)
             return df_holders.to_dict("records")
         return [{"error": f"No yfinance institutional holder data for {ticker}."}]
-    except Exception as e:
-        return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
-@st.cache_data(ttl=1800) # Cache for 30 minutes
-def fetch_sec_filings_from_search_api(search_query: str, lookback_days: int = 365) -> list[dict]:
-    """
-    Fetches ALL recent SEC filings using the new EDGAR search API.
-    This version uses a standard browser User-Agent to avoid 403 errors.
-    """
-    # --- FIX: Using a more standard browser User-Agent ---
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36',
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-    }
-    api_url = "https://efts.sec.gov/LATEST/search-index"
-    
-    payload = {
-        "q": search_query, # The API is smart enough to handle tickers directly
-        "from": 0,
-        "size": 100,
-        "sort": [{"filed_date": "desc"}]
-    }
-
-    try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=20)
-        response.raise_for_status()
-        results = response.json()
-    except Exception as e:
-        return [{"error": f"SEC Search API request failed for '{search_query}': {e}"}]
-
-    if not results or not results.get('hits', {}).get('hits'):
-        return [{"error": f"SEC Search API: No filings found for '{search_query}'."}]
-
-    filings_list = []
-    date_limit = datetime.now(timezone.utc) - timedelta(days=lookback_days)
-
-    for hit in results['hits']['hits']:
-        source = hit.get('_source', {})
-        try:
-            filing_date_dt = datetime.fromisoformat(source.get('file_date'))
-            if filing_date_dt < date_limit:
-                continue
-
-            filings_list.append({
-                "filing_date": source.get('file_date', 'N/A')[:10],
-                "reporting_owner": ", ".join(source.get('display_names', ["N/A"])),
-                "form_type": source.get('form', 'N/A'),
-                "link_to_filing": f"https://www.sec.gov/edgar/search/#/submission/{source.get('adsh')}"
-            })
-        except (ValueError, TypeError, KeyError):
-            continue
-
-    return sorted(filings_list, key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True)
+    except Exception as e: return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
 
 @st.cache_data(ttl=4 * 3600)
 def fetch_value_investing_io_data(ticker: str) -> dict:
@@ -285,6 +309,37 @@ def fetch_value_investing_io_data(ticker: str) -> dict:
     except requests.exceptions.RequestException as req_err: return {"error": f"VI.io: Request error for {ticker}: {req_err}"}
     except Exception as e: return {"error": f"VI.io: Unexpected error for {ticker}: {e}"}
 
+@st.cache_data(ttl=3600)
+def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
+    url = f"https://www.capitoltrades.com/trades?asset={ticker.upper()}&pageSize=100&perPage=100"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'}
+    trades_list = []
+    try:
+        response = requests.get(url, headers=headers, timeout=20); response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        trade_rows = soup.select("a[href^='/trades/'][class*='trade-row'], a[href^='/trades/'][class*='issuer-trade-row']")
+        if not trade_rows: trade_rows = soup.find_all('a', href=lambda href: href and href.startswith('/trades/'))
+        if not trade_rows: return [{"error": f"CT: No trade rows found for {ticker}. Website HTML structure may have changed or scraping blocked. This feature is experimental."}]
+        for row in trade_rows[:20]:
+            name_tag = row.find(['div','span'], class_=lambda x: x and ('politician-name' in x or 'filer-name' in x))
+            type_tag = row.find(['div','span'], class_=lambda x: x and ('tx-type' in x or 'transaction-type' in x))
+            val_tag = row.find(['div','span'], class_=lambda x: x and ('tx-value' in x or 'transaction-value' in x))
+            date_tag = row.find(['div','span'], class_=lambda x: x and ('tx-date' in x or 'transaction-date' in x))
+            if all([name_tag, type_tag, val_tag, date_tag]):
+                name, tx_type_text = name_tag.text.strip(), type_tag.text.strip().lower()
+                tx_type = "purchase" if "purchase" in tx_type_text else ("sale" if "sale" in tx_type_text else "other")
+                val_range, date_str, val_est = val_tag.text.strip(), date_tag.text.strip(), 0
+                matches = re.findall(r'\$([\d,]+)', val_range)
+                if matches:
+                    try: val_est = int(matches[0].replace(',',''))
+                    except ValueError: pass
+                trades_list.append({"politician_name": name, "transaction_type": tx_type, "value_range": val_range, "value_estimate_lower": val_est, "date_str": date_str, "source_url": urljoin("https://www.capitoltrades.com", row['href'])})
+        if not trades_list and trade_rows: return [{"error": f"CT: Found rows for {ticker}, but failed parsing. HTML details may have changed."}]
+        return trades_list
+    except requests.exceptions.Timeout: return [{"error": f"CT: Timeout fetching {ticker}."}]
+    except requests.exceptions.HTTPError as e: return [{"error": f"CT: HTTP error {e.response.status_code if e.response else ''} for {ticker}."}]
+    except requests.exceptions.RequestException as e: return [{"error": f"CT: Request error for {ticker}: {e}."}]
+    except Exception as e: return [{"error": f"CT: Parsing error for {ticker}: {e}."}]
 
 # --- LLM Client and Agent Classes ---
 class ModelClient:
@@ -665,110 +720,156 @@ class SentimentAgent:
         if news_err:
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": news_err}
 
+        # Filter out news items that are explicitly marked with an "error"
         valid_news = [item for item in news if isinstance(item, dict) and "error" not in item]
 
         if not valid_news:
-            err_msg = news[0].get("error") if news and isinstance(news[0], dict) and "error" in news[0] else "No valid news articles for sentiment."
+            # More precise error message if the entire news list was empty or only contained errors
+            err_msg = news[0].get("error") if news and isinstance(news[0], dict) and "error" in news[0] else "No valid news articles found for sentiment analysis."
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": err_msg}
 
         content_for_llm = []
         co_name = data.get("ticker_info", {}).get('longName', ticker)
         
+        # Sort news by recency and prioritize longer snippets
+        # News are already sorted by publish_datetime_utc descending, which is good.
+        # We'll just iterate and build content.
+        
+        # --- MODIFICATION HERE: Set MAX_NEWS_ARTICLES_FOR_LLM to 10 ---
         MAX_NEWS_ARTICLES_FOR_LLM = 10 
 
         for item in valid_news[:MAX_NEWS_ARTICLES_FOR_LLM]:
-            # --- FIX: Handle potential None values from the API before stripping ---
-            title = (item.get('title') or '').strip()
-            description = (item.get('description') or '').strip()
-            content_snippet = (item.get('content_snippet') or '').replace('[+... chars]', '').strip()
-            publisher = (item.get('publisher') or 'N/A').strip()
-            
+            title = item.get('title', '').strip()
+            description = item.get('description', '').strip()
+            content_snippet = item.get('content_snippet', '').replace('[+... chars]', '').strip()
+            publisher = item.get('publisher', 'N/A').strip()
+            source_api = item.get('source_api', 'Unknown').strip()
+            publish_time = item.get('publish_time_readable', 'N/A').strip()
+
+            # Prefer content_snippet if substantial, otherwise use description
             main_text = ""
-            if content_snippet and len(content_snippet) > 50:
+            if content_snippet and len(content_snippet) > 50: # Require a minimum length for content
                 main_text = f"Content: {content_snippet}"
-            elif description and len(description) > 50:
+            elif description and len(description) > 50: # Require a minimum length for description
                 main_text = f"Description: {description}"
             
+            # Only add to LLM input if there's substantial text
             if main_text:
-                snippet = f"Headline: {title} | {main_text}"
+                snippet = f"Headline: {title}"
+                if main_text:
+                    snippet += f" | {main_text}"
                 if publisher != 'N/A':
-                    snippet += f" (Source: {publisher})"
+                    snippet += f" (Source: {publisher} via {source_api})"
+                if publish_time != 'N/A':
+                    snippet += f" (Published: {publish_time})"
+                
                 content_for_llm.append(snippet)
 
         if not content_for_llm:
-            return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": "No news with sufficient content."}
+            return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": "No processable news articles with sufficient content for sentiment analysis."}
 
+        # --- LLM Prompt Engineering ---
         prompt = f"""
         As a financial sentiment analyst, analyze the following news articles for {co_name} ({ticker}).
         Your task is to determine the overall sentiment of these articles towards the company's stock value.
+
         Output a single numerical score between -1.0 and 1.0 (inclusive).
         - A score of 1.0 indicates extremely positive sentiment (strong buy).
+        - A score of 0.5 indicates moderately positive sentiment (buy).
         - A score of 0.0 indicates neutral sentiment (hold).
+        - A score of -0.5 indicates moderately negative sentiment (sell).
         - A score of -1.0 indicates extremely negative sentiment (strong sell).
+
         Focus on information that could impact the stock price (e.g., earnings, product news, analyst ratings, market outlook).
         **Output ONLY the numerical score, nothing else.**
+
         News Articles:
         """ + "\n".join(f"- {c}" for c in content_for_llm)
 
-        score, llm_err = 0.0, None
+        score = 0.0
+        llm_err = None
+
         try:
             resp = self.client.generate(prompt).strip()
+            
+            # --- Robust LLM Response Parsing ---
             match = re.search(r"([-+]?\d*\.\d+)|([-+]?\d+)", resp)
+            
             if match:
-                score = max(-1.0, min(1.0, float(match.group(0))))
+                extracted_score = float(match.group(0))
+                score = max(-1.0, min(1.0, extracted_score))
+                
+                if len(resp.split()) > 5 and not resp.strip().replace('-', '').replace('.', '').isdigit():
+                    llm_err = f"LLM responded with extra text: '{resp[:50]}...'"
             else:
                 llm_err = f"LLM did not output a recognizable number: '{resp[:50]}...'"
+                score = 0.0
+
         except Exception as e:
             llm_err = f"LLM sentiment analysis call failed: {str(e)[:150]}"
+            score = 0.0
 
-        final_err = news_err or llm_err
+        # Consolidate error messages
+        final_err = None
+        if news_err:
+            final_err = f"News fetch issues: {news_err}"
+        if llm_err:
+            final_err = (f"{final_err} | LLM issues: {llm_err}" if final_err else f"LLM issues: {llm_err}")
+
+
+        # --- Sentiment Confidence and Signal Generation ---
+        sentiment_confidence_score = abs(score)
+
+        BUY_THRESHOLD = 0.45
+        SELL_THRESHOLD = -0.45
+
         sentiment_signal = "hold"
-        if not final_err:
-            if score >= 0.45: sentiment_signal = "buy"
-            elif score <= -0.45: sentiment_signal = "sell"
+        if score >= BUY_THRESHOLD and not final_err:
+            sentiment_signal = "buy"
+        elif score <= SELL_THRESHOLD and not final_err:
+            sentiment_signal = "sell"
 
-        return {"ticker": ticker, "sentiment_score": float(score), "sentiment_signal": sentiment_signal, "sentiment_confidence_score": abs(score), "sentiment_error": final_err}
+        return {
+            "ticker": ticker,
+            "sentiment_score": float(score),
+            "sentiment_signal": sentiment_signal,
+            "sentiment_confidence_score": float(sentiment_confidence_score),
+            "sentiment_error": final_err
+        }
+
 class NewsSummaryAgent:
     def __init__(self, client): self.client = client
-    
     def run(self, ticker: str, data: dict) -> dict:
         news, co_name, news_fetch_err = data.get("news",[]), data.get("ticker_info",{}).get('longName',ticker), data.get("news_fetch_status_error")
         if news_fetch_err: return {"ticker":ticker, "news_summary":"Summary skipped due to news fetch issues.", "news_summary_error":news_fetch_err}
-        
-        valid_news = [item for item in news if isinstance(item, dict) and "error" not in item]
-        if not valid_news:
-            err = news[0].get("error") if news and isinstance(news[0],dict) and "error" in news[0] else "No news for summary."
+        if not news or (isinstance(news[0],dict) and "error" in news[0] and not any("error" not in item for item in news)):
+            err = news[0]["error"] if news and isinstance(news[0],dict) and "error" in news[0] else "No news for summary."
             return {"ticker":ticker, "news_summary":"No news for summary.", "news_summary_error":err}
-
+        y_news = [item for item in news if item.get('source_api')=='Yahoo Finance' and "error" not in item][:5]
+        n_news = [item for item in news if item.get('source_api')=='NewsAPI.org' and "error" not in item][:5]
+        sel_news, y_len, n_len = [], len(y_news), len(n_news)
+        for i in range(max(y_len, n_len)):
+            if i < y_len: sel_news.append(y_news[i])
+            if i < n_len: sel_news.append(n_news[i])
         final_snips, titles = [], set()
-        for item in valid_news[:10]:
-            # --- FIX: Handle potential None values before stripping ---
-            title = (item.get('title') or '').strip()
-            desc = (item.get('description') or '').strip()
-            cont = (item.get('content_snippet') or '').replace('[+... chars]','').strip()
-
-            if not title or title in titles: continue
-            titles.add(title)
-            
+        for item in sel_news:
+            if len(final_snips) >= 7: break
+            title, desc, cont = item.get('title',''), item.get('description',''), item.get('content_snippet','').replace('[+... chars]','').strip()
+            if title in titles: continue; titles.add(title)
             text = f"Title: {title}"
             if cont: text += f" | Content: {cont}"
             elif desc: text += f" | Description: {desc}"
             final_snips.append(text)
-            
-            if len(final_snips) >= 7: break
-
         if not final_snips: return {"ticker":ticker, "news_summary":"No content for summary.", "news_summary_error":"No articles with content/desc."}
-        
-        prompt = f"Provide a concise financial summary (max 150 words) for {co_name} ({ticker}) based on these headlines...\n\nArticles:\n" + "\n".join(f"- {s}" for s in final_snips)
+        prompt = f"Concise summary (max 200 words) for {co_name} ({ticker})...\n\nArticles:\n" + "\n".join(f"- {s}" for s in final_snips)
         summary, err_msg = "Could not generate summary.", None
         try:
             resp = self.client.generate(prompt).strip()
-            if len(resp) < 20: err_msg = "LLM returned an empty or too-short summary."
+            if resp.startswith("Error:"): err_msg = resp
             else: summary = resp
-        except Exception as e:
-            err_msg = f"LLM summary call failed: {str(e)[:150]}"
-            
+        except Exception as e: err_msg = f"LLM summary call failed: {str(e)[:150]}"
         return {"ticker":ticker, "news_summary":summary, "news_summary_error":err_msg}
+
 class FundamentalsAgent:
     def run(self, ticker: str, data: dict) -> dict:
         s = data.get("ticker_info",{}); mc, fcf, roe, de = s.get("marketCap"), s.get("freeCashflow"), s.get("returnOnEquity"), s.get("debtToEquity")
@@ -797,184 +898,85 @@ class ValuationAgent:
         return {"ticker":ticker, "forward_pe":pe, "relative_pe_signal":rel_sig, "dcf_fair_price":float(fp_est) if pd.notna(fp_est) else np.nan, "dcf_signal":dcf_sig, "valuation_error":None}
 
 class AnalystRatingAgent:
-    """
-    Analyzes analyst ratings and price targets.
-    - IMPROVEMENT: Uses a scoring system for both recommendation and upside to handle conflicts and nuance.
-    - IMPROVEMENT: Signal is based on a combined final score, making the logic more robust.
-    """
     def run(self, ticker: str, data: dict) -> dict:
-        info, hist = data.get("ticker_info", {}), data.get("price_history")
-        price_v = info.get("currentPrice")
-        if price_v is None and hist is not None and not hist.empty:
-            price_v = hist.Close.iloc[-1]
-        
-        curr_p = float(price_v) if isinstance(price_v, (int, float)) and price_v > 0 else None
-        if curr_p is None:
-            return {"ticker": ticker, "analyst_buy_pct_inferred": 0.5, "target_upside": 0.0, "yfinance_recommendation": "N/A", "analyst_signal": "hold", "analyst_error": "Current price unavailable."}
-
-        target_v = info.get("targetMeanPrice")
-        target_m = float(target_v) if isinstance(target_v, (int, float)) else None
-        rec = str(info.get("recommendationKey", "hold")).lower()
-        
-        upside = 0.0
-        if target_m is not None and curr_p > 0:
-            upside = (target_m / curr_p) - 1
-
-        # --- Improved Scoring Logic ---
-        rating_map = {"strong_buy": 1.0, "buy": 0.75, "hold": 0.0, "underperform": -0.75, "sell": -1.0}
-        rating_score = rating_map.get(rec, 0.0)
-
-        # Score the upside potential
-        if upside > 0.50: upside_score = 1.0
-        elif upside > 0.20: upside_score = 0.75
-        elif upside > 0.05: upside_score = 0.25
-        elif upside < -0.30: upside_score = -1.0
-        elif upside < -0.15: upside_score = -0.75
-        else: upside_score = 0.0
-
-        # Combine scores (giving slightly more weight to the explicit rating)
-        final_score = (rating_score * 0.6) + (upside_score * 0.4)
-
-        # Determine signal from final score
-        if final_score >= 0.75: sig = "strong_buy"
-        elif final_score >= 0.35: sig = "buy"
-        elif final_score <= -0.75: sig = "strong_sell"
-        elif final_score <= -0.35: sig = "sell"
-        else: sig = "hold"
-        
-        buy_pct = (final_score + 1.0) / 2.0 # Normalize score from [-1, 1] to [0, 1]
-
-        return {"ticker": ticker, "analyst_buy_pct_inferred": float(buy_pct), "target_upside": float(upside), "yfinance_recommendation": rec, "analyst_signal": sig, "analyst_error": None}
-        
-class SECFilingAgent:
-    """
-    Analyzes the list of recent SEC filings to generate a signal.
-    Focuses on the presence of Form 4 (insider) and Form 13D (activist) filings.
-    """
-    def run(self, ticker: str, data: dict) -> dict:
-        filings = data.get("sec_all_filings_raw", [])
-        if not filings or (isinstance(filings[0], dict) and "error" in filings[0]):
-            err = filings[0].get("error") if filings else "No SEC filing data."
-            return {"ticker": ticker, "sec_filings_signal": "hold", "sec_filings_error": err}
-
-        recent_form4 = False
-        recent_activist = False
-        three_months_ago = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
-
-        for f in filings:
-            if not isinstance(f, dict): continue
-            
-            filing_date = f.get('filing_date', '1900-01-01')
-            if filing_date >= three_months_ago:
-                if f.get('form_type') == '4':
-                    recent_form4 = True
-                if f.get('form_type') == '13D':
-                    recent_activist = True
-
+        info, hist = data.get("ticker_info",{}), data.get("price_history"); price_v = info.get("currentPrice")
+        if price_v is None and hist is not None and not hist.empty: price_v = hist.Close.iloc[-1]
+        curr_p = float(price_v) if isinstance(price_v,(int,float)) and price_v > 0 else None
+        if curr_p is None: return {"ticker":ticker, "analyst_buy_pct_inferred":0.5, "target_upside":0.0, "yfinance_recommendation":"N/A", "analyst_signal":"hold", "analyst_error":"Current price unavailable."}
+        target_v = info.get("targetMeanPrice"); target_m = float(target_v) if isinstance(target_v,(int,float)) else None
+        rec = str(info.get("recommendationKey","hold")).lower(); upside = 0.0
+        if target_m is not None and curr_p > 0: upside = (target_m / curr_p) -1
         sig = "hold"
-        if recent_activist:
-            sig = "strong_buy"
-        elif recent_form4:
-            # A recent Form 4 is noteworthy, but we don't know the direction without parsing.
-            # We'll treat it as a weak "hold/watch" signal. The user can see the filing.
-            sig = "hold" 
-        
-        return {"ticker": ticker, "sec_filings_signal": sig, "sec_filings_error": None}
-        
+        if rec in ["buy","strong_buy"] and upside > 0.10: sig = "buy"
+        elif rec == "buy" and upside > 0.05: sig = "buy"
+        elif rec in ["sell","strong_sell","underperform"] and upside < -0.05: sig = "sell"
+        elif upside > 0.20: sig = "buy"
+        elif upside < -0.15: sig = "sell"
+        buy_pct = {"strong_buy":0.9, "buy":0.7, "hold":0.5, "underperform":0.3, "sell":0.1}.get(rec,0.5)
+        return {"ticker":ticker, "analyst_buy_pct_inferred":float(buy_pct), "target_upside":float(upside), "yfinance_recommendation":rec, "analyst_signal":sig, "analyst_error":None}
+
+class SECFilingAgent:
+    def run(self, ticker: str, data: dict) -> dict:
+        filings, err = data.get("sec_all_filings_raw",[]), None
+        if not filings or (isinstance(filings[0],dict) and "error" in filings[0]):
+            err = filings[0].get("error") if filings and isinstance(filings[0],dict) else f"SEC: No raw filings for {ticker}."
+            return {"ticker":ticker, "sec_net_insider_shares_1y":0, "sec_insider_buy_value_1y":0, "sec_insider_sell_value_1y":0, "sec_filings_signal":"hold", "sec_filings_error":err, "sec_recent_form4_transactions":[], "sec_other_recent_filings":[]}
+        net_s, buy_v, sell_v, form4, others = 0,0,0,[],[]
+        for f in filings:
+            if not isinstance(f,dict) or "error" in f: continue
+            if f.get("is_form4_transaction"):
+                form4.append(f); s,p = f.get("shares",0.0), f.get("price_per_share")
+                if not isinstance(s,(int,float)): s = 0.0
+                if f.get("transaction_code")=="P" and f.get("acq_disp_code")=="A":
+                    net_s += s;
+                    if isinstance(p,(int,float)) and s!=0: buy_v += s*p
+                elif f.get("transaction_code")=="S" and f.get("acq_disp_code")=="D":
+                    net_s -= s;
+                    if isinstance(p,(int,float)) and s!=0: sell_v += s*p
+            else: others.append(f)
+        sig = "hold"
+        if net_s > 2000 or buy_v > 200000: sig = "buy"
+        elif net_s < -2000 or sell_v > 200000: sig = "sell"
+        return {"ticker":ticker, "sec_net_insider_shares_1y":int(net_s), "sec_insider_buy_value_1y":round(buy_v,2), "sec_insider_sell_value_1y":round(sell_v,2), "sec_filings_signal":sig, "sec_filings_error":None, "sec_recent_form4_transactions":form4[:10], "sec_other_recent_filings":others[:10]}
+
 class InstitutionalHoldingsAgent:
-    """
-    Analyzes institutional ownership from both a static snapshot and dynamic SEC filings.
-    - NEW: Identifies and returns a list of holders who have reported their positions recently.
-    """
     def run(self, ticker: str, data: dict) -> dict:
         holdings, err = data.get("institutional_holdings",[]), None
-        
-        # Default empty structure
-        inst_data = {
-            "ticker": ticker, "inst_holdings_signal": "hold", "inst_holdings_error": None,
-            "inst_num_holders": 0, "inst_total_shares_held": 0, "inst_total_pct_out": 0.0,
-            "inst_top_holders": [], "inst_recently_reported_holders": []
-        }
-
-        if holdings and isinstance(holdings[0], dict) and "error" in holdings[0]:
-            inst_data["inst_holdings_error"] = holdings[0]["error"]
-            return inst_data
-
+        if holdings and isinstance(holdings[0],dict) and "error" in holdings[0]:
+            err = holdings[0]["error"]
+            return {"ticker":ticker, "inst_num_holders":0, "inst_total_shares_held":0, "inst_total_pct_out":0.0, "inst_holdings_signal":"hold", "inst_holdings_error":err, "inst_top_holders":[]}
+        num_h, total_s, total_pct, top_h = 0,0,0.0,[]
         if holdings:
-            valid_h = [d for d in holdings if isinstance(d, dict) and "error" not in d]
+            valid_h = [d for d in holdings if isinstance(d,dict) and "error" not in d]
             if valid_h:
+                num_h = len(valid_h)
                 try:
-                    inst_data["inst_num_holders"] = len(valid_h)
-                    inst_data["inst_total_shares_held"] = int(sum(d.get('Shares', 0) for d in valid_h))
-                    inst_data["inst_total_pct_out"] = float(sum(d.get('% Out', 0.0) for d in valid_h))
-                    
-                    # Get Top 10 Holders by share count
-                    inst_data["inst_top_holders"] = sorted(valid_h, key=lambda x: x.get('Shares', 0), reverse=True)[:10]
+                    total_s = sum(d.get('Shares',0) for d in valid_h); total_pct = sum(d.get('% Out',0.0) for d in valid_h)
+                    top_h = sorted(valid_h, key=lambda x: x.get('Shares',0), reverse=True)[:10]
+                except Exception as e: err = f"Error processing inst holdings: {e}"
+            elif not err: err = "No valid inst holdings."
+        sig = "hold"
+        if total_pct > 0.50: sig = "buy"
+        elif total_pct < 0.05 and num_h > 0: sig = "sell"
+        return {"ticker":ticker, "inst_num_holders":num_h, "inst_total_shares_held":int(total_s), "inst_total_pct_out":float(total_pct), "inst_holdings_signal":sig, "inst_holdings_error":err, "inst_top_holders":top_h}
 
-                    # --- NEW: Get Recently Reported Holders ---
-                    recent_date_limit = datetime.now() - timedelta(days=45)
-                    for h in valid_h:
-                        if 'Date Reported' in h and isinstance(h['Date Reported'], str):
-                            try:
-                                report_date = datetime.strptime(h['Date Reported'], '%Y-%m-%d %H:%M:%S')
-                                if report_date > recent_date_limit:
-                                    inst_data["inst_recently_reported_holders"].append(h)
-                            except ValueError:
-                                continue # Skip if date format is unexpected
-                    
-                except Exception as e:
-                    inst_data["inst_holdings_error"] = f"Error processing institutional holdings: {e}"
-            elif not err:
-                inst_data["inst_holdings_error"] = "No valid institutional holdings data."
-
-        # Signal logic can be enhanced in the future with this new data
-        if inst_data["inst_total_pct_out"] > 0 and inst_data["inst_total_pct_out"] < 0.05 and inst_data["inst_num_holders"] > 5:
-            inst_data["inst_holdings_signal"] = "sell"
-        elif len(inst_data["inst_recently_reported_holders"]) > 5: # If many funds reported recently
-             inst_data["inst_holdings_signal"] = "buy"
-
-        return inst_data
 class PoliticianFilingsAgent:
-    """
-    Analyzes trades reported by politicians based on net dollar value from dedicated issuer pages.
-    """
     def run(self, ticker: str, data: dict) -> dict:
         trades, err = data.get("politician_trades",[]), None
-        net_val, buy_val, sell_val, buys, sells = 0, 0, 0, 0, 0
-
-        if trades and isinstance(trades, list) and len(trades) > 0 and isinstance(trades[0], dict) and "error" in trades[0]:
-            err = trades[0]["error"]
+        net_val, buys, sells = 0,0,0
+        if trades and isinstance(trades,list) and len(trades)>0 and isinstance(trades[0],dict) and "error" in trades[0]: err = trades[0]["error"]
         elif trades:
             for trade in trades:
-                if isinstance(trade, dict) and "error" not in trade:
-                    # Use the average of lower and upper bound for a better estimate
-                    val_lower = trade.get("value_estimate_lower", 0)
-                    val_upper = trade.get("value_estimate_upper", val_lower) # Use lower if upper is missing
-                    val = (val_lower + val_upper) / 2
-                    
-                    if trade.get("transaction_type") == "purchase":
-                        net_val += val; buy_val += val; buys += 1
-                    elif trade.get("transaction_type") == "sale":
-                        net_val -= val; sell_val += val; sells += 1
-        
+                if isinstance(trade,dict):
+                    val = trade.get("value_estimate_lower",0)
+                    if trade.get("transaction_type")=="purchase": net_val += val; buys +=1
+                    elif trade.get("transaction_type")=="sale": net_val -= val; sells +=1
         sig = "hold"
         if not err:
-            # Signal based on significant net dollar value
-            if net_val > 50000 and buys > 0:
-                sig = "buy"
-            elif net_val < -50000 and sells > 0:
-                sig = "sell"
-            
-        return {
-            "ticker": ticker,
-            "politician_net_trade_value_estimate": round(net_val, 2),
-            "politician_buy_tx_count": buys,
-            "politician_sell_tx_count": sells,
-            "politician_total_buy_value": buy_val,
-            "politician_total_sell_value": sell_val,
-            "politician_filings_signal": sig,
-            "politician_data_error": err
-        }
+            if buys > sells and buys > 1: sig = "buy"
+            elif sells > buys and sells > 1: sig = "sell"
+        return {"ticker":ticker, "politician_net_trade_value_estimate":net_val, "politician_buy_tx_count":buys, "politician_sell_tx_count":sells, "politician_filings_signal":sig, "politician_data_error":err}
+
 class ValueInvestingIOAgent:
     def run(self, ticker: str, data: dict) -> dict:
         vi, err = data.get("value_investing_io_data",{}), data.get("value_investing_io_data",{}).get("error")
@@ -993,51 +995,21 @@ class ValueInvestingIOAgent:
         return {"ticker":ticker, "vi_fair_value_estimate":fv, "vi_site_market_price":site_mp, "vi_upside_percent":up_pct, "vi_valuation_date":val_date, "vi_valuation_text_display":text, "vi_signal":sig, "vi_data_error":err}
 
 class PortfolioAgent:
-    # --- UPDATED: Removed politician_filings and rebalanced other weights ---
-    WEIGHTS = {
-        "price": 1.0, "momentum": 0.8, "volatility": 0.3, 
-        "sentiment": 0.7, "fund": 1.0, "valuation_dcf": 0.5, 
-        "valuation_pe": 0.5, "sec_filings": 1.2, "inst_holdings": 0.5, 
-        "analyst": 0.7, "vi_signal": 0.8
-    }
-    
+    WEIGHTS = {"price":1.0, "momentum":0.8, "volatility":0.3, "sentiment":0.6, "fund":0.9, "valuation_dcf":0.5, "valuation_pe":0.5, "sec_filings":0.6, "inst_holdings":0.3, "analyst":0.7, "politician_filings":0.4, "vi_signal":0.8}
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
-        curr_w = agent_weights or self.WEIGHTS
-        total_score, sum_w, agg_s = 0.0, 0.0, {}
-        
+        curr_w, total_score, sum_w, agg_s = agent_weights or self.WEIGHTS, 0,0,{}
         for s_dict in signals:
-            if isinstance(s_dict, dict):
-                agg_s.update(s_dict)
-                
-        # --- UPDATED: Simplified map without politician_filings ---
-        s_map = {
-            "price_signal": "price", "momentum_signal": "momentum", 
-            "volatility_signal": "volatility", "sentiment_signal": "sentiment", 
-            "fund_signal": "fund", "dcf_signal": "valuation_dcf", 
-            "relative_pe_signal": "valuation_pe", "sec_filings_signal": "sec_filings", 
-            "inst_holdings_signal": "inst_holdings", "analyst_signal": "analyst", 
-            "vi_signal": "vi_signal"
-        }
-
+            if isinstance(s_dict,dict): agg_s.update(s_dict)
+        s_map = {"price_signal":"price", "momentum_signal":"momentum", "volatility_signal":"volatility", "sentiment_signal":"sentiment", "fund_signal":"fund", "dcf_signal":"valuation_dcf", "relative_pe_signal":"valuation_pe", "sec_filings_signal":"sec_filings", "inst_holdings_signal":"inst_holdings", "analyst_signal":"analyst", "politician_filings_signal":"politician_filings", "vi_signal":"vi_signal"}
         for s_key, w_key in s_map.items():
-            s_val = agg_s.get(s_key)
-            w = curr_w.get(w_key, 0)
-            if s_val and w > 0 and s_val in ["buy", "hold", "sell", "strong_buy", "strong_sell"]:
-                score_map = {"strong_buy": 1.5, "buy": 1.0, "hold": 0.0, "sell": -1.0, "strong_sell": -1.5}
-                raw_score = score_map.get(s_val, 0)
-                total_score += raw_score * w
-                sum_w += w
-                
-        comp_score = (total_score / sum_w) if sum_w else 0.0
-        
-        # Adjust decision thresholds for the new scoring system
-        if comp_score > 0.35: decision = "strong_buy"
-        elif comp_score > 0.15: decision = "buy"
-        elif comp_score < -0.35: decision = "strong_sell"
-        elif comp_score < -0.15: decision = "sell"
-        else: decision = "hold"
-        
-        return {"ticker": ticker, "composite_score": comp_score, "final_decision": decision}
+            s_val, w = agg_s.get(s_key), curr_w.get(w_key,0)
+            if s_val and w > 0 and s_val in ["buy","hold","sell"]:
+                raw_score = {"buy":1, "hold":0, "sell":-1}.get(s_val,0)
+                total_score += raw_score*w; sum_w += w
+        comp_score = (total_score/sum_w) if sum_w else 0.0
+        decision = "buy" if comp_score > 0.15 else ("sell" if comp_score < -0.15 else "hold")
+        return {"ticker":ticker, "composite_score":comp_score, "final_decision":decision}
+
 class AITraderAgent:
     def __init__(self, llm_client: ModelClient, stock_universe: dict):
         self.llm_client = llm_client
@@ -1167,34 +1139,27 @@ def run_live_analysis(tickers, llm_client, configs):
     for i, t in enumerate(tickers):
         progress_text = f"Analyzing {t}... ({i+1}/{len(tickers)})"
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
-        
+        # st.write(f"▶️ Running analysis for {t}...") # Optional: uncomment for verbose logging
         price_history_full = fetch_price_history(t, period="max")
         if price_history_full.empty:
             results[t] = {"error": f"Price history unavailable for {t}.", "ticker": t, "final_decision":"error", "composite_score":0}; continue
-            
         ticker_info = fetch_ticker_info(t)
         if not ticker_info or not ticker_info.get("financialCurrency"):
             err_msg = f"Core ticker info (e.g., currency) unavailable for {t}. Invalid/delisted/no yfinance data."
             results[t] = {"error": err_msg, "ticker": t, "final_decision":"error", "composite_score":0}; continue
-
         current_price_for_ticker = ticker_info.get("currentPrice")
-        if current_price_for_ticker is None and not price_history_full.empty:
-            current_price_for_ticker = price_history_full["Close"].iloc[-1]
-            
+        if current_price_for_ticker is None and not price_history_full.empty: current_price_for_ticker = price_history_full["Close"].iloc[-1]
         company_name_for_news = ticker_info.get('longName', ticker_info.get('shortName', t))
-        
         combined_news, news_fetch_msgs = [], []
         if configs["use_sentiment"]:
             yf_news = fetch_enriched_news(t, ticker_info)
             if yf_news and not (isinstance(yf_news[0],dict) and "error" in yf_news[0]): combined_news.extend(yf_news)
             elif yf_news and isinstance(yf_news[0],dict) and "error" in yf_news[0]: news_fetch_msgs.append(f"Yahoo: {yf_news[0]['error']}")
-            
             if llm_client and st.secrets.get("NEWSAPI_KEY"):
                 api_news = fetch_comprehensive_news_from_api(t, company_name_for_news)
                 if api_news and not (isinstance(api_news[0],dict) and "error" in api_news[0]): combined_news.extend(api_news)
                 elif api_news and isinstance(api_news[0],dict) and "error" in api_news[0]: news_fetch_msgs.append(f"NewsAPI: {api_news[0]['error']}")
             elif configs["use_sentiment"] and not st.secrets.get("NEWSAPI_KEY"): news_fetch_msgs.append("NewsAPI Key missing.")
-
         seen_urls, dedup_news = set(), []
         for item in combined_news:
             if isinstance(item,dict) and "error" not in item:
@@ -1207,46 +1172,35 @@ def run_live_analysis(tickers, llm_client, configs):
         data_bundle = {
             "price_history":price_history_full, "ticker_info":ticker_info, "news":dedup_news,
             "news_fetch_status_error": news_status_bundle if any(kw in news_status_bundle.lower() for kw in ["error","failed","no news","missing"]) else None,
+            "politician_trades":fetch_politician_trades(t) if configs["use_politician_filings"] else [],
             "value_investing_io_data":fetch_value_investing_io_data(t) if configs["use_value_trades"] else {"error":"VI.io: Skipped."},
             "institutional_holdings":fetch_inst_filings(t) if configs["use_filings"] else [],
-            "sec_all_filings_raw": fetch_sec_filings_from_search_api(t) if configs["use_filings"] else []
+            "sec_all_filings_raw":fetch_all_sec_filings(t) if configs["use_filings"] else []
         }
-
         agents = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()]
         if configs["use_sentiment"] and llm_client: agents.extend([SentimentAgent(llm_client), NewsSummaryAgent(llm_client)])
         if configs["use_filings"]: agents.extend([SECFilingAgent(), InstitutionalHoldingsAgent()])
         if configs["use_politician_filings"]: agents.append(PoliticianFilingsAgent())
         if configs["use_value_trades"]: agents.append(ValueInvestingIOAgent())
-        
         agent_res_list = []
         for agent in agents:
             name = agent.__class__.__name__
             try:
-                if isinstance(agent,(PriceAgent,MomentumAgent,VolatilityAgent)):
-                    res_a = agent.run(t, data_bundle, data_bundle["price_history"]) if name == "VolatilityAgent" else agent.run(t, data_bundle["price_history"])
+                if isinstance(agent,(PriceAgent,MomentumAgent)): res_a = agent.run(t, data_bundle["price_history"])
+                elif isinstance(agent,VolatilityAgent): res_a = agent.run(t, data_bundle, data_bundle["price_history"])
                 else: res_a = agent.run(t, data_bundle)
                 agent_res_list.append(res_a)
             except Exception as e:
                 err_k, sig_k = name.lower().replace("agent","")+"_error", name.lower().replace("agent","")+"_signal"
                 agent_res_list.append({sig_k:"error", err_k:f"Agent {name} error: {str(e)[:150]}"}); st.warning(f"Error in {name} for {t}: {e}")
-
         final_dec = PortfolioAgent().run(t, agent_res_list)
-        
-        curr_res_dict = {
-            "ticker":t, "current_price_display":current_price_for_ticker, "market_cap_display":ticker_info.get("marketCap"),
-            "industry_display":ticker_info.get("industry"), "sector_display":ticker_info.get("sector"), "ticker_info":ticker_info,
-            "news_headlines_for_popover":[f"{n.get('publish_time_readable','N/A')} - {n.get('title','N/A')} ({n.get('publisher','N/A')}) [Link]({n.get('link','#')})" for n in dedup_news[:10]],
-            "politician_trades_for_popover":[pt for pt in data_bundle["politician_trades"][:5] if isinstance(pt,dict) and "error" not in pt],
-            "news_status_display":news_status_bundle,
-            # --- CRITICAL FIX ---
-            # Pass the raw filings data through to the results so the display function can use it.
-            "sec_all_filings_raw": data_bundle["sec_all_filings_raw"]
-        }
+        curr_res_dict = {"ticker":t, "current_price_display":current_price_for_ticker, "market_cap_display":ticker_info.get("marketCap"), "industry_display":ticker_info.get("industry"), "sector_display":ticker_info.get("sector"), "ticker_info":ticker_info,
+                             "news_headlines_for_popover":[f"{n.get('publish_time_readable','N/A')} - {n.get('title','N/A')} ({n.get('publisher','N/A')} via {n.get('source_api','Unk')}) [Link]({n.get('link','#')})" + (f" - {n.get('content_snippet',n.get('description',''))[:150]}..." if n.get('content_snippet') or n.get('description') else "") for n in dedup_news[:10]],
+                             "politician_trades_for_popover":[pt for pt in data_bundle["politician_trades"][:5] if isinstance(pt,dict) and "error" not in pt],
+                             "news_status_display":news_status_bundle}
         for r_dict in agent_res_list:
             if isinstance(r_dict,dict): curr_res_dict.update(r_dict)
-        curr_res_dict.update(final_dec)
-        results[t] = curr_res_dict
-        
+        curr_res_dict.update(final_dec); results[t] = curr_res_dict
     progress_bar.empty()
     return results
 
@@ -1289,105 +1243,114 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     trades = (log_df.signal != log_df.signal.shift()).fillna(False).sum()//2
     return {"Initial Capital":f"${initial_capital:,.2f}", "Final Portfolio Value":f"${log_df.portfolio_value.iloc[-1]:,.2f}", "Total Return (%)":f"{total_ret:.2f}%", "Annualized Return (%)":f"{ann_ret:.2f}%", "Annualized Volatility (%)":f"{ann_vol:.2f}%", "Sharpe Ratio":f"{sharpe:.2f}", "Max Drawdown (%)":f"{max_dd:.2f}%", "Number of Trades (approx)":f"{trades}"}, log_df
 
+# --- Detailed Analysis Display Function ---
 def display_detailed_analysis(res_detail):
-    ticker = res_detail.get("ticker", "N/A")
-    ticker_info = res_detail.get("ticker_info", {})
-    tab_titles = ["📈 Chart & Core", "📊 Fundamentals & Value", "📰 News & Filings", "⚙️ All Signals"]
+    ticker = res_detail.get("ticker", "N/A"); ticker_info = res_detail.get("ticker_info", {})
+    tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
     tabs = st.tabs(tab_titles)
 
     def get_signal_color(signal):
         signal = str(signal).upper()
-        if "BUY" in signal: return "green"
-        if "SELL" in signal: return "red"
+        if signal in ["BUY", "STRONG_BUY"]: return "green"
+        if signal == "SELL": return "red"
         return "orange"
 
-    # Main Header
-    st.subheader(f"Detailed Analysis for {ticker_info.get('longName', ticker)}")
-    sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
-    sig_col1.metric("Final AI Decision", str(res_detail.get('final_decision', 'N/A')).upper())
-    sig_col2.metric("Composite Score", f"{res_detail.get('composite_score', 0):.2f}")
-    sig_col3.metric("Analyst Signal", str(res_detail.get('analyst_signal', 'N/A')).upper())
-    sig_col4.metric("Insider Signal", str(res_detail.get('sec_filings_signal', 'N/A')).upper())
-    st.markdown("---")
-
-    with tabs[0]: # Technicals & Momentum
-        st.markdown("#### Price Chart (1-Year)")
+    with tabs[0]:
+        st.subheader("Price Performance & Technical Signals")
         price_hist_chart = fetch_price_history(ticker, period="1y")
         if not price_hist_chart.empty:
             st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
-        
-        t_col1, t_col2 = st.columns(2)
-        with t_col1:
-            st.markdown("##### Technical Signal")
-            st.info(f"**Signal:** {str(res_detail.get('price_signal', 'N/A')).upper()}")
-        with t_col2:
-            st.markdown("##### Momentum Signal")
-            st.info(f"**Signal:** {str(res_detail.get('momentum_signal', 'N/A')).upper()}")
+        else: st.warning("Price chart data not available.")
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Technical Indicators"); price_signal = str(res_detail.get('price_signal', 'hold')).upper()
+            st.metric(label=f"Price Signal (SMA/RSI)", value=price_signal)
+            st.markdown(f"""<div style="font-size: 14px;"><li><b>50-Day SMA:</b> ${res_detail.get('sma50', 0):,.2f}</li><li><b>200-Day SMA:</b> ${res_detail.get('sma200', 0):,.2f}</li><li><b>14-Day RSI:</b> {res_detail.get('rsi14', 0):.2f}</li></div>""", unsafe_allow_html=True)
+        with col2:
+            st.subheader("Momentum & Volatility"); momentum_signal = str(res_detail.get('momentum_signal', 'hold')).upper()
+            st.metric(label="Momentum Signal", value=momentum_signal)
+            st.markdown(f"""<div style="font-size: 14px;"><li><b>1-Month Momentum:</b> {res_detail.get('momentum_1m', 0) * 100:.2f}%</li><li><b>12-Month Momentum:</b> {res_detail.get('momentum_12m', 0) * 100:.2f}%</li><li><b>Beta:</b> {res_detail.get('beta', 0):.2f}</li></div>""", unsafe_allow_html=True)
 
-    with tabs[1]: # Fundamentals & Value
-        f_col1, f_col2 = st.columns(2)
-        with f_col1:
-            st.markdown("##### Core Fundamentals")
-            st.info(f"**Signal:** {str(res_detail.get('fund_signal', 'N/A')).upper()}")
-            cap_str = f"${ticker_info.get('marketCap', 0) / 1e9:.2f}B" if isinstance(ticker_info.get('marketCap'), (int, float)) else "N/A"
-            roe_val = ticker_info.get('returnOnEquity')
-            st.caption(f"Market Cap: {cap_str}")
-            st.caption(f"Return on Equity: {roe_val * 100:.2f}%" if isinstance(roe_val, (int,float)) else "ROE: N/A")
-        with f_col2:
-            st.markdown("##### Valuation")
-            st.info(f"**VI.io Signal:** {str(res_detail.get('vi_signal', 'N/A')).upper()}")
-            up_val = res_detail.get('vi_upside_percent')
-            st.caption(f"Forward P/E: {ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'), (int,float)) else "P/E: N/A")
-            st.caption(f"VI.io Upside: {up_val:.1f}%" if isinstance(up_val, (int,float)) else "VI.io Upside: N/A")
+    with tabs[1]:
+        st.subheader(f"Fundamental Overview: {ticker_info.get('longName', '')}"); st.caption(f"**Sector:** {ticker_info.get('sector', 'N/A')} | **Industry:** {ticker_info.get('industry', 'N/A')}")
+        if ticker_info.get('longBusinessSummary'):
+            with st.popover("Show Business Summary"):
+                st.markdown(ticker_info.get('longBusinessSummary'))
+        st.markdown("---"); fund_col1, fund_col2, fund_col3, fund_col4 = st.columns(4)
+        market_cap_val = ticker_info.get('marketCap', 0)
+        if isinstance(market_cap_val, (int, float)):
+            if market_cap_val > 1e12: cap_str = f"${market_cap_val / 1e12:.2f}T"
+            else: cap_str = f"${market_cap_val / 1e9:.2f}B"
+        else: cap_str = "N/A"
+        fund_col1.metric("Market Cap", cap_str)
+        fund_col2.metric("Trailing P/E", f"{ticker_info.get('trailingPE', 0):.2f}" if isinstance(ticker_info.get('trailingPE'),(int,float)) else "N/A")
+        fund_col3.metric("Forward P/E", f"{ticker_info.get('forwardPE', 0):.2f}" if isinstance(ticker_info.get('forwardPE'),(int,float)) else "N/A")
+        fund_col4.metric("Price/Book", f"{ticker_info.get('priceToBook', 0):.2f}" if isinstance(ticker_info.get('priceToBook'),(int,float)) else "N/A")
+        st.markdown("---"); st.subheader("Financial Health"); fund_sig = str(res_detail.get('fund_signal', 'hold')).upper()
+        f_col1, f_col2, f_col3 = st.columns(3)
+        f_col1.metric("Fundamental Signal", fund_sig); f_col2.metric("Piotroski Score (0-3)", f"{res_detail.get('piotroski_score', 'N/A')}/3")
+        fcy_val = res_detail.get('fcf_yield'); f_col3.metric("FCF Yield", f"{fcy_val * 100:.2f}%" if isinstance(fcy_val,(int,float)) else "N/A")
+        roe_val = ticker_info.get('returnOnEquity'); de_val = ticker_info.get('debtToEquity'); etr_val = ticker_info.get('enterpriseToRevenue'); ete_val = ticker_info.get('enterpriseToEbitda')
+        health_data = {"Return on Equity (ROE)": f"{roe_val * 100:.2f}%" if isinstance(roe_val,(int,float)) else "N/A", "Debt to Equity": f"{de_val:.2f}" if isinstance(de_val,(int,float)) else "N/A", "EV/Revenue": f"{etr_val:.2f}" if isinstance(etr_val,(int,float)) else "N/A", "EV/EBITDA": f"{ete_val:.2f}" if isinstance(ete_val,(int,float)) else "N/A"}
+        st.table(pd.DataFrame(health_data.items(), columns=["Metric", "Value"]))
 
-    with tabs[2]: # News & Filings
-        news_col, file_col = st.columns([3, 2])
-        with news_col:
-            st.markdown("##### News Summary & Sentiment")
-            st.info(f"**Sentiment Signal:** {str(res_detail.get('sentiment_signal','N/A')).upper()}")
-            st.write(res_detail.get('news_summary', 'No summary available.'))
-        
-        with file_col:
-            st.markdown("##### Corporate Filings")
-            with st.expander("View All Recent Filings"):
-                all_filings = res_detail.get('sec_all_filings_raw', [])
-                if not all_filings or (isinstance(all_filings[0], dict) and 'error' in all_filings[0]):
-                    st.warning(all_filings[0]['error'] if all_filings else "Filings could not be fetched.")
-                else:
-                    st.dataframe(pd.DataFrame(all_filings), use_container_width=True, hide_index=True)
+    with tabs[2]:
+        val_col1, val_col2 = st.columns(2)
+        with val_col1:
+            st.subheader("Analyst Consensus"); analyst_signal = str(res_detail.get('analyst_signal', 'hold')).upper()
+            st.metric(label=f"Analyst Signal (from {ticker_info.get('numberOfAnalystOpinions')} analysts)", value=analyst_signal)
+            abp_val = res_detail.get('analyst_buy_pct_inferred',0.5); st.progress(abp_val, text=f"{abp_val*100:.0f}% Buy Rating")
+            tm_val = ticker_info.get('targetMeanPrice'); tu_val = res_detail.get('target_upside')
+            st.metric("Mean Target Price", f"${tm_val:.2f}" if isinstance(tm_val,(int,float)) else "N/A", f"{tu_val*100:.2f}% Upside" if isinstance(tu_val,(int,float)) else None)
+        with val_col2:
+            st.subheader("Peter Lynch Fair Value (via VI.io)"); vi_signal = str(res_detail.get('vi_signal', 'hold')).upper()
+            vi_fv = res_detail.get('vi_fair_value_estimate'); up_val = res_detail.get('vi_upside_percent')
+            vi_fv_label = f"${vi_fv:,.2f}" if isinstance(vi_fv, (int, float)) else "N/A"
+            st.metric(label=f"VI.io Signal (Fair Value: {vi_fv_label})", value=vi_signal, delta=f"{up_val:.2f}% Upside" if isinstance(up_val,(int,float)) else None, delta_color="inverse")
+            if res_detail.get('vi_valuation_text_display'): st.markdown(f"> *{res_detail.get('vi_valuation_text_display')}*")
 
-            with st.expander("Institutional Holders"):
-                # <<< FIX: Flexible column selection to prevent KeyError >>>
-                def display_holders_df(holders_data):
-                    if not holders_data:
-                        st.info("No data available for this section.")
-                        return
-                    
-                    df_holders = pd.DataFrame(holders_data)
-                    # Rename column if it exists
-                    if '% Out' in df_holders.columns:
-                        df_holders = df_holders.rename(columns={"% Out": "% of Outstanding"})
-                    
-                    # Define desired columns and find which ones actually exist
-                    desired_cols = ["Holder", "Shares", "% of Outstanding", "Date Reported"]
-                    available_cols = [col for col in desired_cols if col in df_holders.columns]
-                    
-                    if not available_cols:
-                        st.warning("Holder data is in an unexpected format.")
-                        st.dataframe(df_holders) # Show raw dataframe as a fallback
-                    else:
-                        st.dataframe(df_holders[available_cols], hide_index=True, use_container_width=True)
+    with tabs[3]:
+        st.subheader("News Analysis & Filings")
+        if res_detail.get('news_summary'):
+            with st.container(border=True):
+                st.markdown("**AI-Generated News Summary**"); st.write(res_detail.get('news_summary'))
+                headlines = res_detail.get('news_headlines_for_popover', [])
+                if headlines:
+                    with st.popover("View News Sources & Links"):
+                        for line in headlines: st.markdown(f"- {line}")
+                if res_detail.get('sentiment_error'): st.warning(f"Sentiment Analysis Note: {res_detail.get('sentiment_error')}")
+        file_col1, file_col2 = st.columns(2)
+        with file_col1:
+            st.markdown("**SEC Filings**"); st.metric("Insider Signal", str(res_detail.get('sec_filings_signal', 'hold')).upper())
+            with st.popover("View Recent Filings"):
+                filings = res_detail.get('sec_other_recent_filings', [])
+                if filings:
+                    for f in filings: st.write(f"**{f.get('filing_date')}**: Form {f.get('form_type')} - [Link]({f.get('summary_link')})")
+                else: st.info("No recent SEC filings found.")
+        with file_col2:
+            st.markdown("**Institutional Holdings**"); st.metric("Institutional Signal", str(res_detail.get('inst_holdings_signal', 'hold')).upper())
+            with st.popover("View Top 10 Institutional Holders"):
+                holders = res_detail.get('inst_top_holders', [])
+                if holders:
+                    df_holders = pd.DataFrame(holders)
+                    df_holders = df_holders.rename(columns={"% Out":"% of Outstanding"})
+                    available_cols = [col for col in ["Holder", "Shares", "% of Outstanding"] if col in df_holders.columns]
+                    column_config = {}
+                    if "% of Outstanding" in df_holders.columns:
+                        column_config["% of Outstanding"] = st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=max(0.10, df_holders["% of Outstanding"].max()))
+                    st.dataframe(df_holders[available_cols], column_config=column_config, hide_index=True, use_container_width=True)
+                else: st.info("No institutional holder data available.")
 
-                st.markdown("###### Top 10 Holders")
-                display_holders_df(res_detail.get('inst_top_holders', []))
-                
-                st.markdown("###### Recently Reported")
-                display_holders_df(res_detail.get('inst_recently_reported_holders', []))
+    with tabs[4]:
+        st.subheader("All Agent Signals at a Glance")
+        signals_data = {"Price Signal (SMA/RSI)": str(res_detail.get("price_signal","N/A")).upper(), "Momentum Signal": str(res_detail.get("momentum_signal","N/A")).upper(), "Volatility Signal": str(res_detail.get("volatility_signal","N/A")).upper(), "Fundamental Signal": str(res_detail.get("fund_signal","N/A")).upper(), "Analyst Signal": str(res_detail.get("analyst_signal","N/A")).upper(), "ValueInvesting.io Signal": str(res_detail.get("vi_signal","N/A")).upper(), "News Sentiment Signal": str(res_detail.get("sentiment_signal","N/A")).upper(), "SEC Filings Signal": str(res_detail.get("sec_filings_signal","N/A")).upper(), "Institutional Signal": str(res_detail.get("inst_holdings_signal","N/A")).upper()}
+        df_signals = pd.DataFrame(signals_data.items(), columns=["Agent", "Signal"])
+        st.dataframe(df_signals.style.applymap(lambda x: f'color: {get_signal_color(x)}', subset=['Signal']), hide_index=True, use_container_width=True)
+        st.markdown("---")
+        final_decision = str(res_detail.get('final_decision', 'hold')).upper(); final_color = get_signal_color(final_decision)
+        st.markdown(f"""<div style="border:2px solid {final_color}; border-radius:8px; padding:15px; text-align:center;"><p style="font-size:1.2em; margin-bottom:5px;">Final AI Decision</p><h2 style="color:{final_color}; margin-bottom:5px;">{final_decision}</h2><p style="font-size:1em;">Composite Score: <strong>{res_detail.get('composite_score', 0):.2f}</strong></p></div>""", unsafe_allow_html=True)
 
-    with tabs[3]: # All Signals (Raw Data)
-        st.subheader("All Agent Raw Outputs")
-        filtered_results = {k: v for k, v in res_detail.items() if not isinstance(v, (dict, list))}
-        st.dataframe(pd.DataFrame(filtered_results.items(), columns=["Metric", "Value"]), use_container_width=True, hide_index=True)
 # --- Streamlit UI ---
 llm_client = None
 try:
@@ -1423,30 +1386,23 @@ with config_cont:
         st.subheader("Live Analysis Settings")
         tickers_in_live = st.text_input("Tickers (comma-separated):", "AAPL,MSFT,GOOG,CRWD", key="live_tickers_input")
         st.caption("ℹ️ Live analysis uses all available historical data.")
-        st.subheader("Feature Toggles")
-    
-        feat_cols = st.columns(3)
+        st.subheader("Feature Toggles"); feat_cols = st.columns(3)
         with feat_cols[0]:
             use_sent_live = st.checkbox("News Sentiment & Summary (LLM)", value=bool(llm_client), disabled=not llm_client, key="live_sent_cb_main", help="Uses LLM. Requires NewsAPI key.")
-        with feat_cols[1]:
             use_filings_live = st.checkbox("SEC & Inst. Filings", value=True, key="live_sec_cb_main")
-        with feat_cols[2]:
+        with feat_cols[1]:
+            use_poli_live = st.checkbox("Politician Filings (Exp.)", value=False, key="live_poli_cb_main", help="Scrapes CapitolTrades. May be slow/unreliable.")
             use_valtrades_live = st.checkbox("ValueInvesting.io (Exp.)", value=False, key="live_vt_cb_main", help="Scrapes ValueInvesting.io. May be slow/unreliable.")
-    
+        
         if st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_analysis_button"):
             live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
             if not live_tickers:
                 st.error("Please enter at least one ticker.")
             else:
-            # --- THIS IS THE FIX: 'use_politician_filings' is now removed ---
-                live_configs = {
-                    "use_sentiment": use_sent_live, 
-                    "use_filings": use_filings_live,
-                    "use_value_trades": use_valtrades_live
-            }
+                live_configs = {"use_sentiment":use_sent_live, "use_filings":use_filings_live, "use_politician_filings":use_poli_live, "use_value_trades":use_valtrades_live}
                 with st.spinner("⏳ Processing live analysis..."):
                     st.session_state.live_output = run_live_analysis(live_tickers, llm_client, live_configs)
-                    st.session_state.live_analysis_triggered = True
+                    st.session_state.live_analysis_triggered = True # Set flag
                     st.rerun()
 
     elif st.session_state.app_mode == "Backtesting":
