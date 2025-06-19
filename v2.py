@@ -1260,7 +1260,8 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
 def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A")
     ticker_info = res_detail.get("ticker_info", {})
-    tab_titles = ["📈 Chart & Core", "📊 Fundamentals & Value", "📰 News & Filings"]
+    # --- FIX: Added "All Signals" back to the list of tabs ---
+    tab_titles = ["📈 Technicals & Momentum", "📊 Fundamentals & Value", "📰 News & Filings", "⚙️ All Signals"]
     tabs = st.tabs(tab_titles)
 
     def get_signal_color(signal):
@@ -1269,10 +1270,10 @@ def display_detailed_analysis(res_detail):
         if "SELL" in signal: return "red"
         return "orange"
 
-    # --- Main Header ---
+    # Main Header
     st.subheader(f"Detailed Analysis for {ticker_info.get('longName', ticker)}")
     sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
-    sig_col1.metric("Final Decision", str(res_detail.get('final_decision', 'N/A')).upper())
+    sig_col1.metric("Final AI Decision", str(res_detail.get('final_decision', 'N/A')).upper())
     sig_col2.metric("Composite Score", f"{res_detail.get('composite_score', 0):.2f}")
     sig_col3.metric("Analyst Signal", str(res_detail.get('analyst_signal', 'N/A')).upper())
     sig_col4.metric("Insider Signal", str(res_detail.get('sec_filings_signal', 'N/A')).upper())
@@ -1280,14 +1281,19 @@ def display_detailed_analysis(res_detail):
 
     with tabs[0]: # Technicals & Momentum
         st.markdown("#### Price Chart (1-Year)")
-        st.line_chart(fetch_price_history(ticker, period="1y")["Close"], use_container_width=True, color="#0072F0")
+        price_hist_chart = fetch_price_history(ticker, period="1y")
+        if not price_hist_chart.empty:
+            st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
+        
         t_col1, t_col2 = st.columns(2)
         with t_col1:
             st.markdown("##### Technical Signal")
             st.info(f"**Signal:** {str(res_detail.get('price_signal', 'N/A')).upper()}")
+            st.caption(f"50D SMA: ${res_detail.get('sma50', 0):,.2f} | 200D SMA: ${res_detail.get('sma200', 0):,.2f} | RSI: {res_detail.get('rsi14', 0):.2f}")
         with t_col2:
             st.markdown("##### Momentum Signal")
             st.info(f"**Signal:** {str(res_detail.get('momentum_signal', 'N/A')).upper()}")
+            st.caption(f"1-Month: {res_detail.get('momentum_1m', 0) * 100:.2f}% | 12-Month: {res_detail.get('momentum_12m', 0) * 100:.2f}%")
 
     with tabs[1]: # Fundamentals & Value
         f_col1, f_col2 = st.columns(2)
@@ -1296,13 +1302,15 @@ def display_detailed_analysis(res_detail):
             st.info(f"**Signal:** {str(res_detail.get('fund_signal', 'N/A')).upper()}")
             cap_str = f"${ticker_info.get('marketCap', 0) / 1e9:.2f}B" if isinstance(ticker_info.get('marketCap'), (int, float)) else "N/A"
             roe_val = ticker_info.get('returnOnEquity')
-            st.caption(f"Market Cap: {cap_str} | ROE: {roe_val * 100:.2f}%" if isinstance(roe_val, (int,float)) else "N/A")
+            st.caption(f"Market Cap: {cap_str}")
+            st.caption(f"Return on Equity: {roe_val * 100:.2f}%" if isinstance(roe_val, (int,float)) else "ROE: N/A")
         with f_col2:
             st.markdown("##### Valuation")
             st.info(f"**VI.io Signal:** {str(res_detail.get('vi_signal', 'N/A')).upper()}")
             up_val = res_detail.get('vi_upside_percent')
-            st.caption(f"Forward P/E: {ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'), (int,float)) else "P/E: N/A" + f" | VI.io Upside: {up_val:.1f}%" if isinstance(up_val, (int,float)) else "")
-
+            st.caption(f"Forward P/E: {ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'), (int,float)) else "P/E: N/A")
+            st.caption(f"VI.io Upside: {up_val:.1f}%" if isinstance(up_val, (int,float)) else "VI.io Upside: N/A")
+        
     with tabs[2]: # News & Filings
         news_col, file_col = st.columns([3, 2])
         with news_col:
@@ -1310,38 +1318,32 @@ def display_detailed_analysis(res_detail):
             st.info(f"**Sentiment Signal:** {str(res_detail.get('sentiment_signal','N/A')).upper()}")
             st.write(res_detail.get('news_summary', 'No summary available.'))
         with file_col:
-            st.markdown("##### Filings Intel")
-            st.metric("Institutional Signal", str(res_detail.get('inst_holdings_signal', 'hold')).upper(), label_visibility="collapsed")
-            # --- NEW: Institutional Holdings Popover ---
-            with st.popover("View Institutional Holder Details"):
-                st.markdown("##### Top 10 Institutional Holders")
-                holders = res_detail.get('inst_top_holders', [])
-                if holders:
-                    df_holders = pd.DataFrame(holders)[["Holder", "Shares", "% Out", "Date Reported"]]
-                    st.dataframe(df_holders.rename(columns={"% Out":"% of Outstanding"}), hide_index=True, use_container_width=True)
-                else: st.info("Top holder data not available.")
-                
-                st.markdown("---")
-                st.markdown("##### Recently Reported Positions (Last 45 Days)")
-                recent_holders = res_detail.get('inst_recently_reported_holders', [])
-                if recent_holders:
-                    df_recent = pd.DataFrame(recent_holders)[["Holder", "Shares", "% Out", "Date Reported"]]
-                    st.dataframe(df_recent.rename(columns={"% Out":"% of Outstanding"}), hide_index=True, use_container_width=True)
-                else:
-                    st.info("No funds have reported positions in the last 45 days.")
-
-            st.markdown("---")
-            with st.popover("View All Recent SEC Filings"):
+            st.markdown("##### Recent Corporate Filings")
+            with st.expander("View All Recent Filings"):
                 all_filings = res_detail.get('sec_all_filings_raw', [])
                 if not all_filings or (isinstance(all_filings[0], dict) and 'error' in all_filings[0]):
                     st.warning(all_filings[0]['error'] if all_filings else "Filings could not be fetched.")
                 else:
                     form_desc = {'10-K':'Annual','10-Q':'Quarterly','8-K':'Event','4':'Insider','13D':'Activist','13G':'Passive'}
-                    for f in all_filings:
+                    for f in all_filings[:15]: # Show latest 15
                         form_type_raw = f.get('form_type', 'UNK')
                         form_type_clean = form_type_raw.split('/')[0] if '/' in form_type_raw else form_type_raw
                         short_desc = form_desc.get(form_type_clean, 'Other')
                         st.markdown(f"• **{f.get('filing_date')}** `{form_type_raw}` ({short_desc}) [[Link]({f.get('link_to_filing')})]")
+
+    # <<< NEW: RESTORED ALL SIGNALS TAB >>>
+    with tabs[3]:
+        st.subheader("All Agent Raw Outputs")
+        st.info("This section shows the complete data dictionary returned by all agents for debugging and detailed review.")
+        
+        # Create a dataframe from the results dictionary, excluding some bulky items for clarity
+        filtered_results = {k: v for k, v in res_detail.items() if k not in ['ticker_info', 'news_headlines_for_popover', 'sec_all_filings_raw', 'inst_top_holders', 'inst_recently_reported_holders']}
+        
+        if filtered_results:
+            df_signals = pd.DataFrame(filtered_results.items(), columns=["Metric", "Value"])
+            st.dataframe(df_signals, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No detailed signal data available.")
 # --- Streamlit UI ---
 llm_client = None
 try:
