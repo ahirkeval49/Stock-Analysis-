@@ -208,24 +208,22 @@ def fetch_inst_filings(ticker: str) -> list[dict]:
         return [{"error": f"No yfinance institutional holder data for {ticker}."}]
     except Exception as e:
         return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
-
 @st.cache_data(ttl=1800) # Cache for 30 minutes
-def fetch_sec_filings_from_search_api(search_query: str, form_types: list = [], lookback_days: int = 365) -> list[dict]:
+def fetch_sec_filings_from_search_api(search_query: str, lookback_days: int = 365) -> list[dict]:
     """
-    Fetches SEC filings using the new EDGAR search API.
-    Can search by ticker/name for specific forms or all forms if list is empty.
+    Fetches ALL recent SEC filings using the new EDGAR search API.
+    This version is simplified for maximum reliability.
     """
-    headers = {'User-Agent': SEC_USER_AGENT, 'Content-Type': 'application/json', 'Accept-Encoding': 'gzip, deflate'}
+    headers = {'User-Agent': SEC_USER_AGENT}
     api_url = "https://efts.sec.gov/LATEST/search-index"
     
+    # Use the Lucene-style query syntax the SEC API uses for tickers
     payload = {
-        "q": search_query,
+        "q": f"ticker:({search_query.upper()})",
         "from": 0,
-        "size": 100 # Get up to 100 recent filings
+        "size": 100, # Get up to 100 recent filings
+        "sort": [{"filed_date": "desc"}]
     }
-    # If form_types is not empty, add it to the query. Otherwise, search all forms.
-    if form_types:
-        payload["forms"] = form_types
 
     try:
         response = requests.post(api_url, headers=headers, json=payload, timeout=20)
@@ -235,7 +233,7 @@ def fetch_sec_filings_from_search_api(search_query: str, form_types: list = [], 
         return [{"error": f"SEC Search API request failed for '{search_query}': {e}"}]
 
     if not results or not results.get('hits', {}).get('hits'):
-        return [{"error": f"SEC Search API: No filings found for '{search_query}' with specified forms."}]
+        return [{"error": f"SEC Search API: No filings found for '{search_query}'."}]
 
     filings_list = []
     date_limit = datetime.now(timezone.utc) - timedelta(days=lookback_days)
@@ -243,63 +241,20 @@ def fetch_sec_filings_from_search_api(search_query: str, form_types: list = [], 
     for hit in results['hits']['hits']:
         source = hit.get('_source', {})
         try:
-            filing_date_dt = datetime.strptime(source.get('file_date'), '%Y-%m-%dT%H:%M:%S%z')
+            # The API returns timezone-aware strings, so we parse them correctly
+            filing_date_dt = datetime.fromisoformat(source.get('file_date'))
             if filing_date_dt < date_limit:
                 continue
 
-            # Universal information for all forms
-            adsh = source.get('adsh')
-            filing_info = {
-                "is_form4_transaction": False,
-                "ticker": search_query.upper(),
+            filings_list.append({
                 "filing_date": source.get('file_date', 'N/A')[:10],
-                "reporting_owner": ", ".join(source.get('display_names', [])),
+                "reporting_owner": ", ".join(source.get('display_names', ["N/A"])),
                 "form_type": source.get('form', 'N/A'),
-                "link_to_filing": f"https://www.sec.gov/edgar/search/#/submission/{adsh}"
-            }
-
-            # If it's a Form 4, attempt to parse the detailed transaction data
-            if source.get('form') == '4' and source.get('xml_filing'):
-                xml_url = f"https://www.sec.gov/Archives/edgar/data/{source.get('ciks')[0]}/{adsh}/{source.get('xml_filing')['name']}"
-                try:
-                    filing_resp = requests.get(xml_url, headers=headers, timeout=10)
-                    filing_resp.raise_for_status()
-                    soup_xml = BeautifulSoup(filing_resp.content, 'xml')
-                    
-                    transactions_found = []
-                    for tx in soup_xml.find_all(['nonDerivativeTransaction', 'derivativeTransaction']):
-                        tx_date_tag = tx.find('transactionDate')
-                        ad_code_tag = tx.find('transactionAcquiredDisposedCode')
-                        amounts = tx.find('transactionAmounts')
-                        shares_tag = amounts.find('transactionShares') if amounts else None
-                        price_tag = amounts.find('transactionPricePerShare') if amounts else None
-
-                        shares = float(shares_tag.find('value').text) if shares_tag and shares_tag.find('value') else 0.0
-                        if shares == 0: continue
-
-                        transactions_found.append({
-                            **filing_info, # Copy metadata
-                            "is_form4_transaction": True,
-                            "transaction_date": tx_date_tag.find('value').text.strip() if tx_date_tag and tx_date_tag.find('value') else filing_info["filing_date"],
-                            "acq_disp_code": ad_code_tag.find('value').text.strip().upper() if ad_code_tag and ad_code_tag.find('value') else "N/A",
-                            "shares": shares,
-                            "price_per_share": float(price_tag.find('value').text) if price_tag and price_tag.find('value') else None
-                        })
-                    
-                    if transactions_found:
-                        filings_list.extend(transactions_found)
-                    else: # If parsing fails or no transactions, add the metadata
-                        filings_list.append(filing_info)
-
-                except Exception:
-                    # If XML parsing fails, just add the Form 4 metadata
-                    filings_list.append(filing_info)
-            else:
-                # For all other form types (10-K, 8-K, etc.), add the metadata
-                filings_list.append(filing_info)
-
+                "link_to_filing": f"https://www.sec.gov/edgar/search/#/submission/{source.get('adsh')}"
+            })
         except (ValueError, TypeError, KeyError):
-            continue # Skip this filing if essential data is missing
+            # Skip any individual filing that has malformed data
+            continue
 
     return sorted(filings_list, key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True)
 @st.cache_data(ttl=4 * 3600)
@@ -974,99 +929,38 @@ class AnalystRatingAgent:
         
 class SECFilingAgent:
     """
-    Analyzes a broad range of SEC filings for comprehensive ownership signals.
-    - NEW: Processes Forms 4, 5, Schedule 13D/G, and Form 144.
-    - NEW: Extracts and returns recent filings of each type for user review.
-    - IMPROVEMENT: Signal is now based on a combination of insider net buying/selling, activist stakes (13D), and intent-to-sell filings (144).
+    Analyzes the list of recent SEC filings to generate a signal.
+    Focuses on the presence of Form 4 (insider) and Form 13D (activist) filings.
     """
     def run(self, ticker: str, data: dict) -> dict:
         filings = data.get("sec_all_filings_raw", [])
-        info = data.get("ticker_info", {})
-        err = None
-
         if not filings or (isinstance(filings[0], dict) and "error" in filings[0]):
-            err = filings[0].get("error") if filings and isinstance(filings[0], dict) else f"SEC: No raw filings for {ticker}."
-            return {
-                "ticker": ticker, "sec_filings_signal": "hold", "sec_filings_error": err,
-                "sec_net_insider_shares_1y": 0, "sec_insider_buy_value_1y": 0, "sec_insider_sell_value_1y": 0,
-                "sec_recent_form4_5_transactions": [], "sec_recent_13d_filings": [], "sec_recent_13g_filings": [], "sec_recent_144_filings": []
-            }
+            err = filings[0].get("error") if filings else "No SEC filing data."
+            return {"ticker": ticker, "sec_filings_signal": "hold", "sec_filings_error": err}
 
-        net_s, buy_v, sell_v = 0, 0, 0
-        net_shares_proposed_sale_144 = 0
-        form4_5_tx, filings_13d, filings_13g, filings_144, other_filings = [], [], [], [], []
-        new_activist_stake = False
-        
-        # --- FIX: Using 'datetime' and 'timedelta' directly as imported ---
-        one_year_ago = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+        recent_form4 = False
+        recent_activist = False
+        three_months_ago = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
 
         for f in filings:
-            if not isinstance(f, dict) or "error" in f:
-                continue
-
-            form_type = f.get('form_type', '').upper()
-            filing_date = f.get('filing_date', '')
+            if not isinstance(f, dict): continue
             
-            if form_type in ['4', '5'] or f.get("is_form4_transaction"):
-                form4_5_tx.append(f)
-                s, p = f.get("shares", 0.0), f.get("price_per_share")
-                if not isinstance(s, (int, float)): s = 0.0
-                
-                if f.get("transaction_code") == "P" and f.get("acq_disp_code") == "A":
-                    net_s += s
-                    if isinstance(p, (int, float)) and s != 0: buy_v += s * p
-                elif f.get("transaction_code") == "S" and f.get("acq_disp_code") == "D":
-                    net_s -= s
-                    if isinstance(p, (int, float)) and s != 0: sell_v += s * p
-            
-            elif '13D' in form_type:
-                filings_13d.append(f)
-                if filing_date and filing_date >= one_year_ago:
-                    new_activist_stake = True
-
-            elif '13G' in form_type:
-                filings_13g.append(f)
-
-            elif '144' in form_type:
-                filings_144.append(f)
-                if filing_date and filing_date >= one_year_ago:
-                    shares_to_sell = f.get('shares_proposed_to_be_sold', 0)
-                    if isinstance(shares_to_sell, (int, float)):
-                        net_shares_proposed_sale_144 += shares_to_sell
-            else:
-                other_filings.append(f)
-
-        shares_outstanding = info.get("sharesOutstanding")
-        net_shares_pct = 0.0
-        proposed_sale_pct = 0.0
-        if shares_outstanding and shares_outstanding > 0:
-            net_shares_pct = net_s / shares_outstanding
-            proposed_sale_pct = net_shares_proposed_sale_144 / shares_outstanding
-        
-        buy_sell_ratio = buy_v / sell_v if sell_v > 0 else float('inf')
+            filing_date = f.get('filing_date', '1900-01-01')
+            if filing_date >= three_months_ago:
+                if f.get('form_type') == '4':
+                    recent_form4 = True
+                if f.get('form_type') == '13D':
+                    recent_activist = True
 
         sig = "hold"
-        if new_activist_stake or net_shares_pct > 0.01:
+        if recent_activist:
             sig = "strong_buy"
-        elif (buy_v > 250000 and buy_sell_ratio > 5.0) or net_shares_pct > 0.005:
-            sig = "buy"
-        elif proposed_sale_pct > 0.02 or net_shares_pct < -0.02:
-            sig = "strong_sell"
-        elif proposed_sale_pct > 0.01 or (sell_v > 250000 and buy_v < (sell_v * 0.2)):
-            sig = "sell"
-
-        return {
-            "ticker": ticker, "sec_filings_signal": sig, "sec_filings_error": None,
-            "sec_net_insider_shares_1y": int(net_s), "sec_net_insider_pct_outstanding_1y": round(net_shares_pct, 6),
-            "sec_insider_buy_value_1y": round(buy_v, 2), "sec_insider_sell_value_1y": round(sell_v, 2),
-            "sec_shares_proposed_for_sale_1y": int(net_shares_proposed_sale_144), "sec_shares_proposed_for_sale_pct_1y": round(proposed_sale_pct, 6),
-            "sec_new_activist_stake_1y": new_activist_stake,
-            "sec_recent_form4_5_transactions": sorted(form4_5_tx, key=lambda x: x.get('filing_date', ''), reverse=True)[:10],
-            "sec_recent_13d_filings": sorted(filings_13d, key=lambda x: x.get('filing_date', ''), reverse=True)[:5],
-            "sec_recent_13g_filings": sorted(filings_13g, key=lambda x: x.get('filing_date', ''), reverse=True)[:5],
-            "sec_recent_144_filings": sorted(filings_144, key=lambda x: x.get('filing_date', ''), reverse=True)[:5],
-        }
+        elif recent_form4:
+            # A recent Form 4 is noteworthy, but we don't know the direction without parsing.
+            # We'll treat it as a weak "hold/watch" signal. The user can see the filing.
+            sig = "hold" 
         
+        return {"ticker": ticker, "sec_filings_signal": sig, "sec_filings_error": None}
 class InstitutionalHoldingsAgent:
     """
     Analyzes institutional ownership from both a static snapshot and dynamic SEC filings.
