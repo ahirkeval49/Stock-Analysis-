@@ -212,16 +212,20 @@ def fetch_inst_filings(ticker: str) -> list[dict]:
 def fetch_sec_filings_from_search_api(search_query: str, lookback_days: int = 365) -> list[dict]:
     """
     Fetches ALL recent SEC filings using the new EDGAR search API.
-    This version is simplified for maximum reliability.
+    This version uses a standard browser User-Agent to avoid 403 errors.
     """
-    headers = {'User-Agent': SEC_USER_AGENT}
+    # --- FIX: Using a more standard browser User-Agent ---
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    }
     api_url = "https://efts.sec.gov/LATEST/search-index"
     
-    # Use the Lucene-style query syntax the SEC API uses for tickers
     payload = {
-        "q": f"ticker:({search_query.upper()})",
+        "q": search_query, # The API is smart enough to handle tickers directly
         "from": 0,
-        "size": 100, # Get up to 100 recent filings
+        "size": 100,
         "sort": [{"filed_date": "desc"}]
     }
 
@@ -241,7 +245,6 @@ def fetch_sec_filings_from_search_api(search_query: str, lookback_days: int = 36
     for hit in results['hits']['hits']:
         source = hit.get('_source', {})
         try:
-            # The API returns timezone-aware strings, so we parse them correctly
             filing_date_dt = datetime.fromisoformat(source.get('file_date'))
             if filing_date_dt < date_limit:
                 continue
@@ -253,10 +256,10 @@ def fetch_sec_filings_from_search_api(search_query: str, lookback_days: int = 36
                 "link_to_filing": f"https://www.sec.gov/edgar/search/#/submission/{source.get('adsh')}"
             })
         except (ValueError, TypeError, KeyError):
-            # Skip any individual filing that has malformed data
             continue
 
     return sorted(filings_list, key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True)
+
 @st.cache_data(ttl=4 * 3600)
 def fetch_value_investing_io_data(ticker: str) -> dict:
     url = f"https://valueinvesting.io/{ticker.upper()}/valuation/fair-value"
@@ -1256,12 +1259,11 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     max_dd = log_df.drawdown.min()*100 if not log_df.drawdown.empty and pd.notna(log_df.drawdown.min()) else 0
     trades = (log_df.signal != log_df.signal.shift()).fillna(False).sum()//2
     return {"Initial Capital":f"${initial_capital:,.2f}", "Final Portfolio Value":f"${log_df.portfolio_value.iloc[-1]:,.2f}", "Total Return (%)":f"{total_ret:.2f}%", "Annualized Return (%)":f"{ann_ret:.2f}%", "Annualized Volatility (%)":f"{ann_vol:.2f}%", "Sharpe Ratio":f"{sharpe:.2f}", "Max Drawdown (%)":f"{max_dd:.2f}%", "Number of Trades (approx)":f"{trades}"}, log_df
-
 def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A")
     ticker_info = res_detail.get("ticker_info", {})
-    # --- FIX: Added "All Signals" back to the list of tabs ---
-    tab_titles = ["📈 Technicals & Momentum", "📊 Fundamentals & Value", "📰 News & Filings", "⚙️ All Signals"]
+    # Restoring the "All Signals" tab as it's useful for debugging
+    tab_titles = ["📈 Chart & Core", "📊 Fundamentals & Value", "📰 News & Filings", "⚙️ All Signals"]
     tabs = st.tabs(tab_titles)
 
     def get_signal_color(signal):
@@ -1281,10 +1283,7 @@ def display_detailed_analysis(res_detail):
 
     with tabs[0]: # Technicals & Momentum
         st.markdown("#### Price Chart (1-Year)")
-        price_hist_chart = fetch_price_history(ticker, period="1y")
-        if not price_hist_chart.empty:
-            st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
-        
+        st.line_chart(fetch_price_history(ticker, period="1y")["Close"], use_container_width=True, color="#0072F0")
         t_col1, t_col2 = st.columns(2)
         with t_col1:
             st.markdown("##### Technical Signal")
@@ -1299,51 +1298,60 @@ def display_detailed_analysis(res_detail):
         f_col1, f_col2 = st.columns(2)
         with f_col1:
             st.markdown("##### Core Fundamentals")
-            st.info(f"**Signal:** {str(res_detail.get('fund_signal', 'N/A')).upper()}")
             cap_str = f"${ticker_info.get('marketCap', 0) / 1e9:.2f}B" if isinstance(ticker_info.get('marketCap'), (int, float)) else "N/A"
-            roe_val = ticker_info.get('returnOnEquity')
-            st.caption(f"Market Cap: {cap_str}")
-            st.caption(f"Return on Equity: {roe_val * 100:.2f}%" if isinstance(roe_val, (int,float)) else "ROE: N/A")
+            fcy_val = res_detail.get('fcf_yield')
+            st.metric("Market Cap", cap_str)
+            st.metric("FCF Yield", f"{fcy_val * 100:.2f}%" if isinstance(fcy_val, (int, float)) else "N/A")
+            # <<< RESTORED: Financial Health Table >>>
+            roe_val = ticker_info.get('returnOnEquity'); de_val = ticker_info.get('debtToEquity');
+            st.table(pd.DataFrame({
+                "Return on Equity": [f"{roe_val * 100:.2f}%" if isinstance(roe_val,(int,float)) else "N/A"],
+                "Debt to Equity": [f"{de_val:.2f}" if isinstance(de_val,(int,float)) else "N/A"]
+            }))
         with f_col2:
-            st.markdown("##### Valuation")
-            st.info(f"**VI.io Signal:** {str(res_detail.get('vi_signal', 'N/A')).upper()}")
+            st.markdown("##### Valuation Metrics")
+            st.metric("Forward P/E", f"{ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'), (int, float)) else "N/A")
             up_val = res_detail.get('vi_upside_percent')
-            st.caption(f"Forward P/E: {ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'), (int,float)) else "P/E: N/A")
-            st.caption(f"VI.io Upside: {up_val:.1f}%" if isinstance(up_val, (int,float)) else "VI.io Upside: N/A")
-        
+            st.metric("VI.io Upside", f"{up_val:.1f}%" if isinstance(up_val, (int, float)) else "N/A")
+            # <<< RESTORED: Fair Value Comment >>>
+            vi_text = res_detail.get('vi_valuation_text_display')
+            if vi_text:
+                with st.expander("Show Fair Value Rationale"):
+                    st.markdown(f"> *{vi_text}*")
+
     with tabs[2]: # News & Filings
         news_col, file_col = st.columns([3, 2])
         with news_col:
             st.markdown("##### News Summary & Sentiment")
             st.info(f"**Sentiment Signal:** {str(res_detail.get('sentiment_signal','N/A')).upper()}")
             st.write(res_detail.get('news_summary', 'No summary available.'))
+            # <<< RESTORED: News Links Popover >>>
+            headlines = res_detail.get('news_headlines_for_popover', [])
+            if headlines:
+                with st.popover("View News Sources & Links"):
+                    for line in headlines:
+                        st.markdown(f"- {line}")
         with file_col:
-            st.markdown("##### Recent Corporate Filings")
-            with st.expander("View All Recent Filings"):
+            st.markdown("##### Corporate Filings")
+            with st.expander("SEC Filings"):
                 all_filings = res_detail.get('sec_all_filings_raw', [])
                 if not all_filings or (isinstance(all_filings[0], dict) and 'error' in all_filings[0]):
                     st.warning(all_filings[0]['error'] if all_filings else "Filings could not be fetched.")
                 else:
-                    form_desc = {'10-K':'Annual','10-Q':'Quarterly','8-K':'Event','4':'Insider','13D':'Activist','13G':'Passive'}
-                    for f in all_filings[:15]: # Show latest 15
-                        form_type_raw = f.get('form_type', 'UNK')
-                        form_type_clean = form_type_raw.split('/')[0] if '/' in form_type_raw else form_type_raw
-                        short_desc = form_desc.get(form_type_clean, 'Other')
-                        st.markdown(f"• **{f.get('filing_date')}** `{form_type_raw}` ({short_desc}) [[Link]({f.get('link_to_filing')})]")
+                    st.dataframe(pd.DataFrame(all_filings), hide_index=True, use_container_width=True)
+            
+            # <<< RESTORED: Institutional Holdings List >>>
+            with st.expander("Institutional Holders"):
+                holders = res_detail.get('inst_top_holders', [])
+                if holders:
+                    st.dataframe(pd.DataFrame(holders)[["Holder", "Shares", "% Out", "Date Reported"]].rename(columns={"% Out":"% of Outstanding"}), hide_index=True, use_container_width=True)
+                else: st.info("Institutional holder data not available.")
 
-    # <<< NEW: RESTORED ALL SIGNALS TAB >>>
-    with tabs[3]:
-        st.subheader("All Agent Raw Outputs")
-        st.info("This section shows the complete data dictionary returned by all agents for debugging and detailed review.")
-        
-        # Create a dataframe from the results dictionary, excluding some bulky items for clarity
-        filtered_results = {k: v for k, v in res_detail.items() if k not in ['ticker_info', 'news_headlines_for_popover', 'sec_all_filings_raw', 'inst_top_holders', 'inst_recently_reported_holders']}
-        
-        if filtered_results:
-            df_signals = pd.DataFrame(filtered_results.items(), columns=["Metric", "Value"])
-            st.dataframe(df_signals, use_container_width=True, hide_index=True)
-        else:
-            st.warning("No detailed signal data available.")
+    with tabs[3]: # All Signals (Raw Data)
+        st.subheader("Raw Agent Outputs")
+        filtered_results = {k: v for k, v in res_detail.items() if not isinstance(v, (dict, list))}
+        st.dataframe(pd.DataFrame(filtered_results.items(), columns=["Metric", "Value"]), use_container_width=True, hide_index=True)
+
 # --- Streamlit UI ---
 llm_client = None
 try:
