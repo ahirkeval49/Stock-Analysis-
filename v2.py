@@ -1421,34 +1421,34 @@ with config_cont:
     st.markdown("---")
 
     if st.session_state.app_mode == "Live Analysis":
-    st.subheader("Live Analysis Settings")
-    tickers_in_live = st.text_input("Tickers (comma-separated):", "AAPL,MSFT,GOOG,CRWD", key="live_tickers_input")
-    st.caption("ℹ️ Live analysis uses all available historical data.")
-    st.subheader("Feature Toggles")
+        st.subheader("Live Analysis Settings")
+        tickers_in_live = st.text_input("Tickers (comma-separated):", "AAPL,MSFT,GOOG,CRWD", key="live_tickers_input")
+        st.caption("ℹ️ Live analysis uses all available historical data.")
+        st.subheader("Feature Toggles")
     
-    feat_cols = st.columns(3)
-    with feat_cols[0]:
-        use_sent_live = st.checkbox("News Sentiment & Summary (LLM)", value=bool(llm_client), disabled=not llm_client, key="live_sent_cb_main", help="Uses LLM. Requires NewsAPI key.")
-    with feat_cols[1]:
-        use_filings_live = st.checkbox("SEC & Inst. Filings", value=True, key="live_sec_cb_main")
-    with feat_cols[2]:
-        use_valtrades_live = st.checkbox("ValueInvesting.io (Exp.)", value=False, key="live_vt_cb_main", help="Scrapes ValueInvesting.io. May be slow/unreliable.")
+        feat_cols = st.columns(3)
+        with feat_cols[0]:
+            use_sent_live = st.checkbox("News Sentiment & Summary (LLM)", value=bool(llm_client), disabled=not llm_client, key="live_sent_cb_main", help="Uses LLM. Requires NewsAPI key.")
+        with feat_cols[1]:
+            use_filings_live = st.checkbox("SEC & Inst. Filings", value=True, key="live_sec_cb_main")
+        with feat_cols[2]:
+            use_valtrades_live = st.checkbox("ValueInvesting.io (Exp.)", value=False, key="live_vt_cb_main", help="Scrapes ValueInvesting.io. May be slow/unreliable.")
     
-    if st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_analysis_button"):
-        live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
-        if not live_tickers:
-            st.error("Please enter at least one ticker.")
-        else:
+        if st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_analysis_button"):
+            live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
+            if not live_tickers:
+                st.error("Please enter at least one ticker.")
+            else:
             # --- THIS IS THE FIX: 'use_politician_filings' is now removed ---
-            live_configs = {
-                "use_sentiment": use_sent_live, 
-                "use_filings": use_filings_live,
-                "use_value_trades": use_valtrades_live
+                live_configs = {
+                    "use_sentiment": use_sent_live, 
+                    "use_filings": use_filings_live,
+                    "use_value_trades": use_valtrades_live
             }
-            with st.spinner("⏳ Processing live analysis..."):
-                st.session_state.live_output = run_live_analysis(live_tickers, llm_client, live_configs)
-                st.session_state.live_analysis_triggered = True
-                st.rerun()
+                with st.spinner("⏳ Processing live analysis..."):
+                    st.session_state.live_output = run_live_analysis(live_tickers, llm_client, live_configs)
+                    st.session_state.live_analysis_triggered = True
+                    st.rerun()
 
     elif st.session_state.app_mode == "Backtesting":
         st.subheader("Backtesting Settings")
