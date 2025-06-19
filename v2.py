@@ -209,99 +209,99 @@ def fetch_inst_filings(ticker: str) -> list[dict]:
     except Exception as e:
         return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
 
-@st.cache_data(ttl=4*3600)
-def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]:
+@st.cache_data(ttl=1800) # Cache for 30 minutes
+def fetch_sec_filings_from_search_api(search_query: str, form_types: list = [], lookback_days: int = 365) -> list[dict]:
     """
-    Fetches all recent SEC filings from EDGAR and parses Form 4 for transactions.
-    This version is modified for robustness.
+    Fetches SEC filings using the new EDGAR search API.
+    Can search by ticker/name for specific forms or all forms if list is empty.
     """
-    cik = get_cik_for_ticker(ticker_symbol)
-    if not cik: return [{"error": f"SEC: CIK not found for {ticker_symbol}."}]
+    headers = {'User-Agent': SEC_USER_AGENT, 'Content-Type': 'application/json', 'Accept-Encoding': 'gzip, deflate'}
+    api_url = "https://efts.sec.gov/LATEST/search-index"
+    
+    payload = {
+        "q": search_query,
+        "from": 0,
+        "size": 100 # Get up to 100 recent filings
+    }
+    # If form_types is not empty, add it to the query. Otherwise, search all forms.
+    if form_types:
+        payload["forms"] = form_types
 
-    submissions_url = f"https://data.sec.gov/submissions/CIK{str(cik).zfill(10)}.json"
-    headers = {'User-Agent': SEC_USER_AGENT}
     try:
-        response = requests.get(submissions_url, headers=headers, timeout=20)
+        response = requests.post(api_url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
-        submissions_data = response.json()
+        results = response.json()
     except Exception as e:
-        return [{"error": f"SEC submissions fetch failed for {ticker_symbol}: {e}"}]
+        return [{"error": f"SEC Search API request failed for '{search_query}': {e}"}]
+
+    if not results or not results.get('hits', {}).get('hits'):
+        return [{"error": f"SEC Search API: No filings found for '{search_query}' with specified forms."}]
 
     filings_list = []
     date_limit = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
-    if 'filings' in submissions_data and 'recent' in submissions_data['filings']:
-        recent = submissions_data['filings']['recent']
-        forms, dates, acc_nos, docs = recent.get('form',[]), recent.get('filingDate',[]), recent.get('accessionNumber',[]), recent.get('primaryDocument',[])
+    for hit in results['hits']['hits']:
+        source = hit.get('_source', {})
+        try:
+            filing_date_dt = datetime.strptime(source.get('file_date'), '%Y-%m-%dT%H:%M:%S%z')
+            if filing_date_dt < date_limit:
+                continue
 
-        for i in range(len(forms)):
-            try:
-                filing_date_dt = datetime.strptime(dates[i], '%Y-%m-%d').replace(tzinfo=timezone.utc)
-                if filing_date_dt < date_limit:
-                    continue
+            # Universal information for all forms
+            adsh = source.get('adsh')
+            filing_info = {
+                "is_form4_transaction": False,
+                "ticker": search_query.upper(),
+                "filing_date": source.get('file_date', 'N/A')[:10],
+                "reporting_owner": ", ".join(source.get('display_names', [])),
+                "form_type": source.get('form', 'N/A'),
+                "link_to_filing": f"https://www.sec.gov/edgar/search/#/submission/{adsh}"
+            }
 
-                form_type = forms[i]
-                acc_no = acc_nos[i].replace('-', '')
-                doc_name = docs[i]
-                cik_padded = str(cik).zfill(10)
-                base_url = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no}"
-                summary_link = f"{base_url}/{acc_nos[i]}-index.html"
-                doc_link = f"{base_url}/{doc_name}"
+            # If it's a Form 4, attempt to parse the detailed transaction data
+            if source.get('form') == '4' and source.get('xml_filing'):
+                xml_url = f"https://www.sec.gov/Archives/edgar/data/{source.get('ciks')[0]}/{adsh}/{source.get('xml_filing')['name']}"
+                try:
+                    filing_resp = requests.get(xml_url, headers=headers, timeout=10)
+                    filing_resp.raise_for_status()
+                    soup_xml = BeautifulSoup(filing_resp.content, 'xml')
+                    
+                    transactions_found = []
+                    for tx in soup_xml.find_all(['nonDerivativeTransaction', 'derivativeTransaction']):
+                        tx_date_tag = tx.find('transactionDate')
+                        ad_code_tag = tx.find('transactionAcquiredDisposedCode')
+                        amounts = tx.find('transactionAmounts')
+                        shares_tag = amounts.find('transactionShares') if amounts else None
+                        price_tag = amounts.find('transactionPricePerShare') if amounts else None
 
-                # Handle Form 4 transactions
-                if form_type == '4' and doc_name.lower().endswith(('.xml', '.xsd')):
-                    xml_url = doc_link
-                    try:
-                        filing_resp = requests.get(xml_url, headers=headers, timeout=10)
-                        if filing_resp.status_code != 200: continue
-                        soup_xml = BeautifulSoup(filing_resp.content, 'xml')
+                        shares = float(shares_tag.find('value').text) if shares_tag and shares_tag.find('value') else 0.0
+                        if shares == 0: continue
 
-                        owner_tag = soup_xml.find('reportingOwner')
-                        owner_name = owner_tag.find('rptOwnerName').text.strip() if owner_tag and owner_tag.find('rptOwnerName') else "N/A"
-
-                        for tx in soup_xml.find_all(['nonDerivativeTransaction', 'derivativeTransaction']):
-                            tx_date_tag = tx.find('transactionDate')
-                            tx_date = tx_date_tag.find('value').text.strip() if tx_date_tag and tx_date_tag.find('value') else dates[i]
-                            
-                            coding_tag = tx.find('transactionCoding')
-                            tx_code = coding_tag.find('transactionCode').text.strip().upper() if coding_tag and coding_tag.find('transactionCode') else "N/A"
-                            
-                            amounts_tag = tx.find('transactionAmounts')
-                            shares_tag = amounts_tag.find('transactionShares') if amounts_tag else None
-                            shares = float(shares_tag.find('value').text.strip()) if shares_tag and shares_tag.find('value') else 0.0
-                            
-                            price_tag = amounts_tag.find('transactionPricePerShare') if amounts_tag else None
-                            price = float(price_tag.find('value').text.strip()) if price_tag and price_tag.find('value') else None
-
-                            ad_code_tag = tx.find('transactionAcquiredDisposedCode')
-                            ad_code = ad_code_tag.find('value').text.strip().upper() if ad_code_tag and ad_code_tag.find('value') else "N/A"
-                            
-                            if shares != 0:
-                                filings_list.append({
-                                    "is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": dates[i],
-                                    "transaction_date": tx_date, "reporting_owner": owner_name, "transaction_code": tx_code,
-                                    "acq_disp_code": ad_code, "shares": shares, "price_per_share": price,
-                                    "link_to_filing": summary_link
-                                })
-                    except Exception:
-                        # If XML parsing fails, add it as a general filing so it's not missed
-                        filings_list.append({
-                            "is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": dates[i],
-                            "form_type": form_type, "document_link": doc_link, "summary_link": summary_link
+                        transactions_found.append({
+                            **filing_info, # Copy metadata
+                            "is_form4_transaction": True,
+                            "transaction_date": tx_date_tag.find('value').text.strip() if tx_date_tag and tx_date_tag.find('value') else filing_info["filing_date"],
+                            "acq_disp_code": ad_code_tag.find('value').text.strip().upper() if ad_code_tag and ad_code_tag.find('value') else "N/A",
+                            "shares": shares,
+                            "price_per_share": float(price_tag.find('value').text) if price_tag and price_tag.find('value') else None
                         })
-                else: # For all other forms, just log them
-                    filings_list.append({
-                        "is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": dates[i],
-                        "form_type": form_type, "document_link": doc_link, "summary_link": summary_link
-                    })
-            except Exception:
-                continue # Skip if there's an error with a single filing record
+                    
+                    if transactions_found:
+                        filings_list.extend(transactions_found)
+                    else: # If parsing fails or no transactions, add the metadata
+                        filings_list.append(filing_info)
 
-    if not filings_list: return [{"error": f"SEC: No relevant filings found within the last year for {ticker_symbol}."}]
+                except Exception:
+                    # If XML parsing fails, just add the Form 4 metadata
+                    filings_list.append(filing_info)
+            else:
+                # For all other form types (10-K, 8-K, etc.), add the metadata
+                filings_list.append(filing_info)
 
-    filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True)
-    return filings_list
+        except (ValueError, TypeError, KeyError):
+            continue # Skip this filing if essential data is missing
 
+    return sorted(filings_list, key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True)
 @st.cache_data(ttl=4 * 3600)
 def fetch_value_investing_io_data(ticker: str) -> dict:
     url = f"https://valueinvesting.io/{ticker.upper()}/valuation/fair-value"
