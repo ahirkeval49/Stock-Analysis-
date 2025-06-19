@@ -1457,6 +1457,7 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     max_dd = log_df.drawdown.min()*100 if not log_df.drawdown.empty and pd.notna(log_df.drawdown.min()) else 0
     trades = (log_df.signal != log_df.signal.shift()).fillna(False).sum()//2
     return {"Initial Capital":f"${initial_capital:,.2f}", "Final Portfolio Value":f"${log_df.portfolio_value.iloc[-1]:,.2f}", "Total Return (%)":f"{total_ret:.2f}%", "Annualized Return (%)":f"{ann_ret:.2f}%", "Annualized Volatility (%)":f"{ann_vol:.2f}%", "Sharpe Ratio":f"{sharpe:.2f}", "Max Drawdown (%)":f"{max_dd:.2f}%", "Number of Trades (approx)":f"{trades}"}, log_df
+
 def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A")
     ticker_info = res_detail.get("ticker_info", {})
@@ -1469,49 +1470,67 @@ def display_detailed_analysis(res_detail):
         if "SELL" in signal: return "red"
         return "orange"
 
+    # Tab 1: Chart & Core
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
-        st.line_chart(fetch_price_history(ticker, period="1y")["Close"], use_container_width=True, color="#0072F0")
+        price_hist_chart = fetch_price_history(ticker, period="1y")
+        if not price_hist_chart.empty:
+            st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
         st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Technical Indicators")
             st.metric(label="Price Signal", value=str(res_detail.get('price_signal', 'hold')).upper())
-            st.markdown(f"**50D SMA:** `${res_detail.get('sma50', 0):,.2f}` | **200D SMA:** `${res_detail.get('sma200', 0):,.2f}` | **RSI:** `{res_detail.get('rsi14', 0):.2f}`")
+            price_conf = res_detail.get('price_confidence_score')
+            if isinstance(price_conf, (int, float)):
+                st.progress(abs(price_conf), text=f"Confidence: {price_conf:.2f}")
         with col2:
             st.subheader("Momentum & Volatility")
             st.metric(label="Momentum Signal", value=str(res_detail.get('momentum_signal', 'hold')).upper())
-            st.markdown(f"**12-Mo:** `{res_detail.get('momentum_12m', 0) * 100:.2f}%` | **Beta:** `{res_detail.get('beta', 0):.2f}`")
+            mom_conf = res_detail.get('momentum_confidence_score')
+            if isinstance(mom_conf, (int, float)):
+                st.progress(abs(mom_conf), text=f"Confidence: {mom_conf:.2f}")
 
+    # Tab 2: Fundamentals
     with tabs[1]:
         st.subheader(f"Fundamental Overview: {ticker_info.get('longName', '')}")
         st.markdown("---")
         fund_col1, fund_col2, fund_col3 = st.columns(3)
         cap_str = f"${ticker_info.get('marketCap', 0) / 1e9:.2f}B" if isinstance(ticker_info.get('marketCap'), (int, float)) else "N/A"
         fund_col1.metric("Market Cap", cap_str)
-        fund_col2.metric("Forward P/E", f"{ticker_info.get('forwardPE', 0):.2f}" if isinstance(ticker_info.get('forwardPE'),(int,float)) else "N/A")
+        fund_col2.metric("Forward P/E", f"{ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'), (int, float)) else "N/A")
         fcy_val = res_detail.get('fcf_yield')
-        fund_col3.metric("FCF Yield", f"{fcy_val * 100:.2f}%" if isinstance(fcy_val,(int,float)) else "N/A")
-        
+        fund_col3.metric("FCF Yield", f"{fcy_val * 100:.2f}%" if isinstance(fcy_val, (int, float)) else "N/A")
+
+    # Tab 3: Analyst & Gov.
     with tabs[2]:
         st.subheader("Analyst, Fair Value, & Government Trades")
         val_col1, val_col2, val_col3 = st.columns(3)
         with val_col1:
             st.metric(label="Analyst Signal", value=str(res_detail.get('analyst_signal', 'hold')).upper())
-            st.markdown(f"**Target Upside:** `{res_detail.get('target_upside', 0) * 100:.1f}%`")
+            # --- FIX: Check for None before formatting ---
+            tu_val = res_detail.get('target_upside')
+            st.markdown(f"**Target Upside:** `{tu_val * 100:.1f}%`" if isinstance(tu_val, (int,float)) else "**Target Upside:** N/A")
         with val_col2:
             st.metric(label="Fair Value Signal", value=str(res_detail.get('vi_signal', 'hold')).upper())
-            st.markdown(f"**VI.io Upside:** `{res_detail.get('vi_upside_percent', 0):.1f}%`")
+            # --- FIX: This was the line causing the crash. Now it checks for None. ---
+            up_val = res_detail.get('vi_upside_percent')
+            st.markdown(f"**VI.io Upside:** `{up_val:.1f}%`" if isinstance(up_val, (int, float)) else "**VI.io Upside:** N/A")
         with val_col3:
             st.metric(label="Politician Signal", value=str(res_detail.get('politician_filings_signal', 'hold')).upper())
-            st.markdown(f"**Net Value:** `${res_detail.get('politician_net_trade_value_estimate', 0):,.0f}`")
+            # --- FIX: Check for None before formatting ---
+            net_val = res_detail.get('politician_net_trade_value_estimate')
+            st.markdown(f"**Net Value:** `${net_val:,.0f}`" if isinstance(net_val, (int, float)) else "**Net Value:** N/A")
 
+    # Tab 4: News & Filings
     with tabs[3]:
         st.subheader("News & Filings Summary")
         news_col, file_col = st.columns(2)
         with news_col:
             st.markdown("**Recent News**")
-            st.metric(label=f"Sentiment Signal", value=str(res_detail.get("sentiment_signal","hold")).upper(), delta=f"Score: {res_detail.get('sentiment_score', 0.0):.2f}", delta_color="off")
+            sent_score = res_detail.get("sentiment_score")
+            st.metric(label="Sentiment Signal", value=str(res_detail.get("sentiment_signal","hold")).upper(),
+                      delta=f"Score: {sent_score:.2f}" if isinstance(sent_score, (int,float)) else "Score: N/A", delta_color="off")
             headlines = res_detail.get('news_headlines_for_popover', [])
             if headlines:
                 with st.expander("Show News Headlines & Links"):
@@ -1520,28 +1539,18 @@ def display_detailed_analysis(res_detail):
         with file_col:
             st.markdown("**Filings Intel**")
             st.metric("SEC Filings Signal", str(res_detail.get('sec_filings_signal', 'hold')).upper())
-            net_pct = res_detail.get('sec_net_insider_pct_outstanding_1y', 0) * 100
-            st.markdown(f"**Insider Net Buys (1Y):** `{net_pct:.3f}%`")
-            other_filings = [f for f in res_detail.get('sec_all_filings_raw', []) if not f.get('is_form4_transaction')]
-            if other_filings:
-                with st.expander("View All Recent Filings"):
-                    form_desc = {'10-K': 'Annual', '10-Q': 'Quarterly', '8-K': 'Event', '4': 'Insider Trade'}
-                    for f in other_filings[:15]:
-                        st.markdown(f"- **{f.get('filing_date')}**: {f.get('form_type')} ({form_desc.get(f.get('form_type'), 'Other')}) [[Link]({f.get('link_to_filing', '#')})]")
-
+            # --- FIX: Check for None before formatting ---
+            net_pct = res_detail.get('sec_net_insider_pct_outstanding_1y')
+            st.markdown(f"**Insider Net Buys (1Y):** `{net_pct * 100:.3f}%`" if isinstance(net_pct, (int,float)) else "**Insider Net Buys (1Y):** N/A")
+            
+    # Tab 5: All Signals
     with tabs[4]:
         st.subheader("All Agent Signals at a Glance")
-        # This part remains robust and should work correctly
-        signals_data = {
-            "Price Signal": str(res_detail.get("price_signal","N/A")).upper(), "Momentum Signal": str(res_detail.get("momentum_signal","N/A")).upper(),
-            "Volatility Signal": str(res_detail.get("volatility_signal","N/A")).upper(), "Fundamental Signal": str(res_detail.get("fund_signal","N/A")).upper(),
-            "Analyst Signal": str(res_detail.get("analyst_signal","N/A")).upper(), "ValueInvesting.io Signal": str(res_detail.get("vi_signal","N/A")).upper(),
-            "News Sentiment Signal": str(res_detail.get("sentiment_signal","N/A")).upper(), "SEC Filings Signal": str(res_detail.get("sec_filings_signal","N/A")).upper(),
-            "Institutional Signal": str(res_detail.get("inst_holdings_signal","N/A")).upper(), "Politician Filings Signal": str(res_detail.get("politician_filings_signal", "N/A")).upper()
-        }
-        df_signals = pd.DataFrame(signals_data.items(), columns=["Agent", "Signal"])
-        st.dataframe(df_signals.style.applymap(lambda x: f'color: {get_signal_color(x)}', subset=['Signal']), hide_index=True, use_container_width=True)
-
+        st.dataframe(pd.DataFrame(res_detail.items(), columns=["Metric", "Value"]))
+        st.markdown("---")
+        final_decision = str(res_detail.get('final_decision', 'hold')).upper()
+        final_color = get_signal_color(final_decision)
+        st.markdown(f"""<div style="border:2px solid {final_color}; border-radius:8px; padding:15px; text-align:center;"><p style="font-size:1.2em; margin-bottom:5px;">Final AI Decision</p><h2 style="color:{final_color}; margin-bottom:5px;">{final_decision}</h2><p style="font-size:1em;">Composite Score: <strong>{res_detail.get('composite_score', 0):.2f}</strong></p></div>""", unsafe_allow_html=True)
 # --- Streamlit UI ---
 llm_client = None
 try:
