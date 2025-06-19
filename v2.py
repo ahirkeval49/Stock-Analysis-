@@ -282,91 +282,7 @@ def fetch_value_investing_io_data(ticker: str) -> dict:
     except requests.exceptions.RequestException as req_err: return {"error": f"VI.io: Request error for {ticker}: {req_err}"}
     except Exception as e: return {"error": f"VI.io: Unexpected error for {ticker}: {e}"}
 
-@st.cache_data(ttl=3600)
-def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
-    """
-    Fetches politician trades by first finding the specific issuer page on Capitol Trades
-    and then scraping the trades from that page. This is a more robust, two-step method.
-    """
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36'}
-    
-    # --- Step 1: Find the issuer-specific URL ---
-    search_url = f"https://www.capitoltrades.com/issuers?search={ticker.upper()}"
-    issuer_page_url = None
-    try:
-        search_resp = requests.get(search_url, headers=headers, timeout=15)
-        search_resp.raise_for_status()
-        search_soup = BeautifulSoup(search_resp.content, 'html.parser')
-        
-        # Find the link that specifically goes to the issuer page
-        issuer_link = search_soup.find('a', class_='issuer-card', href=re.compile(r'/issuers/\d+'))
-        if issuer_link and issuer_link.has_attr('href'):
-            issuer_page_url = urljoin("https://www.capitoltrades.com", issuer_link['href'])
-        else:
-            return [{"error": f"CT: Could not find the specific issuer page for {ticker}."}]
-            
-    except requests.exceptions.RequestException as e:
-        return [{"error": f"CT: Failed to search for issuer {ticker}: {e}"}]
 
-    # --- Step 2: Scrape the trades from the issuer-specific URL ---
-    if not issuer_page_url:
-        return [{"error": f"CT: Issuer page URL for {ticker} was not found after search."}]
-
-    trades_list = []
-    try:
-        response = requests.get(issuer_page_url, headers=headers, timeout=20)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        trade_rows = soup.select("tr.issuer-trade-row")
-        if not trade_rows:
-            return [{"error": f"CT: No trade rows found on the issuer page for {ticker}."}]
-
-        for row in trade_rows:
-            politician_tag = row.select_one("td[data-label='Politician'] a")
-            date_tag = row.select_one("td[data-label='Transaction Date']")
-            type_tag = row.select_one("td[data-label='Type'] span.tx-type")
-            value_tag = row.select_one("td[data-label='Value']")
-            
-            if all([politician_tag, date_tag, type_tag, value_tag]):
-                name = politician_tag.text.strip()
-                tx_date_str = date_tag.text.strip()
-                tx_type_text = type_tag.text.strip().lower()
-                tx_type = "purchase" if "purchase" in tx_type_text else ("sale" if "sale" in tx_type_text else "other")
-                value_range = value_tag.text.strip()
-                
-                # Parse the value range into lower and upper estimates
-                matches = re.findall(r'\$([\d,]+)', value_range)
-                val_est_lower, val_est_upper = 0, 0
-                try:
-                    if len(matches) == 1:
-                        val_est_lower = int(matches[0].replace(',', ''))
-                        val_est_upper = val_est_lower
-                    elif len(matches) > 1:
-                        val_est_lower = int(matches[0].replace(',', ''))
-                        val_est_upper = int(matches[1].replace(',', ''))
-                except (ValueError, IndexError):
-                    continue # Skip if value parsing fails
-
-                trades_list.append({
-                    "politician_name": name,
-                    "transaction_type": tx_type,
-                    "value_range": value_range,
-                    "value_estimate_lower": val_est_lower,
-                    "value_estimate_upper": val_est_upper,
-                    "date_str": tx_date_str,
-                    "source_url": issuer_page_url
-                })
-        
-        if not trades_list:
-            return [{"error": f"CT: Found trade rows for {ticker}, but failed to parse details."}]
-            
-        return trades_list
-
-    except requests.exceptions.RequestException as e:
-        return [{"error": f"CT: Failed to fetch trades from issuer page for {ticker}: {e}"}]
-    except Exception as e:
-        return [{"error": f"CT: A general error occurred while parsing trades for {ticker}: {e}"}]
 # --- LLM Client and Agent Classes ---
 class ModelClient:
     def __init__(self, api_key: str, provider: str = "openai"):
@@ -1466,7 +1382,6 @@ with config_cont:
             use_sent_live = st.checkbox("News Sentiment & Summary (LLM)", value=bool(llm_client), disabled=not llm_client, key="live_sent_cb_main", help="Uses LLM. Requires NewsAPI key.")
             use_filings_live = st.checkbox("SEC & Inst. Filings", value=True, key="live_sec_cb_main")
         with feat_cols[1]:
-            use_poli_live = st.checkbox("Politician Filings (Exp.)", value=False, key="live_poli_cb_main", help="Scrapes CapitolTrades. May be slow/unreliable.")
             use_valtrades_live = st.checkbox("ValueInvesting.io (Exp.)", value=False, key="live_vt_cb_main", help="Scrapes ValueInvesting.io. May be slow/unreliable.")
         
         if st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_analysis_button"):
