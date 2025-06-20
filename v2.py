@@ -1262,26 +1262,24 @@ def run_live_analysis(tickers, llm_client, configs):
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
         
         ticker_info = fetch_ticker_info(t)
-        if not ticker_info:
-            results[t] = {"error": f"Core info for {t} unavailable."}
-            continue
+        if not ticker_info: continue
 
+        # --- This function now calls the correct fetch_sec_filings_from_search_api ---
         data_bundle = {
             "price_history": fetch_price_history(t, period="max"),
             "ticker_info": ticker_info,
             "news": fetch_enriched_news(t, ticker_info) if configs["use_sentiment"] else [],
-            # --- FIX: Call the correct function here ---
-            "sec_all_filings_raw": fetch_sec_filings_from_search_api(t) if configs["use_filings"] else [],
             "institutional_holdings": fetch_inst_filings(t) if configs["use_filings"] else [],
+            "sec_all_filings_raw": fetch_sec_filings_from_search_api(t) if configs["use_filings"] else [],
             "value_investing_io_data": fetch_value_investing_io_data(t) if configs.get("use_value_trades") else {}
         }
         
-        # --- FIX: Running ALL agents (old and new) for comparison ---
+        # --- Running ALL agents (old and new) for comparison ---
         agents = [
             PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), 
             ValuationAgent(), AnalystRatingAgent(), 
-            SECFilingAgent(), # <-- OLD SEC Agent
-            InstitutionalHoldingsAgent() # <-- OLD Institutional Agent
+            SECFilingAgent(), # Old SEC Agent
+            InstitutionalHoldingsAgent() # Old Institutional Agent
         ]
         if llm_client:
             agents.extend([SentimentAgent(llm_client), NewsSummaryAgent(llm_client)])
@@ -1293,13 +1291,13 @@ def run_live_analysis(tickers, llm_client, configs):
         if configs.get("use_value_trades"): 
             agents.append(ValueInvestingIOAgent())
         
+        # This part remains the same, it will now simply have more results
         agent_res_list = [agent.run(t, data_bundle) for agent in agents]
-        
         final_dec = PortfolioAgent().run(t, agent_res_list)
         
         curr_res_dict = {"ticker": t}
         for r_dict in [data_bundle, *agent_res_list, final_dec]:
-            if isinstance(r_dict, dict): curr_res_dict.update(r_dict)
+             if isinstance(r_dict, dict): curr_res_dict.update(r_dict)
         results[t] = curr_res_dict
         
     progress_bar.empty()
@@ -1386,7 +1384,7 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
 def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A")
     ticker_info = res_detail.get("ticker_info", {})
-    tab_titles = ["📈 Chart & Core", "📊 Fundamentals & Value", "📰 News & Filings", "⚙️ All Signals"]
+    tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
     tabs = st.tabs(tab_titles)
 
     def get_signal_color(signal):
@@ -1401,90 +1399,110 @@ def display_detailed_analysis(res_detail):
     sig_col1.metric("Final AI Decision", str(res_detail.get('final_decision', 'N/A')).upper())
     sig_col2.metric("Composite Score", f"{res_detail.get('composite_score', 0):.2f}")
     sig_col3.metric("Analyst Signal", str(res_detail.get('analyst_signal', 'N/A')).upper())
-    sig_col4.metric("Filings Signal", str(res_detail.get('sec_filings_signal', 'N/A')).upper())
+    
+    # Use the AI filing signal if available, otherwise the simple one
+    filing_signal = res_detail.get("filing_analysis", {}).get('sec_filings_signal') or res_detail.get('sec_filings_signal', 'N/A')
+    sig_col4.metric("Filings Signal", str(filing_signal).upper())
     st.markdown("---")
 
     # --- Tab 1: Chart & Core ---
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
-        price_hist_chart = fetch_price_history(ticker, period="1y")
+        price_hist_chart = res_detail.get("price_history", pd.DataFrame())
         if not price_hist_chart.empty:
             st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
+        else:
+            st.warning("Price chart data not available.")
         
         st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
-            st.subheader("Technical Indicators")
+            st.markdown("##### Technical Indicators")
             st.metric(label="Price Signal (SMA/RSI)", value=str(res_detail.get('price_signal', 'hold')).upper())
             st.caption(f"50D SMA: ${res_detail.get('sma50', 0):,.2f} | 200D SMA: ${res_detail.get('sma200', 0):,.2f} | RSI: {res_detail.get('rsi14', 0):.2f}")
         with col2:
-            st.subheader("Momentum & Volatility")
+            st.markdown("##### Momentum & Volatility")
             st.metric(label="Momentum Signal", value=str(res_detail.get('momentum_signal', 'hold')).upper())
             mom_12m = res_detail.get('momentum_12m')
-            beta = res_detail.get('beta')
+            beta = ticker_info.get('beta')
             st.caption(f"12-Mo Momentum: {mom_12m * 100:.2f}%" if isinstance(mom_12m, (int, float)) else "12-Mo: N/A")
             st.caption(f"Beta: {beta:.2f}" if isinstance(beta, (int, float)) else "Beta: N/A")
 
-    # --- Tab 2: Fundamentals & Value ---
+    # --- Tab 2: Fundamentals ---
     with tabs[1]:
-        st.subheader(f"Fundamental & Value Overview")
+        st.subheader(f"Fundamental Overview")
         if ticker_info.get('longBusinessSummary'):
             with st.expander("Show Business Summary"):
                 st.markdown(ticker_info.get('longBusinessSummary'))
-        
         st.markdown("---")
+        
         f_col1, f_col2, f_col3, f_col4 = st.columns(4)
         cap_str = f"${ticker_info.get('marketCap', 0) / 1e9:.2f}B" if isinstance(ticker_info.get('marketCap'), (int, float)) else "N/A"
         f_col1.metric("Market Cap", cap_str)
         f_col2.metric("Forward P/E", f"{ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'), (int, float)) else "N/A")
         roe_val = ticker_info.get('returnOnEquity')
         f_col3.metric("Return on Equity", f"{roe_val * 100:.2f}%" if isinstance(roe_val, (int, float)) else "N/A")
-        fcy_val = res_detail.get('fcf_yield')
-        f_col4.metric("FCF Yield", f"{fcy_val * 100:.2f}%" if isinstance(fcy_val, (int, float)) else "N/A")
+        de_val = ticker_info.get('debtToEquity')
+        f_col4.metric("Debt to Equity", f"{de_val:.2f}" if isinstance(de_val, (int, float)) else "N/A")
 
-    # --- Tab 3: News & Filings (WITH COMPARISON SECTIONS) ---
+    # --- Tab 3: Analyst & Fair Value ---
     with tabs[2]:
-        st.subheader("News, Filings, and Institutional Ownership")
+        st.subheader("Analyst & Fair Value Analysis")
+        val_col1, val_col2 = st.columns(2)
+        with val_col1:
+            st.markdown("##### Analyst Consensus")
+            tm_val = ticker_info.get('targetMeanPrice')
+            tu_val = res_detail.get('target_upside')
+            st.metric("Mean Target Price", f"${tm_val:.2f}" if isinstance(tm_val, (int, float)) else "N/A", f"{tu_val*100:.2f}% Upside" if isinstance(tu_val, (int, float)) else None)
+        with val_col2:
+            st.markdown("##### VI.io Fair Value")
+            vi_fv = res_detail.get('vi_fair_value_estimate')
+            up_val = res_detail.get('vi_upside_percent')
+            st.metric("Estimated Fair Value", f"${vi_fv:,.2f}" if isinstance(vi_fv, (int, float)) else "N/A", f"{up_val:.2f}% Upside" if isinstance(up_val, (int, float)) else None)
+
+    # --- Tab 4: News & Filings ---
+    with tabs[3]:
+        st.subheader("News, Filings & Ownership")
         
         with st.expander("**[NEW] AI-Powered Filing Analysis**", expanded=True):
             analysis = res_detail.get("sec_analysis", {})
             if analysis and not analysis.get("error"):
-                st.success(f"**Source:** {analysis.get('source_filing', 'N/A')} | **Management Tone:** {analysis.get('management_tone', 'N/A')}")
+                st.info(f"**Source:** {analysis.get('source_filing', 'N/A')} | **Management Tone:** {analysis.get('management_tone', 'N/A')}")
                 st.write(analysis.get('summary', "No summary available."))
             else:
-                st.warning(f"AI analysis could not be performed. Reason: {analysis.get('error', 'Not available')}")
+                st.warning(f"AI analysis of SEC reports could not be performed. Reason: {analysis.get('error', 'Unknown')}")
         
         st.markdown("---")
         
-        file_col1, file_col2 = st.columns(2)
-        with file_col1:
+        c1, c2, c3 = st.columns(3)
+        with c1:
             st.markdown("##### SEC Filings")
-            st.metric("Original Agent Signal", str(res_detail.get('sec_filings_signal', 'N/A')).upper())
-            with st.popover("View All Raw Filings"):
-                st.dataframe(pd.DataFrame(res_detail.get('sec_all_filings_raw', [])), hide_index=True)
-        with file_col2:
-            st.markdown("##### Institutional Holdings")
-            st.metric("Original Agent Signal", str(res_detail.get('inst_holdings_signal', 'N/A')).upper())
-            st.metric("[NEW] Recent Activity Signal", str(res_detail.get('enhanced_inst_signal', 'N/A')).upper())
-            
+            with st.popover("View Filings Data"):
+                st.metric("Original Agent Signal", str(res_detail.get('sec_filings_signal', 'N/A')).upper())
+                st.markdown("**All Recent Filings**")
+                filings = res_detail.get('sec_all_filings_raw', [])
+                st.dataframe(pd.DataFrame(filings), hide_index=True) if filings and 'error' not in filings[0] else st.warning("Could not fetch.")
+        with c2:
+            st.markdown("##### Institutional Ownership")
             with st.popover("View Holder Details"):
-                st.markdown("###### Top 10 Holders (Snapshot)")
-                st.dataframe(pd.DataFrame(res_detail.get('inst_top_holders', [])), hide_index=True)
-                st.markdown("---")
-                st.markdown("###### [NEW] Recently Reported (Last 45 Days)")
-                recent_holders = res_detail.get('inst_recently_reported_holders', [])
-                # <<< THIS IS THE CORRECTED LINE >>>
-                st.dataframe(pd.DataFrame(recent_holders), hide_index=True) if recent_holders else st.info("No funds have reported positions in the last 45 days.")
+                st.metric("Original Agent Signal", str(res_detail.get('inst_holdings_signal', 'N/A')).upper())
+                st.metric("[NEW] Recent Activity Signal", str(res_detail.get('enhanced_inst_signal', 'N/A')).upper())
+                st.markdown("**Top 10 Holders**"); st.dataframe(pd.DataFrame(res_detail.get('inst_top_holders', [])), hide_index=True)
+                st.markdown("**[NEW] Recently Reported**"); st.dataframe(pd.DataFrame(res_detail.get('inst_recently_reported_holders', [])), hide_index=True)
+        with c3:
+            st.markdown("##### News & Sentiment")
+            with st.popover("View News Details"):
+                st.metric("Sentiment Signal", str(res_detail.get('sentiment_signal', 'N/A')).upper())
+                st.markdown("**AI News Summary**")
+                st.write(res_detail.get('news_summary', 'Not available.'))
 
-    # --- Tab 4: All Signals ---
-    with tabs[3]:
-        st.subheader("All Agent Signals & Raw Data")
+    # --- Tab 5: All Signals ---
+    with tabs[4]:
+        st.subheader("All Agent Signals (Raw Data)")
         signals_data = {
             "Price Signal": str(res_detail.get("price_signal","N/A")).upper(),
             "Momentum Signal": str(res_detail.get("momentum_signal","N/A")).upper(),
-            "Fundamental Signal": str(res_detail.get("fund_signal","N/A")).upper(),
             "Analyst Signal": str(res_detail.get("analyst_signal","N/A")).upper(),
-            "VI.io Signal": str(res_detail.get("vi_signal","N/A")).upper(),
             "News Sentiment Signal": str(res_detail.get("sentiment_signal","N/A")).upper(),
             "Original SEC Signal": str(res_detail.get("sec_filings_signal","N/A")).upper(),
             "Original Inst. Signal": str(res_detail.get("inst_holdings_signal","N/A")).upper(),
@@ -1493,8 +1511,7 @@ def display_detailed_analysis(res_detail):
         df_signals = pd.DataFrame(signals_data.items(), columns=["Agent", "Signal"])
         st.dataframe(df_signals.style.applymap(lambda x: f'color: {get_signal_color(x)}', subset=['Signal']), hide_index=True)
         with st.expander("View Full Raw Data Dictionary"):
-            st.json(res_detail)
-
+            st.json({k:v for k, v in res_detail.items() if not isinstance(v, pd.DataFrame)})
 # --- Streamlit UI ---
 llm_client = None
 try:
