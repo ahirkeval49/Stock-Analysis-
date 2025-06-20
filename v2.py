@@ -309,37 +309,6 @@ def fetch_value_investing_io_data(ticker: str) -> dict:
     except requests.exceptions.RequestException as req_err: return {"error": f"VI.io: Request error for {ticker}: {req_err}"}
     except Exception as e: return {"error": f"VI.io: Unexpected error for {ticker}: {e}"}
 
-@st.cache_data(ttl=3600)
-def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
-    url = f"https://www.capitoltrades.com/trades?asset={ticker.upper()}&pageSize=100&perPage=100"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'}
-    trades_list = []
-    try:
-        response = requests.get(url, headers=headers, timeout=20); response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
-        trade_rows = soup.select("a[href^='/trades/'][class*='trade-row'], a[href^='/trades/'][class*='issuer-trade-row']")
-        if not trade_rows: trade_rows = soup.find_all('a', href=lambda href: href and href.startswith('/trades/'))
-        if not trade_rows: return [{"error": f"CT: No trade rows found for {ticker}. Website HTML structure may have changed or scraping blocked. This feature is experimental."}]
-        for row in trade_rows[:20]:
-            name_tag = row.find(['div','span'], class_=lambda x: x and ('politician-name' in x or 'filer-name' in x))
-            type_tag = row.find(['div','span'], class_=lambda x: x and ('tx-type' in x or 'transaction-type' in x))
-            val_tag = row.find(['div','span'], class_=lambda x: x and ('tx-value' in x or 'transaction-value' in x))
-            date_tag = row.find(['div','span'], class_=lambda x: x and ('tx-date' in x or 'transaction-date' in x))
-            if all([name_tag, type_tag, val_tag, date_tag]):
-                name, tx_type_text = name_tag.text.strip(), type_tag.text.strip().lower()
-                tx_type = "purchase" if "purchase" in tx_type_text else ("sale" if "sale" in tx_type_text else "other")
-                val_range, date_str, val_est = val_tag.text.strip(), date_tag.text.strip(), 0
-                matches = re.findall(r'\$([\d,]+)', val_range)
-                if matches:
-                    try: val_est = int(matches[0].replace(',',''))
-                    except ValueError: pass
-                trades_list.append({"politician_name": name, "transaction_type": tx_type, "value_range": val_range, "value_estimate_lower": val_est, "date_str": date_str, "source_url": urljoin("https://www.capitoltrades.com", row['href'])})
-        if not trades_list and trade_rows: return [{"error": f"CT: Found rows for {ticker}, but failed parsing. HTML details may have changed."}]
-        return trades_list
-    except requests.exceptions.Timeout: return [{"error": f"CT: Timeout fetching {ticker}."}]
-    except requests.exceptions.HTTPError as e: return [{"error": f"CT: HTTP error {e.response.status_code if e.response else ''} for {ticker}."}]
-    except requests.exceptions.RequestException as e: return [{"error": f"CT: Request error for {ticker}: {e}."}]
-    except Exception as e: return [{"error": f"CT: Parsing error for {ticker}: {e}."}]
 
 # --- LLM Client and Agent Classes ---
 class ModelClient:
@@ -960,23 +929,6 @@ class InstitutionalHoldingsAgent:
         elif total_pct < 0.05 and num_h > 0: sig = "sell"
         return {"ticker":ticker, "inst_num_holders":num_h, "inst_total_shares_held":int(total_s), "inst_total_pct_out":float(total_pct), "inst_holdings_signal":sig, "inst_holdings_error":err, "inst_top_holders":top_h}
 
-class PoliticianFilingsAgent:
-    def run(self, ticker: str, data: dict) -> dict:
-        trades, err = data.get("politician_trades",[]), None
-        net_val, buys, sells = 0,0,0
-        if trades and isinstance(trades,list) and len(trades)>0 and isinstance(trades[0],dict) and "error" in trades[0]: err = trades[0]["error"]
-        elif trades:
-            for trade in trades:
-                if isinstance(trade,dict):
-                    val = trade.get("value_estimate_lower",0)
-                    if trade.get("transaction_type")=="purchase": net_val += val; buys +=1
-                    elif trade.get("transaction_type")=="sale": net_val -= val; sells +=1
-        sig = "hold"
-        if not err:
-            if buys > sells and buys > 1: sig = "buy"
-            elif sells > buys and sells > 1: sig = "sell"
-        return {"ticker":ticker, "politician_net_trade_value_estimate":net_val, "politician_buy_tx_count":buys, "politician_sell_tx_count":sells, "politician_filings_signal":sig, "politician_data_error":err}
-
 class ValueInvestingIOAgent:
     def run(self, ticker: str, data: dict) -> dict:
         vi, err = data.get("value_investing_io_data",{}), data.get("value_investing_io_data",{}).get("error")
@@ -1216,7 +1168,6 @@ def run_live_analysis(tickers, llm_client, configs):
         final_dec = PortfolioAgent().run(t, agent_res_list)
         curr_res_dict = {"ticker":t, "current_price_display":current_price_for_ticker, "market_cap_display":ticker_info.get("marketCap"), "industry_display":ticker_info.get("industry"), "sector_display":ticker_info.get("sector"), "ticker_info":ticker_info,
                              "news_headlines_for_popover":[f"{n.get('publish_time_readable','N/A')} - {n.get('title','N/A')} ({n.get('publisher','N/A')} via {n.get('source_api','Unk')}) [Link]({n.get('link','#')})" + (f" - {n.get('content_snippet',n.get('description',''))[:150]}..." if n.get('content_snippet') or n.get('description') else "") for n in dedup_news[:10]],
-                             "politician_trades_for_popover":[pt for pt in data_bundle["politician_trades"][:5] if isinstance(pt,dict) and "error" not in pt],
                              "news_status_display":news_status_bundle}
         for r_dict in agent_res_list:
             if isinstance(r_dict,dict): curr_res_dict.update(r_dict)
