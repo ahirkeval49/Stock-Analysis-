@@ -4,65 +4,52 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
-import openai
 from openai import OpenAI
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
 import re
-from urllib.parse import urljoin, urlparse
-from newsapi import NewsApiClient
 import json
 
 # --- Page Config (Must be the first Streamlit command) ---
-st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
+st.set_page_config(page_title="AI Financial Analyst", layout="wide")
 
-# Load environment variables (if running locally)
+# --- Environment and API Keys ---
 load_dotenv()
-
-# SEC EDGAR User-Agent
 SEC_USER_AGENT = "KevalAhirApp/1.0 keval.ahir2019@gmail.com"
 
-# --- Portfolio Helper Functions ---
+# --- Portfolio Helper Functions (Your existing code) ---
 PORTFOLIOS_FILE = "portfolios.json"
 VIRTUAL_PORTFOLIO_FILE = "virtual_portfolio.json"
 
 def load_portfolios():
     if os.path.exists(PORTFOLIOS_FILE):
         try:
-            with open(PORTFOLIOS_FILE, 'r') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            return {}
+            with open(PORTFOLIOS_FILE, 'r') as f: return json.load(f)
+        except json.JSONDecodeError: return {}
     return {}
 
 def save_portfolios(data):
-    with open(PORTFOLIOS_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
+    with open(PORTFOLIOS_FILE, 'w') as f: json.dump(data, f, indent=4)
 
 def load_virtual_portfolio():
     if os.path.exists(VIRTUAL_PORTFOLIO_FILE):
         try:
-            with open(VIRTUAL_PORTFOLIO_FILE, 'r') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            return get_default_virtual_portfolio()
+            with open(VIRTUAL_PORTFOLIO_FILE, 'r') as f: return json.load(f)
+        except json.JSONDecodeError: return get_default_virtual_portfolio()
     return get_default_virtual_portfolio()
 
 def save_virtual_portfolio(data):
-    with open(VIRTUAL_PORTFOLIO_FILE, 'w') as f:
-        json.dump(data, f, indent=4, default=str)
+    with open(VIRTUAL_PORTFOLIO_FILE, 'w') as f: json.dump(data, f, indent=4, default=str)
 
 def get_default_virtual_portfolio():
-    return {"cash": 3500.0, "holdings": [], "transaction_history": [], "last_scan_date": None}
+    return {"cash": 10000.0, "holdings": [], "transaction_history": [], "last_scan_date": None}
 
 # --- Session State Initialization ---
 if 'portfolios_data' not in st.session_state:
     st.session_state.portfolios_data = load_portfolios()
 if 'selected_portfolio_name' not in st.session_state:
-    st.session_state.selected_portfolio_name = None
-    if st.session_state.portfolios_data:
-        st.session_state.selected_portfolio_name = list(st.session_state.portfolios_data.keys())[0]
+    st.session_state.selected_portfolio_name = list(st.session_state.portfolios_data.keys())[0] if st.session_state.portfolios_data else None
 if 'live_output' not in st.session_state:
     st.session_state.live_output = {}
 if 'virtual_portfolio' not in st.session_state:
@@ -72,139 +59,117 @@ if 'live_analysis_triggered' not in st.session_state:
 
 # --- Data Fetcher Functions ---
 
-@st.cache_data(ttl=3600)
-def fetch_price_history(ticker: str) -> pd.DataFrame:
-    try:
-        df = yf.Ticker(ticker).history(period="max", interval="1d")
-        if df.empty: return pd.DataFrame()
-        df.index = pd.to_datetime(df.index).tz_localize(None)
-        return df
-    except Exception: return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def fetch_ticker_info(ticker: str) -> dict:
-    try:
-        info = yf.Ticker(ticker).info
-        return info if info and info.get('regularMarketPrice') is not None else {}
-    except Exception: return {}
-
-@st.cache_data(ttl=3600)
-def fetch_institutional_holders(ticker: str) -> list[dict]:
-    try:
-        holders = yf.Ticker(ticker).institutional_holders
-        if holders is not None and not holders.empty:
-            holders['Date Reported'] = holders['Date Reported'].dt.strftime('%Y-%m-%d')
-            return holders.to_dict("records")
-        return []
-    except Exception: return [{"error": "Could not fetch institutional holders."}]
-
 @st.cache_data(ttl=1800)
-def fetch_news(ticker: str, company_name: str) -> list[dict]:
+def get_all_data(ticker: str) -> dict:
+    """Fetches all necessary data from yfinance and SEC in a single bundle."""
     try:
-        news = yf.Ticker(ticker).news
-        for item in news: item['source'] = 'Yahoo Finance'
-        return news if news else []
-    except Exception: return [{"error": "Could not fetch news."}]
+        ticker_obj = yf.Ticker(ticker)
+        info = ticker_obj.info
+        if not info or not info.get('regularMarketPrice'):
+            return {"error": f"Could not retrieve valid data for {ticker}. It may be delisted."}
 
-@st.cache_data(ttl=1800)
-def fetch_sec_filings_from_search_api(search_query: str) -> list[dict]:
-    headers = {'User-Agent': SEC_USER_AGENT}
-    api_url = "https://efts.sec.gov/LATEST/search-index"
-    payload = {"q": search_query.lower(), "from": 0, "size": 100, "sort": [{"filed_date": "desc"}]}
-    try:
+        data_bundle = {
+            "ticker": ticker,
+            "info": info,
+            "price_history": ticker_obj.history(period="max", interval="1d"),
+            "institutional_holders": ticker_obj.institutional_holders.to_dict("records") if ticker_obj.institutional_holders is not None else [],
+            "news": ticker_obj.news if ticker_obj.news else [],
+            "sec_all_filings_raw": []
+        }
+        
+        headers = {'User-Agent': SEC_USER_AGENT}
+        api_url = "https://efts.sec.gov/LATEST/search-index"
+        payload = {"q": ticker.lower(), "from": 0, "size": 100, "sort": [{"filed_date": "desc"}]}
         response = requests.post(api_url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
-        results = response.json()
-        if not results.get('hits', {}).get('hits'): return []
+        filings_data = response.json()
         
         filings_list = []
-        for hit in results['hits']['hits']:
-            source = hit.get('_source', {})
-            filings_list.append({
-                "Filing Date": source.get('file_date', 'N/A')[:10],
-                "Form Type": source.get('form', 'N/A'),
-                "Link": f"https://www.sec.gov/Archives/edgar/data/{source.get('ciks')[0]}/{source.get('adsh').replace('-', '')}/{source.get('adsh')}-index.html"
-            })
-        return filings_list
-    except requests.RequestException:
-        return [{"error": f"SEC Search API request failed for '{search_query}'."}]
+        if filings_data.get('hits', {}).get('hits'):
+            for hit in filings_data['hits']['hits']:
+                source = hit.get('_source', {})
+                filings_list.append({
+                    "Filing Date": source.get('file_date', 'N/A')[:10],
+                    "Form Type": source.get('form', 'N/A'),
+                    "Link": f"https://www.sec.gov/Archives/edgar/data/{source.get('ciks')[0]}/{source.get('adsh').replace('-', '')}/{source.get('adsh')}-index.html"
+                })
+        data_bundle["sec_all_filings_raw"] = filings_list
+        return data_bundle
+    except Exception as e:
+        return {"error": f"A data fetching error occurred for {ticker}: {e}"}
 
 # --- Agent Classes (Unified & Final) ---
+
+class ModelClient:
+    def __init__(self, api_key: str, provider: str):
+        self.api_key, self.provider = api_key, provider
+        models = {"openai": "gpt-4o", "deepseek": "deepseek-reasoner"}
+        if not api_key: raise ValueError(f"{provider} API key required.")
+        self.model_name = models.get(provider)
+        if provider == "deepseek": self.client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
+        elif provider == "openai": self.client = OpenAI(api_key=api_key)
+        else: raise ValueError(f"Unsupported provider: {provider}")
+    def generate(self, prompt: str) -> str:
+        try:
+            stream = self.client.chat.completions.create(model=self.model_name, messages=[{"role": "user", "content": prompt}], stream=True)
+            return "".join(c.choices[0].delta.content for c in stream if c.choices and c.choices[0].delta and c.choices[0].delta.content)
+        except Exception as e: raise Exception(f"LLM Error ({self.provider}): {e}")
 
 class PriceAgent:
     def run(self, data: dict) -> dict:
         price_data = data.get("price_history")
-        if price_data is None or price_data.empty or len(price_data) < 200:
-            return {"price_signal": "hold", "sma50": np.nan, "sma200": np.nan}
+        if price_data is None or len(price_data) < 200: return {"price_signal": "hold"}
         df = price_data.copy()
         df["SMA50"] = df["Close"].rolling(50).mean()
         df["SMA200"] = df["Close"].rolling(200).mean()
         latest = df.iloc[-1]
-        if pd.isna(latest.SMA50) or pd.isna(latest.SMA200):
-            return {"price_signal": "hold", "sma50": latest.SMA50, "sma200": latest.SMA200}
+        if pd.isna(latest.SMA50) or pd.isna(latest.SMA200): return {"price_signal": "hold"}
         signal = "buy" if latest.SMA50 > latest.SMA200 and latest.Close > latest.SMA50 else "sell"
-        return {"price_signal": signal, "sma50": latest.SMA50, "sma200": latest.SMA200}
+        return {"price_signal": signal}
 
 class MomentumAgent:
     def run(self, data: dict) -> dict:
         price_data = data.get("price_history")
-        if price_data is None or len(price_data) < 253:
-            return {"momentum_signal": "hold", "momentum_12m": np.nan}
+        if price_data is None or len(price_data) < 253: return {"momentum_signal": "hold", "momentum_12m": np.nan}
         momentum_12m = price_data["Close"].pct_change(252).iloc[-1]
-        if pd.isna(momentum_12m):
-            return {"momentum_signal": "hold", "momentum_12m": np.nan}
-        signal = "buy" if momentum_12m > 0.15 else ("sell" if momentum_12m < -0.15 else "hold")
+        signal = "buy" if momentum_12m > 0.15 else "sell" if momentum_12m < -0.15 else "hold"
         return {"momentum_signal": signal, "momentum_12m": momentum_12m}
 
-class AnalystRatingAgent:
-    def run(self, data: dict) -> dict:
-        info = data.get("ticker_info", {})
-        rec = str(info.get("recommendationKey", "hold")).lower()
-        signal = "buy" if rec in ["strong_buy", "buy"] else ("sell" if rec in ["sell", "underperform"] else "hold")
-        upside = 0
-        if info.get('currentPrice') and info.get('targetMeanPrice'):
-            upside = (info['targetMeanPrice'] / info['currentPrice']) - 1
-        return {"analyst_signal": signal, "target_upside": upside}
-
-class SECFilingAgent: # Original simple agent
+class SECFilingAgent: # The original, simple agent for comparison
     def run(self, data: dict) -> dict:
         filings = data.get("sec_all_filings_raw", [])
-        if not filings or (isinstance(filings[0], dict) and "error" in filings[0]):
-            return {"sec_filings_signal_original": "hold"}
+        if not filings: return {"sec_filings_signal_original": "hold"}
         has_recent_form4 = any(f.get('Form Type') == '4' for f in filings[:10])
         return {"sec_filings_signal_original": "buy" if has_recent_form4 else "hold"}
 
-class InstitutionalHoldingsAgent: # Original simple agent
+class InstitutionalHoldingsAgent: # The original, simple agent for comparison
     def run(self, data: dict) -> dict:
         holdings = data.get("institutional_holdings", [])
-        if not holdings or (isinstance(holdings[0], dict) and "error" in holdings[0]):
-            return {"inst_holdings_signal_original": "hold", "inst_top_holders": []}
+        if not holdings: return {"inst_holdings_signal_original": "hold", "inst_top_holders": []}
         total_pct = sum(h.get('% Out', 0.0) for h in holdings)
-        sig = "buy" if total_pct > 0.70 else ("sell" if total_pct < 0.20 else "hold")
+        sig = "buy" if total_pct > 0.70 else "sell" if total_pct < 0.20 else "hold"
         return {"inst_holdings_signal_original": sig, "inst_top_holders": sorted(holdings, key=lambda x: x.get('Shares', 0), reverse=True)[:10]}
 
-class SECReportAnalysisAgent:
+class SECReportAnalysisAgent: # The new, advanced agent
     def __init__(self, client: ModelClient): self.client = client
     def _fetch_filing_text(self, url: str) -> str:
         if not url: return ""
         try:
             headers = {'User-Agent': SEC_USER_AGENT}
-            response = requests.get(url, headers=headers, timeout=15)
+            response = requests.get(url, headers=headers, timeout=20)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
             return soup.get_text(separator='\n', strip=True)
         except Exception: return "Could not fetch filing text."
-
     def run(self, data: dict) -> dict:
         ticker, filings = data.get("ticker"), data.get("sec_all_filings_raw", [])
         if not self.client: return {"sec_analysis": {"error": "LLM client not available."}}
-        if not filings or (isinstance(filings[0], dict) and "error" in filings[0]):
-            return {"sec_analysis": {"error": "No filings data to analyze."}}
+        if not filings or (isinstance(filings[0], dict) and "error" in filings[0]): return {"sec_analysis": {"error": "No filings data to analyze."}}
         latest_report = next((f for f in filings if f.get('Form Type') in ['10-K', '10-Q']), None)
-        if not latest_report: return {"sec_analysis": {"error": "No recent 10-K/Q found."}}
+        if not latest_report: return {"sec_analysis": {"error": "No recent 10-K/Q found to analyze."}}
         filing_text = self._fetch_filing_text(latest_report.get('Link'))
         if len(filing_text) < 500: return {"sec_analysis": {"error": "Could not extract sufficient text."}}
-        prompt = f"Analyze text from {ticker}'s {latest_report['Form Type']}. Provide JSON with keys: 'summary', 'key_risks', 'key_opportunities', 'management_tone'. TEXT: {filing_text[:18000]}"
+        prompt = f"Analyze MD&A/Risk Factors text from {ticker}'s {latest_report['Form Type']}. Provide JSON with keys: 'summary' (3 sentences), 'key_risks' (list of 2-3 risks), 'key_opportunities' (list of 2-3 opportunities), 'management_tone' (one adjective). TEXT: {filing_text[:18000]}"
         try:
             response = self.client.generate(prompt).strip()
             match = re.search(r'\{.*\}', response, re.DOTALL)
@@ -213,11 +178,11 @@ class SECReportAnalysisAgent:
             return {"sec_analysis": analysis}
         except Exception: return {"sec_analysis": {"error": "LLM analysis failed."}}
 
-class EnhancedInstitutionalHoldingsAgent:
+class EnhancedInstitutionalHoldingsAgent: # The new, advanced agent
     def run(self, data: dict) -> dict:
-        holdings = data.get("institutional_holdings", [])
+        holdings = data.get("institutional_holdings",[])
         inst_data = {"enhanced_inst_signal": "hold", "inst_recently_reported_holders": []}
-        if not holdings or (isinstance(holdings[0], dict) and "error" in holdings[0]): return inst_data
+        if not holdings: return inst_data
         recent_date_limit = datetime.now() - timedelta(days=45)
         for h in holdings:
             try:
@@ -228,7 +193,7 @@ class EnhancedInstitutionalHoldingsAgent:
         return inst_data
 
 class PortfolioAgent:
-    WEIGHTS = {"price": 1.2, "momentum": 1.0, "analyst": 0.8, "inst_holdings_original": 0.5, "sec_filings_original": 0.5, "enhanced_inst": 1.2}
+    WEIGHTS = {"price": 1.2, "momentum": 1.0, "analyst": 0.8, "sec_filings_original": 1.5, "inst_holdings_original": 0.7, "enhanced_inst": 1.0}
     def run(self, ticker: str, signals: list[dict]) -> dict:
         total_score, sum_w, agg_s = 0.0, 0.0, {}
         for s_dict in signals:
@@ -243,7 +208,7 @@ class PortfolioAgent:
         decision = "buy" if comp_score > 0.25 else ("sell" if comp_score < -0.25 else "hold")
         return {"composite_score": comp_score, "final_decision": decision}
 
-# --- Main Orchestrator ---
+# --- Main Orchestrator & UI ---
 
 def run_live_analysis(tickers, llm_client):
     results = {}
@@ -257,7 +222,7 @@ def run_live_analysis(tickers, llm_client):
             results[t] = data_bundle; continue
         
         agents = [PriceAgent(), MomentumAgent(), AnalystRatingAgent(), SECFilingAgent(), InstitutionalHoldingsAgent(), EnhancedInstitutionalHoldingsAgent()]
-        if llm_client: agents.append(SECFilingAnalysisAgent(llm_client))
+        if llm_client: agents.append(SECReportAnalysisAgent(llm_client))
         
         agent_res_list = [agent.run(data_bundle) for agent in agents]
         final_dec = PortfolioAgent().run(t, agent_res_list)
@@ -269,8 +234,6 @@ def run_live_analysis(tickers, llm_client):
         
     progress_bar.empty()
     return results
-
-# --- Final Display Function ---
 
 def display_detailed_analysis(res_detail):
     ticker, ticker_info = res_detail.get("ticker", "N/A"), res_detail.get("info", {})
@@ -284,11 +247,11 @@ def display_detailed_analysis(res_detail):
         return "orange"
 
     st.subheader(f"Detailed Analysis for {ticker_info.get('longName', ticker)}")
-    sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
+    sig_col1, sig_col2, sig_col3 = st.columns(3)
     sig_col1.metric("Final AI Decision", str(res_detail.get('final_decision', 'N/A')).upper())
     sig_col2.metric("Composite Score", f"{res_detail.get('composite_score', 0):.2f}")
-    sig_col3.metric("Analyst Signal", str(res_detail.get('analyst_signal', 'N/A')).upper())
-    sig_col4.metric("Filings Signal", str(res_detail.get('sec_filings_signal_original', 'N/A')).upper())
+    filing_analysis = res_detail.get("filing_analysis", {})
+    sig_col3.metric("Management Tone", str(filing_analysis.get('management_tone', 'N/A')).upper())
     st.markdown("---")
 
     with tabs[0]:
@@ -296,33 +259,25 @@ def display_detailed_analysis(res_detail):
         price_hist = res_detail.get("price_history", pd.DataFrame())
         if not price_hist.empty: st.line_chart(price_hist["Close"], use_container_width=True)
         col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Price Signal", str(res_detail.get('price_signal', 'N/A')).upper())
-        with col2:
-            st.metric("Momentum Signal", str(res_detail.get('momentum_signal', 'N/A')).upper())
+        with col1: st.metric("Price Signal", str(res_detail.get('price_signal', 'N/A')).upper())
+        with col2: st.metric("Momentum Signal", str(res_detail.get('momentum_signal', 'N/A')).upper())
 
     with tabs[1]:
-        st.subheader(f"Fundamental Overview")
+        st.subheader(f"Fundamental & Value Overview")
         if ticker_info.get('longBusinessSummary'):
             with st.expander("Show Business Summary"): st.markdown(ticker_info.get('longBusinessSummary'))
         f_col1, f_col2, f_col3 = st.columns(3)
-        f_col1.metric("Market Cap", f"${ticker_info.get('marketCap', 0) / 1e9:.2f}B")
-        f_col2.metric("Forward P/E", f"{ticker_info.get('forwardPE'):.2f}")
-        f_col3.metric("Return on Equity", f"{ticker_info.get('returnOnEquity', 0) * 100:.2f}%")
+        f_col1.metric("Market Cap", f"${ticker_info.get('marketCap', 0) / 1e9:.2f}B" if isinstance(ticker_info.get('marketCap'), (int, float)) else "N/A")
+        f_col2.metric("Forward P/E", f"{ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'), float) else "N/A")
+        f_col3.metric("Return on Equity", f"{ticker_info.get('returnOnEquity', 0) * 100:.2f}%" if isinstance(ticker_info.get('returnOnEquity'), float) else "N/A")
 
     with tabs[2]:
-        st.subheader("Analyst Consensus & Fair Value")
-        st.metric("Mean Target Upside", f"{res_detail.get('target_upside', 0) * 100:.1f}%")
-
-    with tabs[3]:
         st.subheader("Filings, Ownership & News")
-        with st.expander("**AI-Powered Filing Analysis**", expanded=True):
-            analysis = res_detail.get("filing_analysis", {})
-            if analysis and not analysis.get("error"):
-                st.info(f"Source: {analysis.get('source_filing', 'N/A')} | Tone: {analysis.get('management_tone', 'N/A')}")
-                st.write(analysis.get('summary', "No summary available."))
-            else: st.warning(f"AI analysis failed: {analysis.get('error', 'Unknown')}")
-        
+        with st.expander("**[NEW] AI-Powered Filing Analysis**", expanded=True):
+            if filing_analysis and not filing_analysis.get("error"):
+                st.success(f"**Source:** {filing_analysis.get('source_filing', 'N/A')}")
+                st.write(filing_analysis.get('summary', "No summary available."))
+            else: st.warning(f"AI analysis failed: {filing_analysis.get('error', 'Unknown')}")
         st.markdown("---")
         c1, c2 = st.columns(2)
         with c1:
@@ -333,13 +288,14 @@ def display_detailed_analysis(res_detail):
         with c2:
             st.markdown("##### Institutional Ownership")
             with st.popover("View Holder Details"):
-                st.metric("Original Signal", str(res_detail.get('inst_holdings_signal_original', 'N/A')).upper())
+                st.metric("Original Agent Signal", str(res_detail.get('inst_holdings_signal_original', 'N/A')).upper())
                 st.metric("[NEW] Recent Activity Signal", str(res_detail.get('enhanced_inst_signal', 'N/A')).upper())
                 st.dataframe(pd.DataFrame(res_detail.get('inst_top_holders', [])), hide_index=True)
 
-    with tabs[4]:
-        st.subheader("All Agent Signals & Raw Data")
-        st.dataframe(pd.DataFrame({k: v for k, v in res_detail.items() if '_signal' in k}.items(), columns=["Agent", "Signal"]))
+    with tabs[3]:
+        st.subheader("All Agent Signals")
+        signals_data = {k: v for k, v in res_detail.items() if k.endswith('_signal')}
+        st.dataframe(pd.DataFrame(signals_data.items(), columns=["Agent", "Signal"]))
         with st.expander("View Full Raw Data Dictionary"):
             st.json({k:v for k, v in res_detail.items() if not isinstance(v, pd.DataFrame)})
 
@@ -359,37 +315,29 @@ st.header("⚙️ Configuration")
 with st.container(border=True):
     tickers_in_live = st.text_input("Enter Ticker Symbols (comma-separated):", "AAPL,LULU,MSFT")
     
-    col1, col2 = st.columns(2)
-    use_sentiment = col1.checkbox("Use News Sentiment (requires LLM)", value=True)
-    use_filings_ai = col2.checkbox("Use AI Filing Analysis (requires LLM)", value=True)
-    
     if st.button("🚀 Run Live Analysis", use_container_width=True, type="primary"):
         live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
         if not live_tickers:
             st.error("Please enter at least one ticker.")
         else:
-            with st.spinner("Gathering data and running AI analysis... This may take a moment."):
-                configs = {"use_sentiment": use_sentiment, "use_filings": use_filings_ai}
-                st.session_state.live_output = run_live_analysis(live_tickers, llm_client, configs)
+            with st.spinner("Gathering data and running AI analysis..."):
+                st.session_state.live_output = run_live_analysis(live_tickers, llm_client)
                 st.session_state.live_analysis_triggered = True
                 st.rerun()
 
 st.header("📊 Live Analysis Results")
 if st.session_state.get('live_analysis_triggered'):
     live_output = st.session_state.live_output
-    # Create columns for each ticker result
     cols = st.columns(len(live_output))
     for idx, (sym, res) in enumerate(live_output.items()):
         with cols[idx]:
             if res.get("error"):
                 st.error(f"**{sym}**: {res.get('error')}")
                 continue
-            
             with st.container(border=True):
                 dec = res.get("final_decision", "N/A").upper()
                 price = res.get("info", {}).get("currentPrice", "N/A")
                 price_str = f"${price:.2f}" if isinstance(price, (int, float)) else "N/A"
-                
                 st.metric(label=f"{sym} ({price_str})", value=dec, delta=f"Score: {res.get('composite_score', 0):.2f}")
                 with st.expander(f"View Detailed Thesis for {sym}"):
                     display_detailed_analysis(res)
