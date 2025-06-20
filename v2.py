@@ -271,7 +271,41 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
     except requests.exceptions.RequestException as e: return [{"error": f"SEC Request error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
     except Exception as e: return [{"error": f"SEC Unexpected error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
     filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True); return filings_list
+# --- REPLACE your old fetch_all_sec_filings function with this one ---
 
+@st.cache_data(ttl=3600)
+def fetch_sec_filings_from_search_api(search_query: str, lookback_days: int = 365) -> list[dict]:
+    """
+    Fetches ALL recent SEC filings using the new EDGAR search API.
+    This version uses a standard browser User-Agent to avoid 403 errors.
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36',
+        'Accept': 'application/json',
+    }
+    api_url = f"https://efts.sec.gov/LATEST/search-index"
+    payload = {"q": search_query.lower(), "from": 0, "size": 100, "sort": [{"filed_date": "desc"}]}
+    try:
+        response = requests.post(api_url, headers=headers, json=payload, timeout=20)
+        response.raise_for_status()
+        results = response.json()
+        if not results or not results.get('hits', {}).get('hits'): return []
+        
+        filings_list = []
+        date_limit = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        for hit in results['hits']['hits']:
+            source = hit.get('_source', {})
+            try:
+                if datetime.fromisoformat(source.get('file_date')) < date_limit: continue
+                filings_list.append({
+                    "filing_date": source.get('file_date', 'N/A')[:10],
+                    "form_type": source.get('form', 'N/A'),
+                    "link_to_filing": f"https://www.sec.gov/edgar/browse/?CIK={source.get('ciks')[0]}"
+                })
+            except (ValueError, TypeError, KeyError): continue
+        return sorted(filings_list, key=lambda x: x.get('filing_date'), reverse=True)
+    except Exception as e:
+        return [{"error": f"SEC Search API request failed for '{search_query}': {e}"}]
 @st.cache_data(ttl=6*3600)
 def fetch_inst_filings(ticker: str) -> list[dict]:
     try:
