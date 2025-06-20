@@ -1305,76 +1305,89 @@ def display_detailed_analysis(res_detail):
         if "SELL" in signal: return "red"
         return "orange"
 
-    # Tab 1: Chart & Core (No changes)
+    # Tabs 1, 2, and 3 have robust checks for missing data
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
-        st.line_chart(fetch_price_history(ticker, period="1y")["Close"], use_container_width=True, color="#0072F0")
-        st.markdown("---")
+        price_hist_chart = fetch_price_history(ticker, period="1y")
+        if not price_hist_chart.empty:
+            st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
         col1, col2 = st.columns(2)
         with col1:
-            st.subheader("Technical Indicators")
-            st.metric(label="Price Signal (SMA/RSI)", value=str(res_detail.get('price_signal', 'hold')).upper())
+            st.metric("Price Signal", str(res_detail.get('price_signal', 'N/A')).upper())
         with col2:
-            st.subheader("Momentum & Volatility")
-            st.metric(label="Momentum Signal", value=str(res_detail.get('momentum_signal', 'hold')).upper())
+            st.metric("Momentum Signal", str(res_detail.get('momentum_signal', 'N/A')).upper())
 
-    # Tab 2: Fundamentals (No changes)
     with tabs[1]:
-        st.subheader(f"Fundamental Overview: {ticker_info.get('longName', '')}")
-        st.table(pd.DataFrame({"Return on Equity": [f"{ticker_info.get('returnOnEquity', 0) * 100:.2f}%"], "Debt to Equity": [f"{ticker_info.get('debtToEquity', 0):.2f}"]}))
+        st.subheader(f"Fundamental Overview")
+        f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+        cap_str = f"${ticker_info.get('marketCap', 0) / 1e9:.2f}B" if isinstance(ticker_info.get('marketCap'), (int, float)) else "N/A"
+        f_col1.metric("Market Cap", cap_str)
+        f_col2.metric("Forward P/E", f"{ticker_info.get('forwardPE'):.2f}" if isinstance(ticker_info.get('forwardPE'),(int,float)) else "N/A")
+        roe_val = ticker_info.get('returnOnEquity')
+        f_col3.metric("Return on Equity", f"{roe_val * 100:.2f}%" if isinstance(roe_val, (int, float)) else "N/A")
+        de_val = ticker_info.get('debtToEquity')
+        f_col4.metric("Debt to Equity", f"{de_val:.2f}" if isinstance(de_val,(int,float)) else "N/A")
 
-    # Tab 3: Analyst & Value (No changes)
     with tabs[2]:
+        st.subheader("Analyst & Fair Value Analysis")
         val_col1, val_col2 = st.columns(2)
         with val_col1:
-            st.subheader("Analyst Consensus")
-            st.metric("Mean Target Price", f"${res_detail.get('targetMeanPrice', 0):.2f}", f"{res_detail.get('target_upside', 0)*100:.2f}% Upside")
+            st.metric("Analyst Signal", str(res_detail.get('analyst_signal', 'N/A')).upper())
+            tu_val = res_detail.get('target_upside')
+            st.caption(f"Upside: {tu_val*100:.2f}%" if isinstance(tu_val, (int,float)) else "Upside: N/A")
         with val_col2:
-            st.subheader("Peter Lynch Fair Value (via VI.io)")
-            st.metric("Fair Value", f"${res_detail.get('vi_fair_value_estimate', 0):,.2f}", f"{res_detail.get('vi_upside_percent', 0):.2f}% Upside")
-    
-    # Tab 4: News & Filings (WITH NEW SECTIONS ADDED)
+            st.metric("VI.io Fair Value Signal", str(res_detail.get('vi_signal', 'N/A')).upper())
+            up_val = res_detail.get('vi_upside_percent')
+            st.caption(f"Upside: {up_val:.2f}%" if isinstance(up_val, (int,float)) else "Upside: N/A")
+
+    # Tab 4 is updated to show results from BOTH old and new agents
     with tabs[3]:
-        st.subheader("News Analysis & Filings")
-        
-        # --- AI Analysis of SEC Filings (New Section) ---
-        with st.expander("NEW: AI-Powered Filing Analysis", expanded=True):
-            analysis = res_detail.get("sec_analysis", {})
-            if analysis and not analysis.get("error"):
-                st.info(f"**Source:** {analysis.get('source_filing')} | **Management Tone:** {analysis.get('management_tone', 'N/A')}")
-                st.write(analysis.get('summary', "No summary available."))
-                o_col, r_col = st.columns(2)
-                with o_col:
-                    st.markdown("**Key Opportunities**")
-                    for item in analysis.get('key_opportunities', []): st.markdown(f"• {item}")
+        st.subheader("News & Filings Analysis")
+        st.markdown("**AI News Summary**")
+        st.write(res_detail.get('news_summary', "Summary not available."))
+        st.markdown("---")
+
+        # --- NEW: AI-Powered Filing Analysis ---
+        st.markdown("**AI Synthesis of SEC Filings**")
+        analysis = res_detail.get("sec_analysis", {})
+        if analysis and not analysis.get("error"):
+            st.success(f"**Management Tone:** {analysis.get('management_tone', 'N/A')}")
+            st.markdown(analysis.get('summary', "No summary available."))
+            with st.expander("View AI-Extracted Risks & Opportunities"):
+                r_col, o_col = st.columns(2)
                 with r_col:
                     st.markdown("**Key Risks**")
                     for item in analysis.get('key_risks', []): st.markdown(f"• {item}")
-            else:
-                st.warning(f"AI analysis failed. Reason: {analysis.get('error', 'Unknown')}")
+                with o_col:
+                    st.markdown("**Key Opportunities**")
+                    for item in analysis.get('key_opportunities', []): st.markdown(f"• {item}")
+        else:
+            st.warning(f"AI analysis of filings failed. Reason: {analysis.get('error', 'Unknown')}")
         
         st.markdown("---")
         
-        # --- Original Filing Sections ---
-        file_col1, file_col2 = st.columns(2)
-        with file_col1:
-            st.markdown("**Original SEC Filings**")
-            st.metric("Insider Signal", str(res_detail.get('sec_filings_signal', 'hold')).upper())
-        with file_col2:
-            st.markdown("**Original Institutional Holdings**")
-            st.metric("Institutional Signal", str(res_detail.get('inst_holdings_signal', 'hold')).upper())
-            # <<< NEW: Expander for Recently Reported Holders >>>
-            with st.expander("View Recently Reported Positions"):
-                recent_holders = res_detail.get('inst_recently_reported_holders', [])
-                if recent_holders:
-                    st.dataframe(pd.DataFrame(recent_holders), hide_index=True)
-                else:
-                    st.info("No funds have reported positions in the last 45 days.")
+        # --- Comparison Section ---
+        st.markdown("#### Source Data Comparison")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Original SEC Agent**")
+            st.metric("Signal", str(res_detail.get('sec_filings_signal', 'N/A')).upper())
+            with st.popover("View Raw Filings"):
+                st.dataframe(pd.DataFrame(res_detail.get('sec_all_filings_raw', [])), hide_index=True)
+        with col2:
+            st.markdown("**Institutional Analysis**")
+            st.metric("Original Signal", str(res_detail.get('inst_holdings_signal', 'N/A')).upper())
+            st.metric("Enhanced Signal", str(res_detail.get('enhanced_inst_signal', 'N/A')).upper())
+            with st.popover("View Holder Details"):
+                st.markdown("##### Top 10 Holders (Snapshot)")
+                st.dataframe(pd.DataFrame(res_detail.get('inst_top_holders', [])), hide_index=True)
+                st.markdown("---")
+                st.markdown("##### Recently Reported (Last 45 Days)")
+                st.dataframe(pd.DataFrame(res_detail.get('inst_recently_reported_holders', [])), hide_index=True)
 
-    with tabs[4]: # All Signals
-        st.subheader("All Agent Signals at a Glance")
-        st.dataframe(pd.DataFrame(res_detail.items(), columns=["Metric", "Value"]))
-        
+    with tabs[4]:
+        st.subheader("All Agent Raw Outputs")
+        st.dataframe(pd.DataFrame(res_detail.items(), columns=["Metric", "Value"]))        
 # --- Streamlit UI ---
 llm_client = None
 try:
