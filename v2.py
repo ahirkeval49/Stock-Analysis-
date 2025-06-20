@@ -1401,7 +1401,6 @@ def display_detailed_analysis(res_detail):
     sig_col1.metric("Final AI Decision", str(res_detail.get('final_decision', 'N/A')).upper())
     sig_col2.metric("Composite Score", f"{res_detail.get('composite_score', 0):.2f}")
     sig_col3.metric("Analyst Signal", str(res_detail.get('analyst_signal', 'N/A')).upper())
-    # The sec_filings_signal will now come from the advanced agent if it runs
     sig_col4.metric("Filings Signal", str(res_detail.get('sec_filings_signal', 'N/A')).upper())
     st.markdown("---")
 
@@ -1443,44 +1442,43 @@ def display_detailed_analysis(res_detail):
         fcy_val = res_detail.get('fcf_yield')
         f_col4.metric("FCF Yield", f"{fcy_val * 100:.2f}%" if isinstance(fcy_val, (int, float)) else "N/A")
 
-    # --- Tab 3: News & Filings ---
+    # --- Tab 3: News & Filings (WITH COMPARISON SECTIONS) ---
     with tabs[2]:
         st.subheader("News, Filings, and Institutional Ownership")
         
-        # --- AI Analysis of SEC Filings ---
         with st.expander("**[NEW] AI-Powered Filing Analysis**", expanded=True):
             analysis = res_detail.get("sec_analysis", {})
             if analysis and not analysis.get("error"):
                 st.success(f"**Source:** {analysis.get('source_filing', 'N/A')} | **Management Tone:** {analysis.get('management_tone', 'N/A')}")
                 st.write(analysis.get('summary', "No summary available."))
-                o_col, r_col = st.columns(2)
-                with o_col:
-                    st.markdown("**Key Opportunities**"); [st.markdown(f"• {item}") for item in analysis.get('key_opportunities', [])]
-                with r_col:
-                    st.markdown("**Key Risks**"); [st.markdown(f"• {item}") for item in analysis.get('key_risks', [])]
             else:
                 st.warning(f"AI analysis could not be performed. Reason: {analysis.get('error', 'Not available')}")
         
         st.markdown("---")
         
-        # --- Source Data Popovers ---
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            with st.popover("View Raw Filings List"):
+        file_col1, file_col2 = st.columns(2)
+        with file_col1:
+            st.markdown("##### SEC Filings")
+            st.metric("Original Agent Signal", str(res_detail.get('sec_filings_signal', 'N/A')).upper())
+            with st.popover("View All Raw Filings"):
                 st.dataframe(pd.DataFrame(res_detail.get('sec_all_filings_raw', [])), hide_index=True)
-        with c2:
-            with st.popover("View Institutional Holders"):
-                st.markdown("##### Top 10 Holders (Snapshot)")
+        with file_col2:
+            st.markdown("##### Institutional Holdings")
+            st.metric("Original Agent Signal", str(res_detail.get('inst_holdings_signal', 'N/A')).upper())
+            st.metric("[NEW] Recent Activity Signal", str(res_detail.get('enhanced_inst_signal', 'N/A')).upper())
+            
+            with st.popover("View Holder Details"):
+                st.markdown("###### Top 10 Holders (Snapshot)")
                 st.dataframe(pd.DataFrame(res_detail.get('inst_top_holders', [])), hide_index=True)
                 st.markdown("---")
-                st.markdown("##### [NEW] Recently Reported (Last 45 Days)")
+                st.markdown("###### [NEW] Recently Reported (Last 45 Days)")
                 recent_holders = res_detail.get('inst_recently_reported_holders', [])
-                st.dataframe(pd.DataFrame(recent_holders), hide_index=True) if
+                # <<< THIS IS THE CORRECTED LINE >>>
+                st.dataframe(pd.DataFrame(recent_holders), hide_index=True) if recent_holders else st.info("No funds have reported positions in the last 45 days.")
+
     # --- Tab 4: All Signals ---
     with tabs[3]:
         st.subheader("All Agent Signals & Raw Data")
-        
-        # Display signals in a more readable format
         signals_data = {
             "Price Signal": str(res_detail.get("price_signal","N/A")).upper(),
             "Momentum Signal": str(res_detail.get("momentum_signal","N/A")).upper(),
@@ -1494,7 +1492,6 @@ def display_detailed_analysis(res_detail):
         }
         df_signals = pd.DataFrame(signals_data.items(), columns=["Agent", "Signal"])
         st.dataframe(df_signals.style.applymap(lambda x: f'color: {get_signal_color(x)}', subset=['Signal']), hide_index=True)
-
         with st.expander("View Full Raw Data Dictionary"):
             st.json(res_detail)
 
