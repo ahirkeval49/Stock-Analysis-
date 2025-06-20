@@ -945,13 +945,12 @@ class ValueInvestingIOAgent:
                 if curr_pyf < fv*(1-mos): sig="buy"
                 elif curr_pyf > fv*(1+mos): sig="sell"
         return {"ticker":ticker, "vi_fair_value_estimate":fv, "vi_site_market_price":site_mp, "vi_upside_percent":up_pct, "vi_valuation_date":val_date, "vi_valuation_text_display":text, "vi_signal":sig, "vi_data_error":err}
-
 class PortfolioAgent:
     WEIGHTS = {
         "price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.7, 
         "fund": 1.0, "valuation_dcf": 0.5, "valuation_pe": 0.5, 
         "sec_filings": 1.0, "inst_holdings": 0.6, "analyst": 0.7, 
-        "vi_signal": 0.8, "enhanced_inst_signal": 1.2 # Weight for the new agent
+        "vi_signal": 0.8, "enhanced_inst_signal": 1.2 # Weight for the new agent's signal
     }
 
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
@@ -966,7 +965,8 @@ class PortfolioAgent:
             "fund_signal": "fund", "dcf_signal": "valuation_dcf", 
             "relative_pe_signal": "valuation_pe", "sec_filings_signal": "sec_filings", 
             "inst_holdings_signal": "inst_holdings", "analyst_signal": "analyst", 
-            "vi_signal": "vi_signal", "enhanced_inst_signal": "enhanced_inst_signal"
+            "vi_signal": "vi_signal", 
+            "enhanced_inst_signal": "enhanced_inst_signal" # Add new signal to map
         }
 
         for s_key, w_key in s_map.items():
@@ -980,6 +980,7 @@ class PortfolioAgent:
 
         comp_score = (total_score / sum_w) if sum_w else 0.0
 
+        # Decision logic remains the same
         if comp_score > 0.4: decision = "strong_buy"
         elif comp_score > 0.15: decision = "buy"
         elif comp_score < -0.4: decision = "strong_sell"
@@ -987,6 +988,7 @@ class PortfolioAgent:
         else: decision = "hold"
 
         return {"ticker": ticker, "composite_score": comp_score, "final_decision": decision}
+
 class AITraderAgent:
     def __init__(self, llm_client: ModelClient, stock_universe: dict):
         self.llm_client = llm_client
@@ -1108,6 +1110,7 @@ class AITraderAgent:
                 tickers_in_portfolio.add(candidate['ticker'])
 
         return trades_to_make
+        
 class SECReportAnalysisAgent:
     """
     An advanced agent that uses an LLM to "read" and synthesize insights from key SEC filings.
@@ -1119,6 +1122,7 @@ class SECReportAnalysisAgent:
         """Helper to scrape the text from a filing URL."""
         if not url: return ""
         try:
+            # The Browse tool is essential for reading content from the SEC's document viewer
             browse_result = Browse(
                 url=url, 
                 query="Extract the text from 'Management\'s Discussion and Analysis (MD&A)' and 'Risk Factors' sections."
@@ -1147,8 +1151,8 @@ class SECReportAnalysisAgent:
 
         prompt = f"""
         As a senior financial analyst, analyze the following text from the Form {latest_report['form_type']} of {ticker}.
-        Distill the text into a structured JSON object with the keys: "summary", "key_risks" (a list of 2-3 risks), "key_opportunities" (a list of 2-3 opportunities), and "management_tone" (a single adjective).
-        **Output ONLY the raw JSON object.**
+        Distill the text into a structured JSON object with the keys: "summary", "key_risks" (a Python list of 2-3 risks), "key_opportunities" (a Python list of 2-3 opportunities), and "management_tone" (a single adjective like "Optimistic", "Cautious", etc.).
+        **Output ONLY the raw JSON object and nothing else.**
 
         FILING TEXT:
         ---
@@ -1199,14 +1203,14 @@ class EnhancedInstitutionalHoldingsAgent:
                                 continue
                 except Exception as e:
                     inst_data["enhanced_inst_error"] = f"Error processing recent holders: {e}"
-
-        # A simple signal based on recent reporting activity
+        
         if len(inst_data["inst_recently_reported_holders"]) > 5:
              inst_data["enhanced_inst_signal"] = "buy"
         elif len(inst_data["inst_recently_reported_holders"]) == 0 and holdings:
-            inst_data["enhanced_inst_signal"] = "sell" # No recent activity might be a negative sign
+            inst_data["enhanced_inst_signal"] = "sell"
 
         return inst_data
+        
 # --- Orchestrator and Backtesting ---
 
 def run_live_analysis(tickers, llm_client, configs):
@@ -1242,7 +1246,7 @@ def run_live_analysis(tickers, llm_client, configs):
                 agents.append(SECReportAnalysisAgent(llm_client))
                 agents.append(EnhancedInstitutionalHoldingsAgent())
 
-        if configs["use_value_trades"]: 
+        if configs.get("use_value_trades"): 
             agents.append(ValueInvestingIOAgent())
 
         agent_res_list = [agent.run(t, data_bundle) for agent in agents]
@@ -1251,11 +1255,12 @@ def run_live_analysis(tickers, llm_client, configs):
 
         curr_res_dict = {"ticker": t}
         for r_dict in [data_bundle, *agent_res_list, final_dec]:
-            if isinstance(r_dict, dict): curr_res_dict.update(r_dict)
+             if isinstance(r_dict, dict): curr_res_dict.update(r_dict)
         results[t] = curr_res_dict
 
     progress_bar.empty()
     return results
+    
 def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_placeholder, backtest_agent_weights):
     st.write(f"Preparing backtest: {ticker} ({start_date} to {end_date})...")
     s_dt = datetime.strptime(start_date, "%Y-%m-%d"); fetch_s_dt = (s_dt - pd.DateOffset(months=18)).strftime("%Y-%m-%d")
@@ -1299,102 +1304,56 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
 def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A")
     ticker_info = res_detail.get("ticker_info", {})
-    tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
+    tab_titles = ["📈 Chart & Core", "📊 Fundamentals & Value", "📰 News & Filings", "⚙️ All Signals"]
     tabs = st.tabs(tab_titles)
 
     def get_signal_color(signal):
         signal = str(signal).upper()
-        if "BUY" in signal: return "green"
-        if "SELL" in signal: return "red"
+        if "BUY" in signal or "STRONG_BUY" in signal: return "green"
+        if "SELL" in signal or "STRONG_SELL" in signal: return "red"
         return "orange"
 
-    # --- Header Metrics ---
-    st.subheader(f"Detailed Analysis for {ticker_info.get('longName', ticker)}")
-    sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
-    sig_col1.metric("Final AI Decision", str(res_detail.get('final_decision', 'N/A')).upper())
-    sig_col2.metric("Composite Score", f"{res_detail.get('composite_score', 0):.2f}")
-    sig_col3.metric("Analyst Signal", str(res_detail.get('analyst_signal', 'N/A')).upper())
-    sig_col4.metric("Insider Signal", str(res_detail.get('sec_filings_signal', 'N/A')).upper())
-    st.markdown("---")
-
-    # --- Tab 1: Chart & Core ---
     with tabs[0]:
-        st.subheader("Price Performance & Technical Signals")
-        price_hist_chart = fetch_price_history(ticker, period="1y")
-        if not price_hist_chart.empty:
-            st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
-        else:
-            st.warning("Price chart data not available.")
-        # ... (rest of the tab is the same)
+        st.line_chart(fetch_price_history(ticker, period="1y")["Close"], use_container_width=True)
 
-    # --- Tab 2: Fundamentals ---
     with tabs[1]:
-        st.subheader(f"Fundamental Overview: {ticker_info.get('longName', '')}")
-        st.caption(f"**Sector:** {ticker_info.get('sector', 'N/A')} | **Industry:** {ticker_info.get('industry', 'N/A')}")
-        # ... (rest of the tab is the same)
+        st.subheader("Fundamental & Value Overview")
+        st.table(pd.DataFrame({
+            "Return on Equity": [f"{ticker_info.get('returnOnEquity', 0) * 100:.2f}%"],
+            "Forward P/E": [f"{ticker_info.get('forwardPE', 0):.2f}"],
+            "VI.io Upside": [f"{res_detail.get('vi_upside_percent', 0):.2f}%"]
+        }))
 
-    # --- Tab 3: Analyst & Fair Value ---
     with tabs[2]:
-        val_col1, val_col2 = st.columns(2)
-        with val_col1:
-            st.subheader("Analyst Consensus")
-            # ... (rest of the section is the same)
-        with val_col2:
-            st.subheader("Peter Lynch Fair Value (via VI.io)")
-            # ... (rest of the section is the same)
-
-    # --- Tab 4: News & Filings (WITH COMPARISON SECTIONS) ---
-    with tabs[3]:
         st.subheader("News & Filings Analysis")
         
-        # --- AI Analysis of SEC Filings (New Section) ---
-        with st.expander("**[NEW] AI-Powered Filing Analysis**", expanded=True):
+        # --- NEW: AI-Powered Filing Analysis ---
+        with st.expander("**[NEW] AI Synthesis of SEC Filings**", expanded=True):
             analysis = res_detail.get("sec_analysis", {})
             if analysis and not analysis.get("error"):
-                st.success(f"**Source:** {analysis.get('source_filing')} | **Management Tone:** {analysis.get('management_tone', 'N/A')}")
+                st.success(f"**Source:** {analysis.get('source_filing', 'N/A')} | **Management Tone:** {analysis.get('management_tone', 'N/A')}")
                 st.write(analysis.get('summary', "No summary available."))
-                o_col, r_col = st.columns(2)
-                with o_col:
-                    st.markdown("**Key Opportunities**")
-                    for item in analysis.get('key_opportunities', []): st.markdown(f"• {item}")
-                with r_col:
-                    st.markdown("**Key Risks**")
-                    for item in analysis.get('key_risks', []): st.markdown(f"• {item}")
             else:
                 st.warning(f"AI analysis failed. Reason: {analysis.get('error', 'Unknown')}")
-        
+
         st.markdown("---")
         
-        # --- Comparison Section for Filings and Holdings ---
-        file_col1, file_col2 = st.columns(2)
-        with file_col1:
-            st.markdown("**SEC Filings**")
-            st.metric("Original Insider Signal", str(res_detail.get('sec_filings_signal', 'N/A')).upper())
-            with st.popover("View All Raw Filings"):
-                st.dataframe(pd.DataFrame(res_detail.get('sec_all_filings_raw', [])), hide_index=True)
-        with file_col2:
-            st.markdown("**Institutional Holdings**")
-            st.metric("Original Inst. Signal", str(res_detail.get('inst_holdings_signal', 'N/A')).upper())
-            
-            # --- NEW: Enhanced Institutional Signal ---
-            st.metric("Enhanced Inst. Signal", str(res_detail.get('enhanced_inst_signal', 'N/A')).upper())
-            
-            with st.popover("View Institutional Holder Details"):
-                st.markdown("##### Top 10 Holders (Snapshot)")
+        # --- Comparison Section for Holdings ---
+        st.markdown("**Institutional Holdings**")
+        h_col1, h_col2 = st.columns(2)
+        with h_col1:
+            st.metric("Original Signal", str(res_detail.get('inst_holdings_signal', 'N/A')).upper())
+            with st.popover("View Top 10 Holders"):
                 st.dataframe(pd.DataFrame(res_detail.get('inst_top_holders', [])), hide_index=True)
-                st.markdown("---")
-                st.markdown("##### Recently Reported (Last 45 Days)")
+        with h_col2:
+            st.metric("[NEW] Enhanced Signal", str(res_detail.get('enhanced_inst_signal', 'N/A')).upper())
+            with st.popover("View Recently Reported Holders"):
                 recent_holders = res_detail.get('inst_recently_reported_holders', [])
-                if recent_holders:
-                    st.dataframe(pd.DataFrame(recent_holders), hide_index=True)
-                else:
-                    st.info("No funds have reported positions in the last 45 days.")
+                st.dataframe(pd.DataFrame(recent_holders), hide_index=True) if recent_holders else st.info("No recent reports.")
 
-    # --- Tab 5: All Signals ---
     with tabs[4]:
-        st.subheader("All Agent Raw Outputs")
+        st.subheader("All Agent Signals (Raw Data)")
         st.dataframe(pd.DataFrame(res_detail.items(), columns=["Metric", "Value"]))
-
 # --- Streamlit UI ---
 llm_client = None
 try:
