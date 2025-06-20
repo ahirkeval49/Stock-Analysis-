@@ -980,14 +980,59 @@ class ValueInvestingIOAgent:
                 elif curr_pyf > fv*(1+mos): sig="sell"
         return {"ticker":ticker, "vi_fair_value_estimate":fv, "vi_site_market_price":site_mp, "vi_upside_percent":up_pct, "vi_valuation_date":val_date, "vi_valuation_text_display":text, "vi_signal":sig, "vi_data_error":err}
 class PortfolioAgent:
+    # --- This dictionary should contain weights for all signals you want to use ---
     WEIGHTS = {
         "price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.7, 
         "fund": 1.0, "valuation_dcf": 0.5, "valuation_pe": 0.5, 
-        "sec_filings": 1.0, "inst_holdings": 0.6, "analyst": 0.7, 
-        "vi_signal": 0.8, "enhanced_inst_signal": 1.2 # Weight for the new agent's signal
+        "sec_filings": 1.0, # Weight for the old agent's signal
+        "inst_holdings": 0.6, # Weight for the old agent's signal
+        "analyst": 0.7, 
+        "vi_signal": 0.8, 
+        "enhanced_inst_signal": 1.2, # Weight for the new agent's signal
+        # Note: The AI Filing Analysis signal is included in the 'sec_filings_signal' from its agent
     }
+
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
-        # ... (the rest of the function remains the same, just ensure the WEIGHTS dict is updated)
+        """
+        Calculates a final decision based on a weighted average of all agent signals.
+        """
+        curr_w = agent_weights or self.WEIGHTS
+        total_score, sum_w, agg_s = 0.0, 0.0, {}
+        
+        # Aggregate all dictionary results into one
+        for s_dict in signals:
+            if isinstance(s_dict, dict): 
+                agg_s.update(s_dict)
+        
+        # This map connects the signal key from an agent to its weight key
+        s_map = {
+            "price_signal": "price", "momentum_signal": "momentum", "volatility_signal": "volatility",
+            "sentiment_signal": "sentiment", "fund_signal": "fund", "dcf_signal": "valuation_dcf",
+            "relative_pe_signal": "valuation_pe", "sec_filings_signal": "sec_filings", 
+            "inst_holdings_signal": "inst_holdings", "analyst_signal": "analyst", 
+            "vi_signal": "vi_signal", "enhanced_inst_signal": "enhanced_inst_signal"
+        }
+
+        for s_key, w_key in s_map.items():
+            s_val = agg_s.get(s_key)
+            w = curr_w.get(w_key, 0)
+            if s_val and w > 0:
+                score_map = {"strong_buy": 1.5, "buy": 1.0, "hold": 0.0, "sell": -1.0, "strong_sell": -1.5}
+                # Use .get(s_val, 0) for safety if a signal is not in the map
+                raw_score = score_map.get(str(s_val).lower(), 0)
+                total_score += raw_score * w
+                sum_w += w
+        
+        comp_score = (total_score / sum_w) if sum_w else 0.0
+        
+        # Determine final decision based on the composite score
+        if comp_score > 0.4: decision = "strong_buy"
+        elif comp_score > 0.15: decision = "buy"
+        elif comp_score < -0.4: decision = "strong_sell"
+        elif comp_score < -0.15: decision = "sell"
+        else: decision = "hold"
+        
+        return {"ticker": ticker, "composite_score": comp_score, "final_decision": decision}
 
         
 class AITraderAgent:
