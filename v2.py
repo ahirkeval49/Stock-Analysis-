@@ -989,8 +989,8 @@ class PortfolioAgent:
 
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
         # ... (the rest of the function remains the same, just ensure the WEIGHTS dict is updated)
-        
- class AITraderAgent:
+
+class AITraderAgent:
     def __init__(self, llm_client: ModelClient, stock_universe: dict):
         self.llm_client = llm_client
         self.stock_universe = stock_universe
