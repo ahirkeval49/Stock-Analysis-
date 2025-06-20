@@ -986,8 +986,10 @@ class PortfolioAgent:
         "sec_filings": 1.0, "inst_holdings": 0.6, "analyst": 0.7, 
         "vi_signal": 0.8, "enhanced_inst_signal": 1.2 # Weight for the new agent's signal
     }
+    
      def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
         # ... (the rest of the function remains the same, just ensure the WEIGHTS dict is updated)
+         
 class AITraderAgent:
     def __init__(self, llm_client: ModelClient, stock_universe: dict):
         self.llm_client = llm_client
