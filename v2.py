@@ -1254,6 +1254,7 @@ class EnhancedInstitutionalHoldingsAgent:
         
 # --- Orchestrator and Backtesting ---
 
+# --- Replace your run_live_analysis function with this one ---
 def run_live_analysis(tickers, llm_client, configs):
     results = {}
     progress_bar = st.progress(0, text="Starting analysis...")
@@ -1262,9 +1263,11 @@ def run_live_analysis(tickers, llm_client, configs):
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
         
         ticker_info = fetch_ticker_info(t)
-        if not ticker_info: continue
+        if not ticker_info: 
+            results[t] = {"error": f"Could not fetch core info for {t}."}
+            continue
 
-        # --- This function now calls the correct fetch_sec_filings_from_search_api ---
+        # Use the correct, new SEC filing function
         data_bundle = {
             "price_history": fetch_price_history(t, period="max"),
             "ticker_info": ticker_info,
@@ -1274,25 +1277,40 @@ def run_live_analysis(tickers, llm_client, configs):
             "value_investing_io_data": fetch_value_investing_io_data(t) if configs.get("use_value_trades") else {}
         }
         
-        # --- Running ALL agents (old and new) for comparison ---
+        # This list now correctly includes your original agents and the new ones
         agents = [
             PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), 
             ValuationAgent(), AnalystRatingAgent(), 
-            SECFilingAgent(), # Old SEC Agent
-            InstitutionalHoldingsAgent() # Old Institutional Agent
+            SECFilingAgent(), 
+            InstitutionalHoldingsAgent()
         ]
         if llm_client:
             agents.extend([SentimentAgent(llm_client), NewsSummaryAgent(llm_client)])
             if configs["use_filings"]:
-                # ADDING the new agents to run alongside the old ones
                 agents.append(SECReportAnalysisAgent(llm_client))
                 agents.append(EnhancedInstitutionalHoldingsAgent())
         
         if configs.get("use_value_trades"): 
             agents.append(ValueInvestingIOAgent())
         
-        # This part remains the same, it will now simply have more results
-        agent_res_list = [agent.run(t, data_bundle) for agent in agents]
+        # --- THIS IS THE FIX ---
+        # This new loop correctly calls each agent with the arguments it expects
+        agent_res_list = []
+        for agent in agents:
+            try:
+                # Agents that expect a DataFrame directly
+                if isinstance(agent, (PriceAgent, MomentumAgent)):
+                    res_a = agent.run(t, data_bundle["price_history"])
+                # The VolatilityAgent from your code has a unique signature
+                elif isinstance(agent, VolatilityAgent):
+                    res_a = agent.run(t, data_bundle, data_bundle["price_history"])
+                # All other agents take the full dictionary
+                else:
+                    res_a = agent.run(t, data_bundle)
+                agent_res_list.append(res_a)
+            except Exception as e:
+                st.warning(f"Error running agent {agent.__class__.__name__} for {t}: {e}")
+
         final_dec = PortfolioAgent().run(t, agent_res_list)
         
         curr_res_dict = {"ticker": t}
@@ -1302,7 +1320,6 @@ def run_live_analysis(tickers, llm_client, configs):
         
     progress_bar.empty()
     return results
-
 class PortfolioAgent:
     WEIGHTS = {
         "price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.7, 
