@@ -950,8 +950,8 @@ class PortfolioAgent:
     WEIGHTS = {
         "price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.7, 
         "fund": 1.0, "valuation_dcf": 0.5, "valuation_pe": 0.5, 
-        "sec_filings": 1.5, "inst_holdings": 0.6, "analyst": 0.7, 
-        "vi_signal": 0.8
+        "sec_filings": 1.0, "inst_holdings": 0.6, "analyst": 0.7, 
+        "vi_signal": 0.8, "enhanced_inst_signal": 1.2 # Weight for the new agent
     }
 
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
@@ -961,16 +961,20 @@ class PortfolioAgent:
             if isinstance(s_dict, dict): agg_s.update(s_dict)
 
         s_map = {
-            "price_signal": "price", "momentum_signal": "momentum", "volatility_signal": "volatility",
-            "sentiment_signal": "sentiment", "fund_signal": "fund", "dcf_signal": "valuation_dcf",
-            "relative_pe_signal": "valuation_pe", "sec_filings_signal": "sec_filings",
-            "inst_holdings_signal": "inst_holdings", "analyst_signal": "analyst", "vi_signal": "vi_signal"
+            "price_signal": "price", "momentum_signal": "momentum", 
+            "volatility_signal": "volatility", "sentiment_signal": "sentiment", 
+            "fund_signal": "fund", "dcf_signal": "valuation_dcf", 
+            "relative_pe_signal": "valuation_pe", "sec_filings_signal": "sec_filings", 
+            "inst_holdings_signal": "inst_holdings", "analyst_signal": "analyst", 
+            "vi_signal": "vi_signal", "enhanced_inst_signal": "enhanced_inst_signal"
         }
+
         for s_key, w_key in s_map.items():
-            s_val, w = agg_s.get(s_key), curr_w.get(w_key, 0)
+            s_val = agg_s.get(s_key)
+            w = curr_w.get(w_key, 0)
             if s_val and w > 0:
                 score_map = {"strong_buy": 1.5, "buy": 1.0, "hold": 0.0, "sell": -1.0, "strong_sell": -1.5}
-                raw_score = score_map.get(s_val, 0)
+                raw_score = score_map.get(str(s_val).lower(), 0)
                 total_score += raw_score * w
                 sum_w += w
 
@@ -983,7 +987,6 @@ class PortfolioAgent:
         else: decision = "hold"
 
         return {"ticker": ticker, "composite_score": comp_score, "final_decision": decision}
-
 class AITraderAgent:
     def __init__(self, llm_client: ModelClient, stock_universe: dict):
         self.llm_client = llm_client
@@ -1212,7 +1215,7 @@ def run_live_analysis(tickers, llm_client, configs):
     for i, t in enumerate(tickers):
         progress_text = f"Analyzing {t}... ({i+1}/{len(tickers)})"
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
-        
+
         ticker_info = fetch_ticker_info(t)
         if not ticker_info: continue
 
@@ -1224,7 +1227,7 @@ def run_live_analysis(tickers, llm_client, configs):
             "sec_all_filings_raw": fetch_sec_filings_from_search_api(t) if configs["use_filings"] else [],
             "value_investing_io_data": fetch_value_investing_io_data(t) if configs["use_value_trades"] else {}
         }
-        
+
         # --- FIX: Running ALL agents (old and new) for comparison ---
         agents = [
             PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), 
@@ -1238,22 +1241,21 @@ def run_live_analysis(tickers, llm_client, configs):
                 # ADDING the new agents to run alongside the old ones
                 agents.append(SECReportAnalysisAgent(llm_client))
                 agents.append(EnhancedInstitutionalHoldingsAgent())
-        
+
         if configs["use_value_trades"]: 
             agents.append(ValueInvestingIOAgent())
-        
+
         agent_res_list = [agent.run(t, data_bundle) for agent in agents]
-        
+
         final_dec = PortfolioAgent().run(t, agent_res_list)
-        
+
         curr_res_dict = {"ticker": t}
         for r_dict in [data_bundle, *agent_res_list, final_dec]:
-             if isinstance(r_dict, dict): curr_res_dict.update(r_dict)
+            if isinstance(r_dict, dict): curr_res_dict.update(r_dict)
         results[t] = curr_res_dict
-        
+
     progress_bar.empty()
     return results
-
 def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_placeholder, backtest_agent_weights):
     st.write(f"Preparing backtest: {ticker} ({start_date} to {end_date})...")
     s_dt = datetime.strptime(start_date, "%Y-%m-%d"); fetch_s_dt = (s_dt - pd.DateOffset(months=18)).strftime("%Y-%m-%d")
