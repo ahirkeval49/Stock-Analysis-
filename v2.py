@@ -1201,7 +1201,6 @@ def run_live_analysis(tickers, llm_client, configs):
         agents = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()]
         if configs["use_sentiment"] and llm_client: agents.extend([SentimentAgent(llm_client), NewsSummaryAgent(llm_client)])
         if configs["use_filings"]: agents.extend([SECFilingAgent(), InstitutionalHoldingsAgent()])
-        if configs["use_politician_filings"]: agents.append(PoliticianFilingsAgent())
         if configs["use_value_trades"]: agents.append(ValueInvestingIOAgent())
         agent_res_list = []
         for agent in agents:
@@ -1682,7 +1681,7 @@ with config_cont:
 
         if st.button("▶️ Run AI Trading Day", type="primary", use_container_width=True):
             all_tickers_to_scan = stock_universe['safe'] + stock_universe['risky']
-            ai_configs = {"use_sentiment": True, "use_filings": True, "use_politician_filings": False, "use_value_trades": False}
+            ai_configs = {"use_sentiment": True, "use_filings": True, "use_value_trades": False}
             
             # This is where the analysis and trading happens
             analysis_results = run_live_analysis(all_tickers_to_scan, llm_client, ai_configs)
