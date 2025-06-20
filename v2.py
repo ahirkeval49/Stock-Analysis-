@@ -1225,15 +1225,17 @@ def run_live_analysis(tickers, llm_client, configs):
             "value_investing_io_data": fetch_value_investing_io_data(t) if configs["use_value_trades"] else {}
         }
         
-        # --- Using both old and new agents for comparison ---
+        # --- FIX: Running ALL agents (old and new) for comparison ---
         agents = [
             PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), 
-            ValuationAgent(), AnalystRatingAgent(), SECFilingAgent(), InstitutionalHoldingsAgent()
+            ValuationAgent(), AnalystRatingAgent(), 
+            SECFilingAgent(), # Old SEC Agent
+            InstitutionalHoldingsAgent() # Old Institutional Agent
         ]
         if llm_client:
             agents.extend([SentimentAgent(llm_client), NewsSummaryAgent(llm_client)])
             if configs["use_filings"]:
-                # ADDING the new agents
+                # ADDING the new agents to run alongside the old ones
                 agents.append(SECReportAnalysisAgent(llm_client))
                 agents.append(EnhancedInstitutionalHoldingsAgent())
         
