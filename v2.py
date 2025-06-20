@@ -1033,8 +1033,6 @@ class PortfolioAgent:
         else: decision = "hold"
         
         return {"ticker": ticker, "composite_score": comp_score, "final_decision": decision}
-
-        
 class AITraderAgent:
     def __init__(self, llm_client: ModelClient, stock_universe: dict):
         self.llm_client = llm_client
