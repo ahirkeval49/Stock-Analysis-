@@ -1077,9 +1077,9 @@ class AITraderAgent:
 
         return trades_to_make
         
-class FilingAnalysisAgent:
+class SECReportAnalysisAgent:
     """
-    An advanced agent that synthesizes insights from key SEC filings and institutional ownership data.
+    An advanced agent that uses an LLM to "read" and synthesize insights from key SEC filings.
     """
     def __init__(self, client: ModelClient):
         self.client = client
@@ -1088,51 +1088,42 @@ class FilingAnalysisAgent:
         """Helper to scrape the text from a filing URL."""
         if not url: return ""
         try:
-            # Use a generic User-Agent for the Browse request
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36'}
-            response = requests.get(url, headers=headers, timeout=15)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
-            # Extract text from main content divs, this is a robust way to get filing text
-            content_divs = soup.find_all('div', {'style': lambda x: x and 'font-family' in x})
-            return "\n".join(div.get_text() for div in content_divs)
+            # The Browse tool is essential for reading content from the SEC's document viewer
+            browse_result = Browse(
+                url=url, 
+                query="Extract all text from 'Management\'s Discussion and Analysis (MD&A)' and 'Risk Factors' sections."
+            )
+            return browse_result if isinstance(browse_result, str) else ""
         except Exception:
-            return ""
+            # Fallback for environments where Browse tool might not be available
+            return "Browse to fetch filing text failed."
 
     def run(self, ticker: str, data: dict) -> dict:
         if not self.client:
-            return {"filing_analysis": {"error": "LLM client not available."}}
+            return {"sec_analysis": {"error": "LLM client not available."}}
             
         filings = data.get("sec_all_filings_raw", [])
-        holders = data.get("institutional_holdings", [])
-        
         if not filings or (isinstance(filings[0], dict) and "error" in filings[0]):
-            return {"filing_analysis": {"error": "No filings data to analyze."}}
+            return {"sec_analysis": {"error": "No filings data to analyze."}}
 
-        # Prioritize the latest 10-K or 10-Q for deep analysis
         latest_report = next((f for f in filings if f.get('form_type') in ['10-K', '10-Q']), None)
         
         if not latest_report:
-            return {"filing_analysis": {"error": "No recent 10-K or 10-Q found to analyze."}}
+            return {"sec_analysis": {"error": "No recent 10-K or 10-Q found to analyze."}}
 
         report_text = self._fetch_filing_text(latest_report.get('link_to_filing'))
         
         if len(report_text) < 500:
-            return {"filing_analysis": {"error": f"Could not extract sufficient text from {latest_report.get('form_type')}."}}
-
-        top_holders_list = [h.get("Holder") for h in holders if h.get("Holder")][:5]
-        holders_context = f"The top institutional holders include: {', '.join(top_holders_list)}." if top_holders_list else ""
+            return {"sec_analysis": {"error": f"Could not extract sufficient text from {latest_report['form_type']}."}}
 
         prompt = f"""
-        As a senior hedge fund analyst for {ticker}, analyze the following text from the Form {latest_report['form_type']} and consider the context that {holders_context}.
-
-        Synthesize this into a structured JSON object with the keys: "summary" (3-sentence executive summary), "key_risks" (a list of 2-3 significant risks), "key_opportunities" (a list of 2-3 positive catalysts), and "management_tone" (a single adjective like "Optimistic", "Cautious", or "Concerned").
-
-        **You must only output the raw JSON object and nothing else.**
+        As a senior financial analyst, analyze the following text from the Form {latest_report['form_type']} for {ticker}.
+        Distill the text into a structured JSON object with the keys: "summary" (2-3 sentence executive summary), "key_risks" (a Python list of 2-3 risks), "key_opportunities" (a Python list of 2-3 opportunities), and "management_tone" (a single adjective like "Optimistic", "Cautious", etc.).
+        **Output ONLY the raw JSON object.**
 
         FILING TEXT:
         ---
-        {report_text[:18000]}
+        {report_text[:20000]}
         ---
         """
         try:
@@ -1141,43 +1132,46 @@ class FilingAnalysisAgent:
             if match:
                 analysis = json.loads(match.group())
                 analysis['source_filing'] = f"{latest_report['form_type']} ({latest_report['filing_date']})"
-                # This agent's signal is informational; a simple signal is derived for weighting
-                if analysis.get('management_tone', '').lower() in ['optimistic', 'confident']:
-                    analysis['sec_filings_signal'] = 'buy'
-                elif analysis.get('management_tone', '').lower() in ['concerned', 'cautious']:
-                    analysis['sec_filings_signal'] = 'sell'
-                else:
-                    analysis['sec_filings_signal'] = 'hold'
-                return {"filing_analysis": analysis}
-            return {"filing_analysis": {"error": "LLM did not return valid JSON."}}
+                return {"sec_analysis": analysis}
+            return {"sec_analysis": {"error": "LLM did not return valid JSON."}}
         except Exception as e:
-            return {"filing_analysis": {"error": f"LLM analysis failed: {e}"}}
+            return {"sec_analysis": {"error": f"LLM analysis failed: {e}"}}
 
 class EnhancedInstitutionalHoldingsAgent:
+    """
+    An enhanced agent that identifies recently reporting holders as a proxy for new activity.
+    """
     def run(self, ticker: str, data: dict) -> dict:
         holdings = data.get("institutional_holdings", [])
         inst_data = {
             "enhanced_inst_signal": "hold",
             "inst_recently_reported_holders": []
         }
-        if holdings and not (isinstance(holdings[0], dict) and "error" in holdings[0]):
-            valid_h = [d for d in holdings if isinstance(d, dict) and "error" not in d]
-            if valid_h:
-                try:
-                    recent_date_limit = datetime.now() - timedelta(days=45)
-                    for h in valid_h:
-                        if 'Date Reported' in h and isinstance(h.get('Date Reported'), str):
-                            try:
-                                report_date = datetime.strptime(h['Date Reported'], '%Y-%m-%d')
-                                if report_date > recent_date_limit:
-                                    inst_data["inst_recently_reported_holders"].append(h)
-                            except ValueError: continue
-                except Exception: pass
+
+        if not holdings or (isinstance(holdings[0], dict) and "error" in holdings[0]):
+            return inst_data
+
+        valid_h = [d for d in holdings if isinstance(d, dict) and "error" not in d]
+        if valid_h:
+            try:
+                recent_date_limit = datetime.now() - timedelta(days=45)
+                for h in valid_h:
+                    if 'Date Reported' in h and isinstance(h.get('Date Reported'), str):
+                        try:
+                            # Accommodate different possible date formats from yfinance
+                            report_date_str = h['Date Reported'].split(' ')[0]
+                            report_date = datetime.strptime(report_date_str, '%Y-%m-%d')
+                            if report_date > recent_date_limit:
+                                inst_data["inst_recently_reported_holders"].append(h)
+                        except (ValueError, TypeError):
+                            continue
+            except Exception:
+                pass # Fail silently if date processing has an issue
         
+        # Simple signal based on recent reporting activity
         if len(inst_data["inst_recently_reported_holders"]) > 5:
              inst_data["enhanced_inst_signal"] = "buy"
-        elif len(inst_data.get("inst_recently_reported_holders",[])) == 0 and holdings:
-            inst_data["enhanced_inst_signal"] = "sell"
+        
         return inst_data
         
 # --- Orchestrator and Backtesting ---
@@ -1188,25 +1182,28 @@ def run_live_analysis(tickers, llm_client, configs):
     for i, t in enumerate(tickers):
         progress_text = f"Analyzing {t}... ({i+1}/{len(tickers)})"
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
-
+        
         ticker_info = fetch_ticker_info(t)
-        if not ticker_info: continue
+        if not ticker_info:
+            results[t] = {"error": f"Core info for {t} unavailable."}
+            continue
 
         data_bundle = {
             "price_history": fetch_price_history(t, period="max"),
             "ticker_info": ticker_info,
             "news": fetch_enriched_news(t, ticker_info) if configs["use_sentiment"] else [],
-            "institutional_holdings": fetch_inst_filings(t) if configs["use_filings"] else [],
+            # --- FIX: Call the correct function here ---
             "sec_all_filings_raw": fetch_sec_filings_from_search_api(t) if configs["use_filings"] else [],
-            "value_investing_io_data": fetch_value_investing_io_data(t) if configs["use_value_trades"] else {}
+            "institutional_holdings": fetch_inst_filings(t) if configs["use_filings"] else [],
+            "value_investing_io_data": fetch_value_investing_io_data(t) if configs.get("use_value_trades") else {}
         }
-
+        
         # --- FIX: Running ALL agents (old and new) for comparison ---
         agents = [
             PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), 
             ValuationAgent(), AnalystRatingAgent(), 
-            SECFilingAgent(), # Old SEC Agent
-            InstitutionalHoldingsAgent() # Old Institutional Agent
+            SECFilingAgent(), # <-- OLD SEC Agent
+            InstitutionalHoldingsAgent() # <-- OLD Institutional Agent
         ]
         if llm_client:
             agents.extend([SentimentAgent(llm_client), NewsSummaryAgent(llm_client)])
@@ -1214,21 +1211,59 @@ def run_live_analysis(tickers, llm_client, configs):
                 # ADDING the new agents to run alongside the old ones
                 agents.append(SECReportAnalysisAgent(llm_client))
                 agents.append(EnhancedInstitutionalHoldingsAgent())
-
+        
         if configs.get("use_value_trades"): 
             agents.append(ValueInvestingIOAgent())
-
+        
         agent_res_list = [agent.run(t, data_bundle) for agent in agents]
-
+        
         final_dec = PortfolioAgent().run(t, agent_res_list)
-
+        
         curr_res_dict = {"ticker": t}
         for r_dict in [data_bundle, *agent_res_list, final_dec]:
-             if isinstance(r_dict, dict): curr_res_dict.update(r_dict)
+            if isinstance(r_dict, dict): curr_res_dict.update(r_dict)
         results[t] = curr_res_dict
-
+        
     progress_bar.empty()
     return results
+
+class PortfolioAgent:
+    WEIGHTS = {
+        "price": 1.0, "momentum": 0.8, "volatility": 0.3, "sentiment": 0.7, 
+        "fund": 1.0, "valuation_dcf": 0.5, "valuation_pe": 0.5, 
+        "sec_filings": 1.0, "inst_holdings": 0.6, "analyst": 0.7, 
+        "vi_signal": 0.8, 
+        "enhanced_inst_signal": 1.2 # Weight for the new agent's signal
+    }
+
+    def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
+        curr_w, total_score, sum_w, agg_s = agent_weights or self.WEIGHTS, 0.0, 0.0, {}
+        for s_dict in signals:
+            if isinstance(s_dict, dict): agg_s.update(s_dict)
+        
+        s_map = {
+            "price_signal": "price", "momentum_signal": "momentum", "volatility_signal": "volatility",
+            "sentiment_signal": "sentiment", "fund_signal": "fund", "dcf_signal": "valuation_dcf",
+            "relative_pe_signal": "valuation_pe", "sec_filings_signal": "sec_filings", 
+            "inst_holdings_signal": "inst_holdings", "analyst_signal": "analyst", 
+            "vi_signal": "vi_signal", "enhanced_inst_signal": "enhanced_inst_signal"
+        }
+        for s_key, w_key in s_map.items():
+            s_val, w = agg_s.get(s_key), curr_w.get(w_key, 0)
+            if s_val and w > 0:
+                score_map = {"strong_buy": 1.5, "buy": 1.0, "hold": 0.0, "sell": -1.0, "strong_sell": -1.5}
+                raw_score = score_map.get(str(s_val).lower(), 0)
+                total_score += raw_score * w; sum_w += w
+        
+        comp_score = (total_score / sum_w) if sum_w else 0.0
+        
+        if comp_score > 0.4: decision = "strong_buy"
+        elif comp_score > 0.15: decision = "buy"
+        elif comp_score < -0.4: decision = "strong_sell"
+        elif comp_score < -0.15: decision = "sell"
+        else: decision = "hold"
+        
+        return {"ticker": ticker, "composite_score": comp_score, "final_decision": decision}
     
 def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_placeholder, backtest_agent_weights):
     st.write(f"Preparing backtest: {ticker} ({start_date} to {end_date})...")
@@ -1362,11 +1397,7 @@ def display_detailed_analysis(res_detail):
                 st.markdown("---")
                 st.markdown("##### [NEW] Recently Reported (Last 45 Days)")
                 recent_holders = res_detail.get('inst_recently_reported_holders', [])
-                st.dataframe(pd.DataFrame(recent_holders), hide_index=True) if recent_holders else st.info("No funds reported in the last 45 days.")
-        with c3:
-            with st.popover("View News Headlines"):
-                for line in res_detail.get('news_headlines_for_popover',[]): st.markdown(f"- {line}")
-
+                st.dataframe(pd.DataFrame(recent_holders), hide_index=True) if
     # --- Tab 4: All Signals ---
     with tabs[3]:
         st.subheader("All Agent Signals & Raw Data")
