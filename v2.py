@@ -111,30 +111,9 @@ def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") 
 @st.cache_data
 def fetch_ticker_info(ticker: str) -> dict:
     try:
-        # Increase timeout and add a very short retry delay (optional, but helps with transient network blips)
-        ticker_obj = yf.Ticker(ticker)
-        
-        # Directly access .info dictionary, it will return an empty dict if it fails.
-        # This is better than trying to access attributes which might not exist and raise errors.
-        info = ticker_obj.info
-
-        # Check for essential data points. If any are missing, consider it a failure.
-        # Yahoo Finance often returns 'None' for these keys if data isn't available.
-        if not info or \
-           (info.get('regularMarketPrice') is None and info.get('currentPrice') is None) or \
-           info.get('financialCurrency') is None: # financialCurrency is often a good indicator for valid equity
-            
-            # Add more specific logging or return a more detailed error for debugging
-            missing_keys = []
-            if (info.get('regularMarketPrice') is None and info.get('currentPrice') is None):
-                missing_keys.append("price")
-            if info.get('financialCurrency') is None:
-                missing_keys.append("currency")
-            
-            error_detail = f"Missing essential info: {', '.join(missing_keys)}" if missing_keys else "Incomplete data returned."
-            st.warning(f"Failed to fetch complete info for {ticker}: {error_detail}. Raw info: {info.keys()}") # Log keys available
-            return {} # Return empty dict to signal failure
-            
+        info = yf.Ticker(ticker).info
+        if not info or (info.get('regularMarketPrice') is None and info.get('currentPrice') is None and info.get('financialCurrency') is None):
+            return {}
         return {
             "marketCap": info.get("marketCap"), "freeCashflow": info.get("freeCashflow"),
             "forwardPE": info.get("forwardPE"), "trailingPE": info.get("trailingPE"),
@@ -145,13 +124,10 @@ def fetch_ticker_info(ticker: str) -> dict:
             "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"), "industry": info.get("industry"),
             "sector": info.get("sector"), "longName": info.get("longName"), "shortName": info.get("shortName"),
             "longBusinessSummary": info.get("longBusinessSummary"),
-            "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"), # Prefer currentPrice, fallback to regularMarketPrice
+            "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
             "financialCurrency": info.get("financialCurrency")
         }
-    except Exception as e:
-        # Catch broader exceptions during fetch.
-        st.error(f"Error fetching ticker info for {ticker}: {e}")
-        return {} # Return empty dict on any exception
+    except Exception: return {}
 
 @st.cache_data
 def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
