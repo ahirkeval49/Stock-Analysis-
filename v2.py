@@ -131,7 +131,7 @@ def fetch_ticker_info(ticker: str) -> dict:
         }
     except Exception as e:
          st.error(f"Attempt {attempt + 1}/{max_retries}: Error fetching ticker info for {ticker}: {e}")
-            if attempt < max_retries - 1:
+         if attempt < max_retries - 1:
                 import time
                 time.sleep(2 ** attempt) # Exponential backoff
                 continue
