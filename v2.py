@@ -13,6 +13,7 @@ import re
 from urllib.parse import urljoin, urlparse
 from newsapi import NewsApiClient
 import json
+import altair as alt # Import altair for charting
 
 # --- Page Config (Must be the first Streamlit command) ---
 st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
@@ -95,7 +96,7 @@ if 'backtest_triggered' not in st.session_state:
     st.session_state.backtest_triggered = False
 
 # --------------------------------
-# Data Fetchers (No changes)
+# Data Fetchers
 # --------------------------------
 @st.cache_data
 def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame:
@@ -105,9 +106,10 @@ def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") 
         if df.empty: return pd.DataFrame()
         df.index = pd.to_datetime(df.index).tz_localize(None)
         return df
-    except Exception: return pd.DataFrame()
+    except Exception as e:
+        st.warning(f"Error fetching price history for {ticker}: {e}")
+        return pd.DataFrame()
 
-# Modified fetch_ticker_info function
 @st.cache_data
 def fetch_ticker_info(ticker: str) -> dict:
     try:
@@ -127,7 +129,9 @@ def fetch_ticker_info(ticker: str) -> dict:
             "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
             "financialCurrency": info.get("financialCurrency")
         }
-    except Exception: return {}
+    except Exception as e:
+        st.error(f"Error fetching ticker info for {ticker}: {e}")
+        return {}
 
 @st.cache_data
 def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
@@ -228,6 +232,18 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                 form, date_str, acc_no, doc_name = info["form_type"], info["filing_date_str"], info["accession_number"], info["primary_document"]
                 acc_no_dashless = acc_no.replace('-', '')
                 idx_link = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{acc_no}-index.html"
+                
+                # Placeholder for fetching document content for LLM summary.
+                # In a real app, you would download and parse the 'primaryDocument' here.
+                # For this simulation, we'll just indicate if content *could* be fetched.
+                document_content_placeholder = ""
+                if form in ['10-K', '10-Q', '8-K']:
+                    # Simulate content fetch: In a real scenario, this is where you'd scrape the document content
+                    # For example, you'd download the primaryDocument (e.g., a .htm file) and extract text.
+                    # As a placeholder, let's assume we can fetch some 'content' for these forms.
+                    document_content_placeholder = f"Content for {form} on {date_str} (Placeholder for actual scraped text from {doc_name})."
+                
+
                 if form == '4' and doc_name.lower().endswith(('.xml', '.xsd')):
                     if xml_fetches >= max_xml: continue
                     xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}"
@@ -264,7 +280,8 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                                 if shares != 0: filings_list.append({"is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": date_str, "transaction_date": tx_date, "reporting_owner": owner_name, "owner_relationship": owner_rel, "transaction_code": tx_code, "acq_disp_code": ad_code, "shares": shares, "price_per_share": price, "link_to_filing": idx_link})
                     except: pass
                 elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other:
-                    filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": date_str, "form_type": form, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}", "summary_link": idx_link})
+                    # Add content placeholder for LLM summary
+                    filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": date_str, "form_type": form, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}", "summary_link": idx_link, "document_content_for_llm": document_content_placeholder})
             if not filings_list and xml_fetches > 0: return [{"error": f"SEC: {xml_fetches} Form 4s for {ticker_symbol}, but no tx parsed."}]
             if not filings_list: return [{"error": f"SEC: No relevant filings for {ticker_symbol} (CIK:{cik_padded})."}]
         else: return [{"error": f"SEC: No recent filings data for {ticker_symbol} (CIK:{cik_padded})."}]
@@ -361,42 +378,29 @@ class ModelClient:
 
 class PriceAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
-        # Minimum data required for SMA200 and Bollinger Bands (approx. 20 periods)
-        # RSI needs 14 periods, SMA50 needs 50. SMA200 needs 200. Bollinger Bands typically use 20 periods.
-        # Let's ensure enough data for all, so 200 is a good base for SMA200, and 20 for Bollinger.
-        # Ensure at least 200 periods for all indicators to be meaningful.
-        required_data_points = 200 # For SMA200, which is the longest period currently.
+        required_data_points = 200
 
         if price_data_slice.empty or len(price_data_slice) < required_data_points:
             return {
                 "ticker": ticker,
                 "price_signal": "hold",
-                "sma50": np.nan,
-                "sma200": np.nan,
-                "rsi14": np.nan,
-                "bb_upper": np.nan,
-                "bb_lower": np.nan,
-                "bb_signal": "hold",
+                "sma50": np.nan, "sma200": np.nan, "rsi14": np.nan,
+                "bb_upper": np.nan, "bb_lower": np.nan, "bb_signal": "hold",
                 "price_confidence_score": 0.0,
                 "price_error": "Not enough data for comprehensive analysis."
             }
 
         df = price_data_slice.copy()
         
-        # --- Calculate Indicators ---
-        # Simple Moving Averages
         df["SMA50"] = df["Close"].rolling(50).mean()
         df["SMA200"] = df["Close"].rolling(200).mean()
 
-        # Relative Strength Index (RSI)
         delta = df["Close"].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = (-delta.clip(upper=0)).rolling(14).mean()
-        # Handle division by zero for RS by replacing 0 with np.nan for robust calculation
         rs = gain / loss.replace(0, np.nan)
         df["RSI14"] = 100 - (100 / (1 + rs))
 
-        # Bollinger Bands (typically 20-period SMA, 2 standard deviations)
         bb_period = 20
         bb_std_dev = 2
         df["BB_SMA"] = df["Close"].rolling(bb_period).mean()
@@ -404,22 +408,17 @@ class PriceAgent:
         df["BB_Upper"] = df["BB_SMA"] + (df["BB_STD"] * bb_std_dev)
         df["BB_Lower"] = df["BB_SMA"] - (df["BB_STD"] * bb_std_dev)
 
-        # Get latest valid data point
         latest = df.iloc[-1]
         
-        # Initialize signals and score
         signal = "hold"
         confidence_score = 0.0
         bb_signal = "hold"
 
-        # --- Apply Signal Logic ---
-        
-        # Check for NaN values in latest indicators before making decisions
         if pd.isna(latest.SMA50) or pd.isna(latest.SMA200) or pd.isna(latest.RSI14) or \
            pd.isna(latest.BB_Upper) or pd.isna(latest.BB_Lower):
             return {
                 "ticker": ticker,
-                "price_signal": "hold", # Fallback to hold if indicators are NaN at latest point
+                "price_signal": "hold",
                 "sma50": float(latest.SMA50) if pd.notna(latest.SMA50) else np.nan,
                 "sma200": float(latest.SMA200) if pd.notna(latest.SMA200) else np.nan,
                 "rsi14": float(latest.RSI14) if pd.notna(latest.RSI14) else np.nan,
@@ -432,62 +431,43 @@ class PriceAgent:
 
         current_close = latest.Close
 
-        # 1. SMA Crossover + Price Confirmation
-        # Golden Cross (Bullish)
         if latest.SMA50 > latest.SMA200 and current_close > latest.SMA50:
-            # Check if recent cross occurred for stronger signal (optional, requires looking back)
-            # Example: Was SMA50 below SMA200 5 days ago, and now it's above?
-            if len(df) >= 205 and df["SMA50"].iloc[-5] < df["SMA200"].iloc[-5]: # Check 5 days ago for cross
-                 signal = "buy"
-                 confidence_score += 0.4 # Higher confidence for confirmed cross and price above SMAs
+            if len(df) >= 205 and df["SMA50"].iloc[-5] < df["SMA200"].iloc[-5]:
+                signal = "buy"; confidence_score += 0.4
             else:
-                 signal = "buy" # Weaker buy if no recent cross but alignment
-                 confidence_score += 0.2
-        # Death Cross (Bearish)
+                signal = "buy"; confidence_score += 0.2
         elif latest.SMA50 < latest.SMA200 and current_close < latest.SMA50:
-            if len(df) >= 205 and df["SMA50"].iloc[-5] > df["SMA200"].iloc[-5]: # Check 5 days ago for cross
-                signal = "sell"
-                confidence_score -= 0.4
+            if len(df) >= 205 and df["SMA50"].iloc[-5] > df["SMA200"].iloc[-5]:
+                signal = "sell"; confidence_score -= 0.4
             else:
-                signal = "sell"
-                confidence_score -= 0.2
+                signal = "sell"; confidence_score -= 0.2
 
-        # 2. RSI Signal (Secondary Confirmation/Overbought/Oversold)
-        if latest.RSI14 < 30: # Oversold
-            if signal == "buy": confidence_score += 0.2 # RSI confirms buy
+        if latest.RSI14 < 30:
+            if signal == "buy": confidence_score += 0.2
             elif signal == "hold":
-                signal = "buy" # RSI alone triggers a buy (reversal play)
-                confidence_score += 0.1
-        elif latest.RSI14 > 70: # Overbought
-            if signal == "sell": confidence_score -= 0.2 # RSI confirms sell
+                signal = "buy"; confidence_score += 0.1
+        elif latest.RSI14 > 70:
+            if signal == "sell": confidence_score -= 0.2
             elif signal == "hold":
-                signal = "sell" # RSI alone triggers a sell (reversal play)
-                confidence_score -= 0.1
+                signal = "sell"; confidence_score -= 0.1
 
-        # 3. Bollinger Bands Signal
-        # Price crossing below lower band (often buy opportunity after pullback)
         if current_close < latest.BB_Lower:
             bb_signal = "buy"
-            if signal == "buy": confidence_score += 0.1 # Adds to existing buy
+            if signal == "buy": confidence_score += 0.1
             elif signal == "hold":
-                signal = "buy" # BB alone triggers buy
-                confidence_score += 0.05
-        # Price crossing above upper band (often sell opportunity, or strong momentum)
+                signal = "buy"; confidence_score += 0.05
         elif current_close > latest.BB_Upper:
             bb_signal = "sell"
-            if signal == "sell": confidence_score -= 0.1 # Adds to existing sell
+            if signal == "sell": confidence_score -= 0.1
             elif signal == "hold":
-                signal = "sell" # BB alone triggers sell
-                confidence_score -= 0.05
+                signal = "sell"; confidence_score -= 0.05
         
-        # If signal is still 'hold', but RSI is extreme (and not yet acted upon)
         if signal == "hold":
-            if latest.RSI14 < 40 and latest.RSI14 > 30: # Approaching oversold
+            if latest.RSI14 < 40 and latest.RSI14 > 30:
                 confidence_score += 0.05
-            elif latest.RSI14 > 60 and latest.RSI14 < 70: # Approaching overbought
+            elif latest.RSI14 > 60 and latest.RSI14 < 70:
                 confidence_score -= 0.05
 
-        # Final decision based on refined logic and confidence
         if confidence_score > 0.3:
             final_price_signal = "buy"
         elif confidence_score < -0.3:
@@ -495,164 +475,115 @@ class PriceAgent:
         else:
             final_price_signal = "hold"
             
-        # Cap confidence score between -1.0 and 1.0 (or whatever range makes sense)
         confidence_score = max(-1.0, min(1.0, confidence_score))
 
         return {
             "ticker": ticker,
-            "sma50": float(latest.SMA50),
-            "sma200": float(latest.SMA200),
-            "rsi14": float(latest.RSI14),
+            "sma50": float(latest.SMA50), "sma200": float(latest.SMA200), "rsi14": float(latest.RSI14),
             "bb_upper": float(latest.BB_Upper) if pd.notna(latest.BB_Upper) else np.nan,
             "bb_lower": float(latest.BB_Lower) if pd.notna(latest.BB_Lower) else np.nan,
-            "bb_signal": bb_signal, # Individual BB signal
-            "price_signal": final_price_signal, # Overall aggregated signal
-            "price_confidence_score": float(confidence_score), # New: Quantified confidence
-            "price_error": None # Clear error if successful
+            "bb_signal": bb_signal,
+            "price_signal": final_price_signal,
+            "price_confidence_score": float(confidence_score),
+            "price_error": None
         }
 
 class MomentumAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
-        # Minimum data required for 12-month momentum (252 trading days for a year)
-        # We need at least 253 points to calculate a 252-period shift (current price + 252 past prices)
         required_data_points = 253
 
         if price_data_slice.empty or len(price_data_slice) < required_data_points:
             return {
                 "ticker": ticker,
                 "momentum_signal": "hold",
-                "momentum_1m": np.nan,
-                "momentum_12m": np.nan,
-                "momentum_confidence_score": 0.0, # Add a confidence score initialized to 0
+                "momentum_1m": np.nan, "momentum_12m": np.nan,
+                "momentum_confidence_score": 0.0,
                 "momentum_error": "Not enough data for 1-year and 1-month momentum."
             }
 
         df = price_data_slice.copy()
 
-        # Ensure 'Close' column exists and is numeric
         if 'Close' not in df.columns or not pd.api.types.is_numeric_dtype(df['Close']):
             return {
-                "ticker": ticker,
-                "momentum_signal": "hold",
-                "momentum_1m": np.nan,
-                "momentum_12m": np.nan,
+                "ticker": ticker, "momentum_signal": "hold",
+                "momentum_1m": np.nan, "momentum_12m": np.nan,
                 "momentum_confidence_score": 0.0,
                 "momentum_error": "Price data is missing 'Close' column or not numeric."
             }
 
-        # Calculate momentum for 1 month (approx. 21 trading days) and 12 months (approx. 252 trading days)
-        # Using .iloc[-1] for current price and .iloc[-22] for 1-month ago (21 trading days prior)
-        # and .iloc[-253] for 12-month ago (252 trading days prior)
-        # This assumes the index is ordered by time, and there are no missing dates that would break iloc indexing.
         P_t = df["Close"].iloc[-1]
-
-        # Use .shift() and .iloc[-1] to get values from specific past *trading* days,
-        # and then dropna() to ensure valid numerical prices for calculation.
-        # This handles cases where data might be sparse at the beginning of the slice.
-        # We fetch enough initial data to allow for shifting.
-        
-        # Shifted prices. Use .dropna() to ensure previous_price is a scalar and not NaN if data is insufficient for that specific shift.
-        # If the shift results in NaN, the subsequent pd.notna(P_1m) will handle it.
         P_1m_series = df["Close"].shift(21)
         P_12m_series = df["Close"].shift(252)
 
-        # Get the latest shifted values. If the shift went beyond available data, these will be NaN.
         P_1m = P_1m_series.iloc[-1]
         P_12m = P_12m_series.iloc[-1]
 
-        # Calculate momentum percentages
-        # Ensure division by zero is explicitly handled or avoided for P_1m, P_12m
         m1 = ((P_t / P_1m) - 1) if pd.notna(P_1m) and P_1m != 0 else np.nan
         m12 = ((P_t / P_12m) - 1) if pd.notna(P_12m) and P_12m != 0 else np.nan
 
         signal = "hold"
-        confidence_score = 0.0 # Initial confidence score
+        confidence_score = 0.0
 
-        # Define momentum thresholds (can be optimized via backtesting)
-        STRONG_POSITIVE_MOMENTUM_THRESHOLD = 0.10 # 10% gain over period
-        MODERATE_POSITIVE_MOMENTUM_THRESHOLD = 0.03 # 3% gain over period
-        STRONG_NEGATIVE_MOMENTUM_THRESHOLD = -0.10 # 10% loss over period
-        MODERATE_NEGATIVE_MOMENTUM_THRESHOLD = -0.03 # 3% loss over period
+        STRONG_POSITIVE_MOMENTUM_THRESHOLD = 0.10
+        MODERATE_POSITIVE_MOMENTUM_THRESHOLD = 0.03
+        STRONG_NEGATIVE_MOMENTUM_THRESHOLD = -0.10
+        MODERATE_NEGATIVE_MOMENTUM_THRESHOLD = -0.03
 
-        # Signal Logic: Combination of short-term and long-term momentum
         if pd.notna(m1) and pd.notna(m12):
-            # Strong Buy: Both short and long-term strong positive momentum
             if m12 > STRONG_POSITIVE_MOMENTUM_THRESHOLD and m1 > MODERATE_POSITIVE_MOMENTUM_THRESHOLD:
-                signal = "buy"
-                confidence_score = 0.8 # High confidence
-            # Moderate Buy: Long-term positive, short-term positive (but maybe not strong)
+                signal = "buy"; confidence_score = 0.8
             elif m12 > MODERATE_POSITIVE_MOMENTUM_THRESHOLD and m1 > 0:
-                signal = "buy"
-                confidence_score = 0.5 # Moderate confidence
-            # Strong Sell: Both short and long-term strong negative momentum
+                signal = "buy"; confidence_score = 0.5
             elif m12 < STRONG_NEGATIVE_MOMENTUM_THRESHOLD and m1 < MODERATE_NEGATIVE_MOMENTUM_THRESHOLD:
-                signal = "sell"
-                confidence_score = -0.8 # High negative confidence
-            # Moderate Sell: Long-term negative, short-term negative (but maybe not strong)
+                signal = "sell"; confidence_score = -0.8
             elif m12 < MODERATE_NEGATIVE_MOMENTUM_THRESHOLD and m1 < 0:
-                signal = "sell"
-                confidence_score = -0.5 # Moderate negative confidence
+                signal = "sell"; confidence_score = -0.5
             else:
-                signal = "hold"
-                confidence_score = 0.0 # Neutral
+                signal = "hold"; confidence_score = 0.0
 
-        # Adjust confidence based on how far from 0.0 the momentum values are
-        # This gives a continuous score, not just discrete levels
         if pd.notna(m1) and pd.notna(m12):
-            # Combined momentum score (could be weighted or simple average)
-            # Normalize to roughly -1 to 1 range for consistency with other agents
-            raw_combined_momentum = (m1 + m12) / 2 # Simple average, adjust if needed
-            
-            # Simple linear scaling for confidence based on raw_combined_momentum
-            # Example: -0.1 to 0.1 range for raw_combined_momentum maps to -0.5 to 0.5 confidence
-            # Adjust scaling factor (e.g., 5.0) based on desired sensitivity
+            raw_combined_momentum = (m1 + m12) / 2
             scaled_confidence = raw_combined_momentum * 5.0 
-            confidence_score = max(-1.0, min(1.0, scaled_confidence)) # Clamp between -1 and 1
+            confidence_score = max(-1.0, min(1.0, scaled_confidence))
 
-            # Override discrete signal based on clamped confidence
-            if confidence_score > 0.3: # Threshold for a buy signal based on confidence
+            if confidence_score > 0.3:
                 signal = "buy"
-            elif confidence_score < -0.3: # Threshold for a sell signal based on confidence
+            elif confidence_score < -0.3:
                 signal = "sell"
             else:
                 signal = "hold"
-
 
         return {
             "ticker": ticker,
             "momentum_1m": float(m1) if pd.notna(m1) else np.nan,
             "momentum_12m": float(m12) if pd.notna(m12) else np.nan,
             "momentum_signal": signal,
-            "momentum_confidence_score": float(confidence_score), # New: Quantified confidence
-            "momentum_error": None # Clear error if successful
+            "momentum_confidence_score": float(confidence_score),
+            "momentum_error": None
         }
 
 class VolatilityAgent:
     def run(self, ticker: str, data: dict, price_data_slice: pd.DataFrame = None) -> dict:
         beta_val = data.get("ticker_info", {}).get("beta")
-        # Ensure beta is a float; default to 1.0 (market-like) if unavailable or invalid
         beta = float(beta_val) if isinstance(beta_val, (int, float)) else 1.0
 
         ann_vol = np.nan
-        vol_weight = 0.0 # Will be higher for lower volatility
+        vol_weight = 0.0
         volatility_signal = "hold"
         volatility_confidence_score = 0.0
         volatility_error = None
 
-        # --- Calculate Annualized Historical Volatility ---
         if price_data_slice is not None and not price_data_slice.empty and len(price_data_slice) > 1:
-            # Ensure 'Close' column is present and numeric
             if 'Close' not in price_data_slice.columns or not pd.api.types.is_numeric_dtype(price_data_slice['Close']):
                 volatility_error = "Price data is missing 'Close' column or not numeric for volatility calculation."
             else:
-                # Calculate daily log returns
                 ret = np.log(price_data_slice.Close / price_data_slice.Close.shift(1)).dropna()
 
                 if not ret.empty:
                     daily_std = ret.std()
                     if daily_std > 0:
-                        ann_vol = float(daily_std * np.sqrt(252)) # Annualized volatility
-                        vol_weight = float(1 / ann_vol) # Inverse volatility (higher for lower vol)
+                        ann_vol = float(daily_std * np.sqrt(252))
+                        vol_weight = float(1 / ann_vol)
                     else:
                         volatility_error = "Daily returns standard deviation is zero (no price movement)."
                 else:
@@ -660,54 +591,38 @@ class VolatilityAgent:
         else:
             volatility_error = "Not enough price data for historical volatility calculation."
 
-
-        # --- Generate Volatility Signal and Confidence Score ---
-
-        # Base signal from Beta
-        # Lower beta is generally 'safer' -> buy. Higher beta is 'riskier' -> sell.
-        if beta > 1.2: # More volatile than market
-            volatility_signal = "sell" # Risk-off for high beta
-            volatility_confidence_score -= (beta - 1.2) * 0.5 # Score decreases as beta increases
-        elif beta < 0.8: # Less volatile than market
-            volatility_signal = "buy" # Risk-on for low beta
-            volatility_confidence_score += (0.8 - beta) * 0.5 # Score increases as beta decreases
-        else:
-            volatility_signal = "hold" # Market-like volatility
-            # confidence_score remains 0 from beta for hold range
-
-        # Incorporate Annualized Volatility into confidence
-        # Typical interpretation: high volatility is risky (negative signal), low volatility is stable (positive signal)
-        if pd.notna(ann_vol):
-            # Define thresholds for what's considered high/low volatility (these are examples)
-            HIGH_VOL_THRESHOLD = 0.30 # 30% annualized volatility
-            LOW_VOL_THRESHOLD = 0.15  # 15% annualized volatility
-
-            if ann_vol > HIGH_VOL_THRESHOLD:
-                # Strongly negative impact on confidence for high volatility
-                volatility_confidence_score -= (ann_vol - HIGH_VOL_THRESHOLD) * 1.0 # Scale by 1.0
-            elif ann_vol < LOW_VOL_THRESHOLD:
-                # Positive impact on confidence for low volatility
-                volatility_confidence_score += (LOW_VOL_THRESHOLD - ann_vol) * 1.0 # Scale by 1.0
-
-        # Clamp confidence score to the range [-1.0, 1.0]
-        volatility_confidence_score = max(-1.0, min(1.0, volatility_confidence_score))
-
-        # Re-evaluate signal based on combined confidence score
-        if volatility_confidence_score > 0.2: # Tunable threshold for a "buy" signal
-            volatility_signal = "buy"
-        elif volatility_confidence_score < -0.2: # Tunable threshold for a "sell" signal
-            volatility_signal = "sell"
+        if beta > 1.2:
+            volatility_signal = "sell"; volatility_confidence_score -= (beta - 1.2) * 0.5
+        elif beta < 0.8:
+            volatility_signal = "buy"; volatility_confidence_score += (0.8 - beta) * 0.5
         else:
             volatility_signal = "hold"
 
+        if pd.notna(ann_vol):
+            HIGH_VOL_THRESHOLD = 0.30
+            LOW_VOL_THRESHOLD = 0.15
+
+            if ann_vol > HIGH_VOL_THRESHOLD:
+                volatility_confidence_score -= (ann_vol - HIGH_VOL_THRESHOLD) * 1.0
+            elif ann_vol < LOW_VOL_THRESHOLD:
+                volatility_confidence_score += (LOW_VOL_THRESHOLD - ann_vol) * 1.0
+
+        volatility_confidence_score = max(-1.0, min(1.0, volatility_confidence_score))
+
+        if volatility_confidence_score > 0.2:
+            volatility_signal = "buy"
+        elif volatility_confidence_score < -0.2:
+            volatility_signal = "sell"
+        else:
+            volatility_signal = "hold"
 
         return {
             "ticker": ticker,
             "beta": float(beta),
             "annual_vol": float(ann_vol) if pd.notna(ann_vol) else np.nan,
             "vol_weight": float(vol_weight) if pd.notna(vol_weight) else np.nan,
-            "volatility_signal": volatility_signal, # Overall combined signal
-            "volatility_confidence_score": float(volatility_confidence_score), # New: Quantified confidence
+            "volatility_signal": volatility_signal,
+            "volatility_confidence_score": float(volatility_confidence_score),
             "volatility_error": volatility_error
         }
 
@@ -721,22 +636,15 @@ class SentimentAgent:
         if news_err:
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": news_err}
 
-        # Filter out news items that are explicitly marked with an "error"
         valid_news = [item for item in news if isinstance(item, dict) and "error" not in item]
 
         if not valid_news:
-            # More precise error message if the entire news list was empty or only contained errors
             err_msg = news[0].get("error") if news and isinstance(news[0], dict) and "error" in news[0] else "No valid news articles found for sentiment analysis."
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": err_msg}
 
         content_for_llm = []
         co_name = data.get("ticker_info", {}).get('longName', ticker)
         
-        # Sort news by recency and prioritize longer snippets
-        # News are already sorted by publish_datetime_utc descending, which is good.
-        # We'll just iterate and build content.
-        
-        # --- MODIFICATION HERE: Set MAX_NEWS_ARTICLES_FOR_LLM to 10 ---
         MAX_NEWS_ARTICLES_FOR_LLM = 10 
 
         for item in valid_news[:MAX_NEWS_ARTICLES_FOR_LLM]:
@@ -747,29 +655,22 @@ class SentimentAgent:
             source_api = item.get('source_api', 'Unknown').strip()
             publish_time = item.get('publish_time_readable', 'N/A').strip()
 
-            # Prefer content_snippet if substantial, otherwise use description
             main_text = ""
-            if content_snippet and len(content_snippet) > 50: # Require a minimum length for content
+            if content_snippet and len(content_snippet) > 50:
                 main_text = f"Content: {content_snippet}"
-            elif description and len(description) > 50: # Require a minimum length for description
+            elif description and len(description) > 50:
                 main_text = f"Description: {description}"
             
-            # Only add to LLM input if there's substantial text
             if main_text:
                 snippet = f"Headline: {title}"
-                if main_text:
-                    snippet += f" | {main_text}"
-                if publisher != 'N/A':
-                    snippet += f" (Source: {publisher} via {source_api})"
-                if publish_time != 'N/A':
-                    snippet += f" (Published: {publish_time})"
-                
+                if main_text: snippet += f" | {main_text}"
+                if publisher != 'N/A': snippet += f" (Source: {publisher} via {source_api})"
+                if publish_time != 'N/A': snippet += f" (Published: {publish_time})"
                 content_for_llm.append(snippet)
 
         if not content_for_llm:
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": "No processable news articles with sufficient content for sentiment analysis."}
 
-        # --- LLM Prompt Engineering ---
         prompt = f"""
         As a financial sentiment analyst, analyze the following news articles for {co_name} ({ticker}).
         Your task is to determine the overall sentiment of these articles towards the company's stock value.
@@ -793,7 +694,6 @@ class SentimentAgent:
         try:
             resp = self.client.generate(prompt).strip()
             
-            # --- Robust LLM Response Parsing ---
             match = re.search(r"([-+]?\d*\.\d+)|([-+]?\d+)", resp)
             
             if match:
@@ -810,15 +710,10 @@ class SentimentAgent:
             llm_err = f"LLM sentiment analysis call failed: {str(e)[:150]}"
             score = 0.0
 
-        # Consolidate error messages
         final_err = None
-        if news_err:
-            final_err = f"News fetch issues: {news_err}"
-        if llm_err:
-            final_err = (f"{final_err} | LLM issues: {llm_err}" if final_err else f"LLM issues: {llm_err}")
+        if news_err: final_err = f"News fetch issues: {news_err}"
+        if llm_err: final_err = (f"{final_err} | LLM issues: {llm_err}" if final_err else f"LLM issues: {llm_err}")
 
-
-        # --- Sentiment Confidence and Signal Generation ---
         sentiment_confidence_score = abs(score)
 
         BUY_THRESHOLD = 0.45
@@ -940,6 +835,83 @@ class SECFilingAgent:
         elif net_s < -2000 or sell_v > 200000: sig = "sell"
         return {"ticker":ticker, "sec_net_insider_shares_1y":int(net_s), "sec_insider_buy_value_1y":round(buy_v,2), "sec_insider_sell_value_1y":round(sell_v,2), "sec_filings_signal":sig, "sec_filings_error":None, "sec_recent_form4_transactions":form4[:10], "sec_other_recent_filings":others[:10]}
 
+# NEW AGENT: SECSummaryAgent
+class SECSummaryAgent:
+    def __init__(self, client):
+        self.client = client
+
+    def run(self, ticker: str, data: dict) -> dict:
+        filings_raw = data.get("sec_all_filings_raw", [])
+        co_name = data.get("ticker_info", {}).get('longName', ticker)
+
+        if not self.client:
+            return {"ticker": ticker, "sec_summary": "LLM client not available for SEC summary.", "sec_summary_error": "LLM not configured."}
+        
+        # Filter for non-Form 4 filings with content placeholders
+        relevant_filings = [
+            f for f in filings_raw if not f.get("is_form4_transaction") and f.get("document_content_for_llm")
+        ]
+        
+        if not relevant_filings:
+            return {"ticker": ticker, "sec_summary": "No relevant non-Form 4 filings with content found for summary.", "sec_summary_error": None}
+
+        # Select a few recent, relevant filings to summarize
+        # Prioritize 8-K, then 10-Q, then 10-K, then simply newest.
+        sorted_filings = sorted(
+            relevant_filings,
+            key=lambda x: (
+                0 if x['form_type'] == '8-K' else
+                1 if x['form_type'] == '10-Q' else
+                2 if x['form_type'] == '10-K' else
+                3,
+                x['filing_date_str'] # Secondary sort by date (oldest first if multiple of same form_type)
+            ),
+            reverse=False # We want the oldest of the most important to ensure a spread if we only take few
+        )
+        
+        # Take up to 3 filings for the LLM prompt to manage token limits and focus
+        filings_for_llm = sorted_filings[:3]
+
+        content_for_llm = []
+        for f in filings_for_llm:
+            content_for_llm.append(
+                f"Form Type: {f.get('form_type')} (Filed: {f.get('filing_date_str')})\n"
+                f"Content: {f.get('document_content_for_llm', 'No content placeholder.')}\n"
+                f"Link: {f.get('summary_link', '#')}\n"
+            )
+        
+        prompt = f"""
+        As an expert financial analyst, summarize the key highlights and any significant positive or negative developments related to {co_name} ({ticker}) based on the following SEC filing information.
+        Pay particular attention to:
+        - Any mentions of stock issuance, buybacks, or changes in capital structure.
+        - Major operational changes, strategic shifts, or significant events (e.g., acquisitions, litigation, product failures/successes).
+        - Any forward-looking statements that imply significant financial impact.
+        - Important financial performance highlights (positive or negative trends).
+
+        Provide a concise summary (max 250 words) and identify any clear implications for the stock. If no significant events related to stock movement are found, state that.
+
+        SEC Filings:
+        """ + "\n---\n".join(content_for_llm) + "\n---"
+
+        summary = "Could not generate summary."
+        llm_err = None
+
+        try:
+            resp = self.client.generate(prompt).strip()
+            if resp.startswith("Error:"):
+                llm_err = resp
+            else:
+                summary = resp
+        except Exception as e:
+            llm_err = f"LLM SEC summary call failed: {str(e)[:150]}"
+        
+        return {
+            "ticker": ticker,
+            "sec_summary_llm": summary,
+            "sec_summary_error": llm_err
+        }
+
+
 class InstitutionalHoldingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
         holdings, err = data.get("institutional_holdings",[]), None
@@ -957,9 +929,17 @@ class InstitutionalHoldingsAgent:
                 except Exception as e: err = f"Error processing inst holdings: {e}"
             elif not err: err = "No valid inst holdings."
         sig = "hold"
-        if total_pct > 0.50: sig = "buy"
-        elif total_pct < 0.05 and num_h > 0: sig = "sell"
-        return {"ticker":ticker, "inst_num_holders":num_h, "inst_total_shares_held":int(total_s), "inst_total_pct_out":float(total_pct), "inst_holdings_signal":sig, "inst_holdings_error":err, "inst_top_holders":top_h}
+        # Adjusted thresholds for institutional signal
+        if total_pct > 0.60: sig = "buy" # Increased concentration implies stronger conviction
+        elif total_pct < 0.10 and num_h > 0: sig = "sell" # Low institutional interest can be a negative
+        # Add a confidence score to institutional holdings
+        inst_confidence_score = 0.0
+        if total_pct > 0.75: inst_confidence_score = 0.8
+        elif total_pct > 0.60: inst_confidence_score = 0.5
+        elif total_pct < 0.05 and num_h > 0: inst_confidence_score = -0.8
+        elif total_pct < 0.10 and num_h > 0: inst_confidence_score = -0.5
+
+        return {"ticker":ticker, "inst_num_holders":num_h, "inst_total_shares_held":int(total_s), "inst_total_pct_out":float(total_pct), "inst_holdings_signal":sig, "inst_holdings_error":err, "inst_top_holders":top_h, "inst_confidence_score": float(inst_confidence_score)}
 
 class PoliticianFilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
@@ -973,10 +953,21 @@ class PoliticianFilingsAgent:
                     if trade.get("transaction_type")=="purchase": net_val += val; buys +=1
                     elif trade.get("transaction_type")=="sale": net_val -= val; sells +=1
         sig = "hold"
+        # Enhanced signal for politician trades
+        politician_confidence = 0.0
         if not err:
-            if buys > sells and buys > 1: sig = "buy"
-            elif sells > buys and sells > 1: sig = "sell"
-        return {"ticker":ticker, "politician_net_trade_value_estimate":net_val, "politician_buy_tx_count":buys, "politician_sell_tx_count":sells, "politician_filings_signal":sig, "politician_data_error":err}
+            if buys > sells and buys >= 2 and net_val > 50000: # At least 2 buys, and significant value
+                sig = "buy"; politician_confidence = 0.6
+            elif sells > buys and sells >= 2 and net_val < -50000: # At least 2 sells, and significant value
+                sig = "sell"; politician_confidence = -0.6
+            elif buys > sells and buys >= 1: # Smaller buy signal
+                sig = "hold" # Or weak buy if you want
+                politician_confidence = 0.1
+            elif sells > buys and sells >= 1: # Smaller sell signal
+                sig = "hold" # Or weak sell
+                politician_confidence = -0.1
+        
+        return {"ticker":ticker, "politician_net_trade_value_estimate":net_val, "politician_buy_tx_count":buys, "politician_sell_tx_count":sells, "politician_filings_signal":sig, "politician_data_error":err, "politician_confidence_score": float(politician_confidence)}
 
 class ValueInvestingIOAgent:
     def run(self, ticker: str, data: dict) -> dict:
@@ -985,28 +976,102 @@ class ValueInvestingIOAgent:
         sig = "hold"; curr_pyf_val = data.get("ticker_info",{}).get("currentPrice")
         if curr_pyf_val is None and data.get("price_history") is not None and not data["price_history"].empty: curr_pyf_val = data["price_history"].Close.iloc[-1]
         curr_pyf = float(curr_pyf_val) if isinstance(curr_pyf_val,(int,float)) and curr_pyf_val > 0 else None
+        
+        vi_confidence_score = 0.0
         if not err and fv is not None and curr_pyf is not None:
-            mos = 0.15
+            mos = 0.15 # Margin of safety
             if up_pct is not None:
-                if up_pct > (mos*100+5): sig="buy"
-                elif up_pct < -(mos*100+5): sig="sell"
-            else:
-                if curr_pyf < fv*(1-mos): sig="buy"
-                elif curr_pyf > fv*(1+mos): sig="sell"
-        return {"ticker":ticker, "vi_fair_value_estimate":fv, "vi_site_market_price":site_mp, "vi_upside_percent":up_pct, "vi_valuation_date":val_date, "vi_valuation_text_display":text, "vi_signal":sig, "vi_data_error":err}
+                if up_pct > (mos*100+5): # e.g., > 20% upside
+                    sig="buy"; vi_confidence_score = 0.8
+                elif up_pct < -(mos*100+5): # e.g., > 20% downside
+                    sig="sell"; vi_confidence_score = -0.8
+                elif up_pct > mos*100: # e.g., > 15% upside
+                    sig="buy"; vi_confidence_score = 0.5
+                elif up_pct < -mos*100: # e.g., > 15% downside
+                    sig="sell"; vi_confidence_score = -0.5
+            else: # Fallback using just fair value vs current price
+                if curr_pyf < fv*(1-mos):
+                    sig="buy"; vi_confidence_score = 0.6
+                elif curr_pyf > fv*(1+mos):
+                    sig="sell"; vi_confidence_score = -0.6
+        
+        return {"ticker":ticker, "vi_fair_value_estimate":fv, "vi_site_market_price":site_mp, "vi_upside_percent":up_pct, "vi_valuation_date":val_date, "vi_valuation_text_display":text, "vi_signal":sig, "vi_data_error":err, "vi_confidence_score": float(vi_confidence_score)}
+
 
 class PortfolioAgent:
-    WEIGHTS = {"price":1.0, "momentum":0.8, "volatility":0.3, "sentiment":0.6, "fund":0.9, "valuation_dcf":0.5, "valuation_pe":0.5, "sec_filings":0.6, "inst_holdings":0.3, "analyst":0.7, "politician_filings":0.4, "vi_signal":0.8}
+    # Adjusted weights to better reflect potential impact
+    WEIGHTS = {
+        "price": 1.0,        # Technical signals are often primary
+        "momentum": 0.8,     # Strong indicator for short-to-medium term
+        "volatility": 0.2,   # Risk management, less direct signal
+        "sentiment": 0.7,    # News sentiment can move markets quickly
+        "fund": 0.9,         # Fundamental health is crucial long-term
+        "valuation_dcf": 0.6, # DCF is a strong theoretical valuation but sensitive to assumptions
+        "valuation_pe": 0.4, # PE relative valuation is simpler, widely used
+        "sec_filings": 0.6,  # Insider activity is significant
+        "sec_summary": 0.7,  # LLM summary of major filings can be very impactful
+        "inst_holdings": 0.3, # Institutional shifts are slow, but important
+        "analyst": 0.5,      # Analyst ratings are priced in quickly, but good confirmation
+        "politician_filings": 0.2, # Interesting, but often less direct impact on stock
+        "vi_signal": 0.8     # Third-party valuation can be a strong independent signal
+    }
+
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
         curr_w, total_score, sum_w, agg_s = agent_weights or self.WEIGHTS, 0,0,{}
         for s_dict in signals:
-            if isinstance(s_dict,dict): agg_s.update(s_dict)
-        s_map = {"price_signal":"price", "momentum_signal":"momentum", "volatility_signal":"volatility", "sentiment_signal":"sentiment", "fund_signal":"fund", "dcf_signal":"valuation_dcf", "relative_pe_signal":"valuation_pe", "sec_filings_signal":"sec_filings", "inst_holdings_signal":"inst_holdings", "analyst_signal":"analyst", "politician_filings_signal":"politician_filings", "vi_signal":"vi_signal"}
-        for s_key, w_key in s_map.items():
-            s_val, w = agg_s.get(s_key), curr_w.get(w_key,0)
-            if s_val and w > 0 and s_val in ["buy","hold","sell"]:
+            if isinstance(s_dict): agg_s.update(s_dict)
+        
+        # Mapping signals to their corresponding weights and confidence scores (if available)
+        s_map = {
+            "price_signal": ("price", "price_confidence_score"),
+            "momentum_signal": ("momentum", "momentum_confidence_score"),
+            "volatility_signal": ("volatility", "volatility_confidence_score"),
+            "sentiment_signal": ("sentiment", "sentiment_confidence_score"),
+            "fund_signal": ("fund", None), # No direct confidence score for fundamentals in current output
+            "dcf_signal": ("valuation_dcf", None),
+            "relative_pe_signal": ("valuation_pe", None),
+            "sec_filings_signal": ("sec_filings", None),
+            # New signal keys for SEC Summary, Institutional Holdings, Politician Filings, VI.io
+            "sec_summary_llm": ("sec_summary", None), # We will infer a score from summary later or assign a default weight
+            "inst_holdings_signal": ("inst_holdings", "inst_confidence_score"),
+            "analyst_signal": ("analyst", None),
+            "politician_filings_signal": ("politician_filings", "politician_confidence_score"),
+            "vi_signal": ("vi_signal", "vi_confidence_score")
+        }
+
+        for s_key, (w_key, conf_key) in s_map.items():
+            s_val = agg_s.get(s_key)
+            w = curr_w.get(w_key, 0)
+            
+            # Special handling for SEC Summary if it's a text summary, or use default signal value
+            if s_key == "sec_summary_llm" and s_val and w > 0:
+                # LLM outputting a summary, not a direct signal. We need to infer a score or just use the weight.
+                # For simplicity in this simulator, we will treat its presence (and lack of error) as a neutral-to-positive factor if it exists.
+                # A more advanced version would ask the LLM for a sentiment score from its own summary.
+                # For now, let's assume if it exists and is not an error, it contributes a small positive or neutral effect.
+                if "negative" in s_val.lower() and "no significant events" not in s_val.lower():
+                    raw_score = -0.5 # Infer negative if summary contains negative words
+                elif "positive" in s_val.lower() and "no significant events" not in s_val.lower():
+                    raw_score = 0.5 # Infer positive
+                else:
+                    raw_score = 0.1 # Small positive contribution for having a summary (implies data was there)
+                total_score += raw_score * w
+                sum_w += w
+            elif s_val and w > 0 and s_val in ["buy", "hold", "sell"]:
                 raw_score = {"buy":1, "hold":0, "sell":-1}.get(s_val,0)
-                total_score += raw_score*w; sum_w += w
+                
+                # Incorporate confidence score from agents if available
+                if conf_key and pd.notna(agg_s.get(conf_key)):
+                    agent_confidence = agg_s.get(conf_key)
+                    # Adjust raw_score by agent_confidence. E.g., if agent_confidence is 0.8 and raw_score is 1 (buy),
+                    # it could be 1 * 0.8. If raw_score is -1 (sell) and confidence is 0.8, it's -1 * 0.8.
+                    # This amplifies strong signals and dampens weak ones.
+                    total_score += (raw_score * agent_confidence) * w
+                    sum_w += w * agent_confidence # Weight sum by confidence too
+                else:
+                    total_score += raw_score * w
+                    sum_w += w
+
         comp_score = (total_score/sum_w) if sum_w else 0.0
         decision = "buy" if comp_score > 0.15 else ("sell" if comp_score < -0.15 else "hold")
         return {"ticker":ticker, "composite_score":comp_score, "final_decision":decision}
@@ -1022,16 +1087,18 @@ class AITraderAgent:
 
         co_name = analysis.get('ticker_info', {}).get('longName', ticker)
         score = analysis.get('composite_score', 0)
-        summary = analysis.get('news_summary', 'No summary available.')
+        news_summary = analysis.get('news_summary', 'No news summary available.')
+        sec_summary = analysis.get('sec_summary_llm', 'No SEC filing summary available.')
 
         prompt = f"""
         As an AI Portfolio Manager, you have decided to '{decision.upper()}' shares of {co_name} ({ticker}).
         The composite analysis score was {score:.2f}.
-        The latest news summary is: "{summary}"
+        Here is a summary of recent news: "{news_summary}"
+        Here is a summary of recent SEC filings: "{sec_summary}"
 
-        Based on this, provide a single, concise sentence explaining the reason for this trade.
-        Example: "Initiating a position due to strong positive sentiment and a bullish analyst rating."
-        Example: "Selling to lock in profits after a significant run-up and weakening momentum signals."
+        Based on this, provide a single, concise sentence explaining the primary reason(s) for this trade.
+        Example: "Initiating a position due to strong positive news sentiment, bullish analyst ratings, and insider buying activity."
+        Example: "Selling to reduce exposure after a significant price run-up, weakening momentum signals, and recent negative SEC filing disclosures."
 
         Generate the reason for the {decision.upper()} decision now:
         """
@@ -1046,7 +1113,8 @@ class AITraderAgent:
         info = analysis.get("ticker_info", {})
         market_cap = info.get("marketCap", 0)
         beta = info.get("beta", 1.0)
-        return isinstance(market_cap, (int, float)) and market_cap > 100e9 and isinstance(beta, (int, float)) and beta < 1.2
+        # Define "safe" as Mega-cap (>$200B) and low beta (<1.0)
+        return isinstance(market_cap, (int, float)) and market_cap > 200e9 and isinstance(beta, (int, float)) and beta < 1.0
 
     def run(self, portfolio_state: dict, analysis_results: dict):
         trades_to_make = []
@@ -1054,10 +1122,13 @@ class AITraderAgent:
         holdings = list(portfolio_state['holdings'])
 
         tickers_in_portfolio = {h['ticker'] for h in holdings}
+        
+        # First, process sells (liquidate positions based on AI signal)
+        # Iterate in reverse to safely remove items from a list while iterating
         for i, holding in reversed(list(enumerate(holdings))):
             ticker = holding['ticker']
             if ticker not in analysis_results or analysis_results[ticker].get('error'):
-                continue
+                continue # Skip if no analysis results or there was an error
 
             analysis = analysis_results[ticker]
             if analysis.get('final_decision') == 'sell':
@@ -1068,9 +1139,10 @@ class AITraderAgent:
                         "ticker": ticker, "type": "sell", "quantity": holding['quantity'],
                         "price": price, "reason": reason
                     })
-                    cash += holding['quantity'] * price
-                    holdings.pop(i)
+                    cash += holding['quantity'] * price # Add cash from sale
+                    holdings.pop(i) # Remove holding from portfolio
 
+        # Calculate current portfolio value after sells for rebalancing
         current_holdings_value = 0
         for h in holdings:
             price = analysis_results.get(h['ticker'], {}).get('current_price_display')
@@ -1078,9 +1150,11 @@ class AITraderAgent:
                 current_holdings_value += h['quantity'] * price
         total_portfolio_value = cash + current_holdings_value
 
+        # Set target allocation values based on total portfolio value
         target_safe_value = total_portfolio_value * 0.60
         target_risky_value = total_portfolio_value * 0.40
 
+        # Calculate current values of safe and risky holdings
         current_safe_value, current_risky_value = 0, 0
         for h in holdings:
             analysis = analysis_results.get(h['ticker'])
@@ -1093,43 +1167,59 @@ class AITraderAgent:
                     else:
                         current_risky_value += value
 
+        # Process buys (allocate remaining cash based on AI signal and portfolio balance)
         buy_candidates = sorted(
-            [res for res in analysis_results.values() if res.get('final_decision') == 'buy' and res.get('ticker') not in tickers_in_portfolio and not res.get('error')],
-            key=lambda x: x.get('composite_score', 0), reverse=True
+            [res for res in analysis_results.values() 
+             if res.get('final_decision') == 'buy' 
+             and res.get('ticker') not in tickers_in_portfolio # Don't buy what's already held (for simplicity, avoid averaging in)
+             and not res.get('error')],
+            key=lambda x: x.get('composite_score', 0), reverse=True # Prioritize highest composite scores
         )
-
-        investment_per_stock = cash * 0.25
-        if investment_per_stock < 500 and cash > 500:
-            investment_per_stock = 500
+        
+        # Define a base investment size. You could make this a parameter.
+        # This prevents buying tiny fractions of shares and ensures enough cash for multiple trades.
+        # Ensure minimum investment per stock is not too small
+        MIN_INVESTMENT_PER_STOCK = 200
+        investment_per_stock = max(MIN_INVESTMENT_PER_STOCK, cash * 0.20) # Try to invest up to 20% of cash per stock
 
         for candidate in buy_candidates:
-            if cash < investment_per_stock or investment_per_stock <= 1:
+            if cash < MIN_INVESTMENT_PER_STOCK: # Stop if not enough cash left for even a minimum trade
                 break
 
             price = candidate.get('current_price_display')
             if not isinstance(price, (int, float)) or price <= 0:
                 continue
 
+            # Determine category (safe/risky) for allocation
             is_safe_candidate = self._is_safe(candidate)
+            
+            # Determine if this category needs more allocation
             should_buy = False
             if is_safe_candidate and current_safe_value < target_safe_value:
                 should_buy = True
+                # Adjust investment amount to fill the gap, but not exceed available cash
+                investment_amount = min(investment_per_stock, target_safe_value - current_safe_value, cash)
             elif not is_safe_candidate and current_risky_value < target_risky_value:
                 should_buy = True
+                # Adjust investment amount
+                investment_amount = min(investment_per_stock, target_risky_value - current_risky_value, cash)
+            else:
+                # If allocation is already met for this category, or it doesn't fit criteria
+                continue 
 
-            if should_buy:
-                quantity_to_buy = investment_per_stock / price
+            if should_buy and investment_amount > price: # Ensure we can buy at least one share
+                quantity_to_buy = investment_amount / price
                 reason = self._generate_trade_reason(candidate['ticker'], 'buy', candidate)
                 trades_to_make.append({
                     "ticker": candidate['ticker'], "type": "buy", "quantity": quantity_to_buy,
                     "price": price, "reason": reason
                 })
-                cash -= investment_per_stock
+                cash -= investment_amount # Deduct the allocated investment amount
                 if is_safe_candidate:
-                    current_safe_value += investment_per_stock
+                    current_safe_value += investment_amount
                 else:
-                    current_risky_value += investment_per_stock
-                tickers_in_portfolio.add(candidate['ticker'])
+                    current_risky_value += investment_amount
+                tickers_in_portfolio.add(candidate['ticker']) # Add to set to avoid re-buying in the same run
 
         return trades_to_make
 
@@ -1137,13 +1227,25 @@ class AITraderAgent:
 def run_live_analysis(tickers, llm_client, configs):
     results = {}
     progress_bar = st.progress(0, text="Starting analysis...")
+    
+    # Define a default set of backtest weights for live analysis detail
+    default_live_backtest_weights = {
+        "price": 1.0, "momentum": 0.8, "volatility": 0.3, 
+        "sentiment": 0., "fund": 0., "valuation_dcf": 0., "valuation_pe": 0.,
+        "sec_filings": 0., "sec_summary": 0., # Ensure sec_summary is included if we add it to the composite
+        "inst_holdings": 0., "analyst": 0.,
+        "politician_filings": 0., "vi_signal": 0.
+    }
+
     for i, t in enumerate(tickers):
         progress_text = f"Analyzing {t}... ({i+1}/{len(tickers)})"
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
-        # st.write(f"▶️ Running analysis for {t}...") # Optional: uncomment for verbose logging
+        
         price_history_full = fetch_price_history(t, period="max")
         if price_history_full.empty:
-            results[t] = {"error": f"Price history unavailable for {t}.", "ticker": t, "final_decision":"error", "composite_score":0}; continue
+            results[t] = {"error": f"Price history unavailable for {t}. This may be due to an invalid ticker, a delisted stock, or a temporary issue with data providers.", "ticker": t, "final_decision":"error", "composite_score":0}
+            continue
+
         ticker_info = fetch_ticker_info(t)
         if not ticker_info or not ticker_info.get("financialCurrency"):
             err_msg = f"Core ticker info (e.g., currency) unavailable for {t}. Invalid/delisted/no yfinance data."
@@ -1181,8 +1283,11 @@ def run_live_analysis(tickers, llm_client, configs):
         agents = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()]
         if configs["use_sentiment"] and llm_client: agents.extend([SentimentAgent(llm_client), NewsSummaryAgent(llm_client)])
         if configs["use_filings"]: agents.extend([SECFilingAgent(), InstitutionalHoldingsAgent()])
+        # Add SECSummaryAgent if LLM is available and filings are used
+        if configs["use_filings"] and llm_client: agents.append(SECSummaryAgent(llm_client))
         if configs["use_politician_filings"]: agents.append(PoliticianFilingsAgent())
         if configs["use_value_trades"]: agents.append(ValueInvestingIOAgent())
+        
         agent_res_list = []
         for agent in agents:
             name = agent.__class__.__name__
@@ -1193,15 +1298,31 @@ def run_live_analysis(tickers, llm_client, configs):
                 agent_res_list.append(res_a)
             except Exception as e:
                 err_k, sig_k = name.lower().replace("agent","")+"_error", name.lower().replace("agent","")+"_signal"
-                agent_res_list.append({sig_k:"error", err_k:f"Agent {name} error: {str(e)[:150]}"}); st.warning(f"Error in {name} for {t}: {e}")
+                # For SECSummaryAgent, the signal is not a simple 'buy/sell/hold', so default to 'error' message for now
+                if name == "SECSummaryAgent":
+                     agent_res_list.append({"sec_summary": f"Error during summary: {str(e)[:150]}", "sec_summary_error":f"Agent {name} error: {str(e)[:150]}"})
+                else:
+                    agent_res_list.append({sig_k:"error", err_k:f"Agent {name} error: {str(e)[:150]}"}); st.warning(f"Error in {name} for {t}: {e}")
+        
         final_dec = PortfolioAgent().run(t, agent_res_list)
         curr_res_dict = {"ticker":t, "current_price_display":current_price_for_ticker, "market_cap_display":ticker_info.get("marketCap"), "industry_display":ticker_info.get("industry"), "sector_display":ticker_info.get("sector"), "ticker_info":ticker_info,
                              "news_headlines_for_popover":[f"{n.get('publish_time_readable','N/A')} - {n.get('title','N/A')} ({n.get('publisher','N/A')} via {n.get('source_api','Unk')}) [Link]({n.get('link','#')})" + (f" - {n.get('content_snippet',n.get('description',''))[:150]}..." if n.get('content_snippet') or n.get('description') else "") for n in dedup_news[:10]],
                              "politician_trades_for_popover":[pt for pt in data_bundle["politician_trades"][:5] if isinstance(pt,dict) and "error" not in pt],
                              "news_status_display":news_status_bundle}
+        
         for r_dict in agent_res_list:
             if isinstance(r_dict,dict): curr_res_dict.update(r_dict)
-        curr_res_dict.update(final_dec); results[t] = curr_res_dict
+        curr_res_dict.update(final_dec)
+        
+        # --- Run simulated backtest for the ticker within Live Analysis ---
+        bt_end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        bt_start_date = (datetime.now() - pd.DateOffset(years=1, days=1)).strftime("%Y-%m-%d") # 1 year back
+        initial_capital_for_sim_bt = 10000 # Fixed capital for this quick backtest
+        
+        sim_bt_metrics, sim_bt_log_df = run_backtest(t, bt_start_date, bt_end_date, initial_capital_for_sim_bt, llm_client, default_live_backtest_weights)
+        curr_res_dict["simulated_backtest_results"] = {"metrics": sim_bt_metrics, "log_df": sim_bt_log_df.to_dict('records') if not sim_bt_log_df.empty else []}
+
+        results[t] = curr_res_dict
     progress_bar.empty()
     return results
 
@@ -1242,12 +1363,19 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     log_df["cum_max"] = log_df.portfolio_value.cummax(); log_df["drawdown"] = (log_df.portfolio_value - log_df.cum_max)/log_df.cum_max.replace(0,np.nan)
     max_dd = log_df.drawdown.min()*100 if not log_df.drawdown.empty and pd.notna(log_df.drawdown.min()) else 0
     trades = (log_df.signal != log_df.signal.shift()).fillna(False).sum()//2
-    return {"Initial Capital":f"${initial_capital:,.2f}", "Final Portfolio Value":f"${log_df.portfolio_value.iloc[-1]:,.2f}", "Total Return (%)":f"{total_ret:.2f}%", "Annualized Return (%)":f"{ann_ret:.2f}%", "Annualized Volatility (%)":f"{ann_vol:.2f}%", "Sharpe Ratio":f"{sharpe:.2f}", "Max Drawdown (%)":f"{max_dd:.2f}%", "Number of Trades (approx)":f"{trades}"}, log_df
+    
+    # Calculate Buy and Hold return
+    buy_hold_value = hist["Close"].iloc[-1] / hist["Close"].iloc[0] * initial_capital if not hist.empty and hist["Close"].iloc[0] != 0 else initial_capital
+    buy_hold_ret = (buy_hold_value / initial_capital - 1) * 100 if initial_capital != 0 else 0
+
+    return {"Initial Capital":f"${initial_capital:,.2f}", "Final Portfolio Value":f"${log_df.portfolio_value.iloc[-1]:,.2f}", "Total Return (%)":f"{total_ret:.2f}%", "Buy & Hold Return (%)":f"{buy_hold_ret:.2f}%", "Annualized Return (%)":f"{ann_ret:.2f}%", "Annualized Volatility (%)":f"{ann_vol:.2f}%", "Sharpe Ratio":f"{sharpe:.2f}", "Max Drawdown (%)":f"{max_dd:.2f}%", "Number of Trades (approx)":f"{trades}"}, log_df
 
 # --- Detailed Analysis Display Function ---
 def display_detailed_analysis(res_detail):
     ticker = res_detail.get("ticker", "N/A"); ticker_info = res_detail.get("ticker_info", {})
-    tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals"]
+    
+    # Add new tab for Simulated Backtest
+    tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals", "🧪 Simulated Backtest"]
     tabs = st.tabs(tab_titles)
 
     def get_signal_color(signal):
@@ -1315,49 +1443,170 @@ def display_detailed_analysis(res_detail):
         st.subheader("News Analysis & Filings")
         if res_detail.get('news_summary'):
             with st.container(border=True):
-                st.markdown("**AI-Generated News Summary**"); st.write(res_detail.get('news_summary'))
+                st.markdown("**AI-Generated News Summary (from news articles)**"); st.write(res_detail.get('news_summary'))
                 headlines = res_detail.get('news_headlines_for_popover', [])
                 if headlines:
-                    with st.popover("View News Sources & Links"):
+                    with st.expander("View News Sources & Links"): # Changed from popover for more persistent view
                         for line in headlines: st.markdown(f"- {line}")
                 if res_detail.get('sentiment_error'): st.warning(f"Sentiment Analysis Note: {res_detail.get('sentiment_error')}")
+        
+        # New section for LLM-powered SEC Summary
+        st.markdown("---")
+        if res_detail.get('sec_summary_llm'):
+            with st.container(border=True):
+                st.markdown("**AI-Generated SEC Filings Summary**"); st.write(res_detail.get('sec_summary_llm'))
+                if res_detail.get('sec_summary_error'): st.warning(f"SEC Summary Note: {res_detail.get('sec_summary_error')}")
+        else:
+            if res_detail.get('sec_summary_error'): # Show only error if no summary was produced
+                 st.warning(f"Could not generate SEC Filings Summary: {res_detail.get('sec_summary_error')}")
+            else: # No error but no summary, likely no relevant filings
+                 st.info("No relevant SEC filings found or processed for summary.")
+
         file_col1, file_col2 = st.columns(2)
         with file_col1:
-            st.markdown("**SEC Filings**"); st.metric("Insider Signal", str(res_detail.get('sec_filings_signal', 'hold')).upper())
-            with st.popover("View Recent Filings"):
-                filings = res_detail.get('sec_other_recent_filings', [])
-                if filings:
-                    for f in filings: st.write(f"**{f.get('filing_date')}**: Form {f.get('form_type')} - [Link]({f.get('summary_link')})")
-                else: st.info("No recent SEC filings found.")
+            st.markdown("**Insider Trading (Form 4 Filings)**") # More specific heading
+            sec_signal = str(res_detail.get('sec_filings_signal', 'hold')).upper()
+            st.metric("Insider Trading Signal", sec_signal)
+            st.markdown(f"""
+                <div style="font-size: 14px;">
+                    <li><b>Net Insider Shares (1Y):</b> {res_detail.get('sec_net_insider_shares_1y', 0):,}</li>
+                    <li><b>Insider Buys (1Y Value):</b> ${res_detail.get('sec_insider_buy_value_1y', 0):,.2f}</li>
+                    <li><b>Insider Sells (1Y Value):</b> ${res_detail.get('sec_insider_sell_value_1y', 0):,.2f}</li>
+                </div>
+            """, unsafe_allow_html=True)
+            with st.expander("View Recent Insider Transactions (Form 4s)"): # Changed from popover
+                form4_txns = res_detail.get('sec_recent_form4_transactions', [])
+                if form4_txns:
+                    for tx in form4_txns:
+                        tx_type_display = "Bought" if tx.get("transaction_code") == "P" else "Sold"
+                        price_display = f" @ ${tx.get('price_per_share'):,.2f}" if tx.get('price_per_share') else ""
+                        st.write(f"**{tx.get('transaction_date')}**: {tx.get('reporting_owner')} ({tx.get('owner_relationship')}) {tx_type_display} {tx.get('shares'):,.0f} shares{price_display} - [Link]({tx.get('link_to_filing')})")
+                else:
+                    st.info("No recent Form 4 insider transactions found.")
+            with st.expander("View Other Recent SEC Filings (Metadata only)"): # Changed from popover
+                other_filings_meta = [f for f in res_detail.get('sec_other_recent_filings', []) if f.get("form_type") not in ['10-K', '10-Q', '8-K']] # Exclude forms summarized by LLM here
+                if other_filings_meta:
+                    for f in other_filings_meta: st.write(f"**{f.get('filing_date')}**: Form {f.get('form_type')} - [Link]({f.get('summary_link')})")
+                else: st.info("No other relevant SEC filings metadata found.")
+
         with file_col2:
-            st.markdown("**Institutional Holdings**"); st.metric("Institutional Signal", str(res_detail.get('inst_holdings_signal', 'hold')).upper())
-            with st.popover("View Top 10 Institutional Holders"):
-                holders = res_detail.get('inst_top_holders', [])
-                if holders:
+            st.markdown("**Institutional Holdings**")
+            inst_signal = str(res_detail.get('inst_holdings_signal', 'hold')).upper()
+            st.metric("Institutional Ownership Signal", inst_signal)
+            st.markdown(f"""
+                <div style="font-size: 14px;">
+                    <li><b>Total Holders:</b> {res_detail.get('inst_num_holders', 0):,}</li>
+                    <li><b>Total Shares Held:</b> {res_detail.get('inst_total_shares_held', 0):,}</li>
+                    <li><b>% of Outstanding:</b> {res_detail.get('inst_total_pct_out', 0.0) * 100:.2f}%</li>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            holders = res_detail.get('inst_top_holders', [])
+            if holders:
+                holders_df = pd.DataFrame(holders)
+                if not holders_df.empty and 'Holder' in holders_df.columns and 'Shares' in holders_df.columns:
+                    # Limit to top N for pie chart if many holders, or just use all if few
+                    top_n_holders = holders_df.nlargest(5, 'Shares') if len(holders_df) > 5 else holders_df
+                    chart = alt.Chart(top_n_holders).mark_arc(outerRadius=120).encode(
+                        theta=alt.Theta(field="Shares", type="quantitative"),
+                        color=alt.Color(field="Holder", type="nominal", title="Top Holders"),
+                        order=alt.Order("Shares", sort="descending"),
+                        tooltip=["Holder", "Shares", alt.Tooltip("% Out", format=".1%")]
+                    ).properties(
+                        title="Top Institutional Holders (by Shares)"
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+
+                with st.expander("View All Top Institutional Holders"): # Changed from popover
                     df_holders = pd.DataFrame(holders)
                     df_holders = df_holders.rename(columns={"% Out":"% of Outstanding"})
-                    available_cols = [col for col in ["Holder", "Shares", "% of Outstanding"] if col in df_holders.columns]
+                    available_cols = [col for col in ["Holder", "Shares", "% of Outstanding", "Date Reported"] if col in df_holders.columns]
                     column_config = {}
                     if "% of Outstanding" in df_holders.columns:
                         column_config["% of Outstanding"] = st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=max(0.10, df_holders["% of Outstanding"].max()))
                     st.dataframe(df_holders[available_cols], column_config=column_config, hide_index=True, use_container_width=True)
-                else: st.info("No institutional holder data available.")
+            else:
+                st.info("No institutional holder data available.")
 
-    with tabs[4]:
+        # Politician Filings (moved into main column from popover)
+        st.markdown("---")
+        st.subheader("Politician Trading Activity")
+        politician_signal = str(res_detail.get('politician_filings_signal', 'hold')).upper()
+        st.metric("Politician Trading Signal", politician_signal)
+        st.markdown(f"""
+            <div style="font-size: 14px;">
+                <li><b>Net Estimated Value:</b> ${res_detail.get('politician_net_trade_value_estimate', 0):,.2f}</li>
+                <li><b>Buy Transactions:</b> {res_detail.get('politician_buy_tx_count', 0)}</li>
+                <li><b>Sell Transactions:</b> {res_detail.get('politician_sell_tx_count', 0)}</li>
+            </div>
+        """, unsafe_allow_html=True)
+        if res_detail.get('politician_data_error'):
+            st.warning(f"Politician Data Note: {res_detail.get('politician_data_error')}")
+        else:
+            with st.expander("View Recent Politician Trades"):
+                poli_trades = res_detail.get('politician_trades_for_popover', [])
+                if poli_trades:
+                    for trade in poli_trades:
+                        st.write(f"**{trade.get('date_str')}**: {trade.get('politician_name')} {trade.get('transaction_type').capitalize()} {trade.get('value_range')} - [Link]({trade.get('source_url')})")
+                else:
+                    st.info("No recent politician trades found.")
+
+    with tabs[4]: # All Signals
         st.subheader("All Agent Signals at a Glance")
-        signals_data = {"Price Signal (SMA/RSI)": str(res_detail.get("price_signal","N/A")).upper(), "Momentum Signal": str(res_detail.get("momentum_signal","N/A")).upper(), "Volatility Signal": str(res_detail.get("volatility_signal","N/A")).upper(), "Fundamental Signal": str(res_detail.get("fund_signal","N/A")).upper(), "Analyst Signal": str(res_detail.get("analyst_signal","N/A")).upper(), "ValueInvesting.io Signal": str(res_detail.get("vi_signal","N/A")).upper(), "News Sentiment Signal": str(res_detail.get("sentiment_signal","N/A")).upper(), "SEC Filings Signal": str(res_detail.get("sec_filings_signal","N/A")).upper(), "Institutional Signal": str(res_detail.get("inst_holdings_signal","N/A")).upper()}
+        signals_data = {
+            "Price Signal (SMA/RSI)": str(res_detail.get("price_signal","N/A")).upper(),
+            "Momentum Signal": str(res_detail.get("momentum_signal","N/A")).upper(),
+            "Volatility Signal": str(res_detail.get("volatility_signal","N/A")).upper(),
+            "Fundamental Signal": str(res_detail.get("fund_signal","N/A")).upper(),
+            "Analyst Signal": str(res_detail.get("analyst_signal","N/A")).upper(),
+            "ValueInvesting.io Signal": str(res_detail.get("vi_signal","N/A")).upper(),
+            "News Sentiment Signal": str(res_detail.get("sentiment_signal","N/A")).upper(),
+            "SEC Insider Trading Signal": str(res_detail.get("sec_filings_signal","N/A")).upper(), # Specific name
+            "SEC Filings Summary (LLM)": "Generated" if res_detail.get("sec_summary_llm") and not res_detail.get("sec_summary_error") else "N/A (Error)" if res_detail.get("sec_summary_error") else "Skipped/No Data", # New entry
+            "Institutional Signal": str(res_detail.get("inst_holdings_signal","N/A")).upper(),
+            "Politician Filings Signal": str(res_detail.get("politician_filings_signal","N/A")).upper() # New entry
+        }
         df_signals = pd.DataFrame(signals_data.items(), columns=["Agent", "Signal"])
         st.dataframe(df_signals.style.applymap(lambda x: f'color: {get_signal_color(x)}', subset=['Signal']), hide_index=True, use_container_width=True)
         st.markdown("---")
         final_decision = str(res_detail.get('final_decision', 'hold')).upper(); final_color = get_signal_color(final_decision)
         st.markdown(f"""<div style="border:2px solid {final_color}; border-radius:8px; padding:15px; text-align:center;"><p style="font-size:1.2em; margin-bottom:5px;">Final AI Decision</p><h2 style="color:{final_color}; margin-bottom:5px;">{final_decision}</h2><p style="font-size:1em;">Composite Score: <strong>{res_detail.get('composite_score', 0):.2f}</strong></p></div>""", unsafe_allow_html=True)
+    
+    with tabs[5]: # New tab for Simulated Backtest
+        st.subheader(f"Simulated Backtest for {res_detail.get('ticker')}")
+        sim_bt_data = res_detail.get("simulated_backtest_results", {})
+        sim_bt_metrics = sim_bt_data.get("metrics")
+        sim_bt_log_df_raw = sim_bt_data.get("log_df")
+
+        if sim_bt_metrics and not (sim_bt_metrics.get("message") or sim_bt_metrics.get("error")):
+            st.markdown("This section shows a quick simulated backtest for the last year using the **Price, Momentum, and Volatility** agents with standard weights. This is a simplified simulation for quick insight, not a full backtest.")
+            metrics_df_sim_bt = pd.DataFrame.from_dict(sim_bt_metrics, orient='index', columns=['Value'])
+            st.table(metrics_df_sim_bt)
+            
+            if sim_bt_log_df_raw:
+                sim_bt_log_df = pd.DataFrame(sim_bt_log_df_raw)
+                if not sim_bt_log_df.empty and 'date' in sim_bt_log_df.columns:
+                    sim_bt_log_df['date'] = pd.to_datetime(sim_bt_log_df['date'])
+                    sim_bt_log_df.set_index("date", inplace=True)
+                    st.subheader("Portfolio Value Over Time (Simulated)"); st.line_chart(sim_bt_log_df["portfolio_value"])
+                    st.subheader("Drawdown Over Time (Simulated)"); st.area_chart(sim_bt_log_df["drawdown"].fillna(0))
+                else:
+                    st.warning("Simulated backtest log data is not in the expected format or is empty.")
+            else:
+                st.info("No log data available for simulated backtest.")
+        elif sim_bt_metrics:
+            st.error(f"Simulated Backtest Error: {sim_bt_metrics.get('error','Unknown error')}")
+        else:
+            st.info("Simulated backtest results not available for this ticker.")
+
 
 # --- Streamlit UI ---
 llm_client = None
 try:
-    ds_key, oa_key = st.secrets.get("DEEPSEEK_API_KEY"), st.secrets.get("OPENAI_API_KEY")
+    ds_key, oa_key = st.secrets.get("DEEPSEEK_API_KEY"), os.environ.get("OPENAI_API_KEY")
     if not ds_key: ds_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not oa_key: oa_key = os.environ.get("OPENAI_API_KEY")
+    if not oa_key: oa_key = st.secrets.get("OPENAI_API_KEY")
+
     if ds_key: llm_client = ModelClient(api_key=ds_key, provider="deepseek"); st.sidebar.caption("✅ LLM: DeepSeek")
     elif oa_key: llm_client = ModelClient(api_key=oa_key, provider="openai"); st.sidebar.caption("✅ LLM: OpenAI")
     else: st.sidebar.warning("LLM API key missing. Sentiment/Summary disabled.")
@@ -1372,7 +1621,6 @@ if 'app_mode' not in st.session_state:
     st.session_state.app_mode = app_mode_options[0]
 
 with config_cont:
-    # Logic to reset triggers if mode is changed
     current_mode_index = app_mode_options.index(st.session_state.app_mode)
     selected_mode = st.radio("Select Mode:", app_mode_options, key="app_mode_sel_main_key", horizontal=True, index=current_mode_index)
     if selected_mode != st.session_state.app_mode:
@@ -1394,22 +1642,29 @@ with config_cont:
         with feat_cols[1]:
             use_poli_live = st.checkbox("Politician Filings (Exp.)", value=False, key="live_poli_cb_main", help="Scrapes CapitolTrades. May be slow/unreliable.")
             use_valtrades_live = st.checkbox("ValueInvesting.io (Exp.)", value=False, key="live_vt_cb_main", help="Scrapes ValueInvesting.io. May be slow/unreliable.")
-        
+            # New checkbox for LLM SEC summary
+            use_sec_summary_live = st.checkbox("SEC Filings Summary (LLM)", value=bool(llm_client) and use_filings_live, disabled=not (llm_client and use_filings_live), key="live_sec_summary_cb", help="Uses LLM to summarize recent 10-K, 10-Q, 8-K filings. Requires LLM and 'SEC & Inst. Filings' to be enabled.")
+
         if st.button("🚀 Run Live Analysis", use_container_width=True, type="primary", key="run_live_analysis_button"):
             live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
             if not live_tickers:
                 st.error("Please enter at least one ticker.")
             else:
-                live_configs = {"use_sentiment":use_sent_live, "use_filings":use_filings_live, "use_politician_filings":use_poli_live, "use_value_trades":use_valtrades_live}
+                live_configs = {
+                    "use_sentiment":use_sent_live,
+                    "use_filings":use_filings_live,
+                    "use_politician_filings":use_poli_live,
+                    "use_value_trades":use_valtrades_live,
+                    "use_sec_summary":use_sec_summary_live # Pass new config
+                }
                 with st.spinner("⏳ Processing live analysis..."):
                     st.session_state.live_output = run_live_analysis(live_tickers, llm_client, live_configs)
-                    st.session_state.live_analysis_triggered = True # Set flag
+                    st.session_state.live_analysis_triggered = True
                     st.rerun()
 
     elif st.session_state.app_mode == "Backtesting":
         st.subheader("Backtesting Settings")
         st.session_state.bt_ticker = st.text_input("Ticker:", "AAPL", key="bt_ticker_in_bt").upper()
-        # ... (rest of backtesting config is the same)
         bt_capital_source = st.radio("Capital Source:", ("Manual Input", "From Saved Portfolio"), horizontal=True, key="bt_capital_source_radio")
         bt_capital = 10000
         if bt_capital_source == "Manual Input":
@@ -1419,7 +1674,12 @@ with config_cont:
             if not portfolio_names_bt: st.warning("No portfolios found.")
             else:
                 sel_pf_bt = st.selectbox("Select Portfolio to use its total value:", portfolio_names_bt, key="bt_pf_select")
-                # ... rest of logic
+                # Need to calculate current value of selected portfolio to use as initial capital
+                # This requires fetching live prices within this branch, which could be slow.
+                # For simplicity, we'll assume a fixed value or prompt user.
+                st.info("Using a fixed $10,000 for backtesting from saved portfolio. Live value fetching is not implemented here for performance.")
+                bt_capital = 10000 # Placeholder for actual portfolio value
+
         bt_c1, bt_c2 = st.columns(2)
         with bt_c1:
             def_end_dt = datetime.now()-timedelta(days=1); def_start_dt = def_end_dt-pd.DateOffset(years=3)
@@ -1429,11 +1689,16 @@ with config_cont:
             min_end_dt_bt = start_dt_in+timedelta(days=30)
             end_dt_in = st.date_input("End Date:", def_end_dt, min_value=min_end_dt_bt, max_value=datetime.now()-timedelta(days=1), key="bt_end_dt_bt")
             st.session_state.bt_end_str = end_dt_in.strftime("%Y-%m-%d")
-        
+            
         with st.expander("Adjust Backtest Agent Weights",expanded=False):
             w_p, w_m, w_v = st.slider("Price W:",0.,2.,1.,.1,key="bt_w_p_bt"), st.slider("Mom W:",0.,2.,.8,.1,key="bt_w_m_bt"), st.slider("Vol W:",0.,2.,.2,.1,key="bt_w_v_bt")
-            st.info("Other signals disabled in backtest.")
-            st.session_state.bt_weights = {"price":w_p, "momentum":w_m, "volatility":w_v, "sentiment":0.,"fund":0.,"valuation_dcf":0.,"valuation_pe":0.,"sec_filings":0.,"inst_holdings":0.,"analyst":0.,"politician_filings":0.,"vi_signal":0.}
+            st.info("Only Price, Momentum, and Volatility agents are used in backtesting for speed and simpler demonstration. Other signals are disabled.")
+            st.session_state.bt_weights = {
+                "price":w_p, "momentum":w_m, "volatility":w_v,
+                "sentiment":0.,"fund":0.,"valuation_dcf":0.,"valuation_pe":0.,
+                "sec_filings":0.,"sec_summary":0., # Explicitly set to 0 for backtest
+                "inst_holdings":0.,"analyst":0.,"politician_filings":0.,"vi_signal":0.
+            }
             st.session_state.bt_capital = bt_capital
 
         if st.button("📈 Run Backtest",use_container_width=True,type="primary",key="run_bt_btn_main"):
@@ -1441,22 +1706,18 @@ with config_cont:
                 with st.spinner(f"⏳ Running backtest for {st.session_state.bt_ticker}..."):
                     metrics, log_df = run_backtest(st.session_state.bt_ticker, st.session_state.bt_start_str, st.session_state.bt_end_str, st.session_state.bt_capital, llm_client, st.session_state.bt_weights)
                     st.session_state.backtest_results[st.session_state.bt_ticker] = {"metrics": metrics, "log_df": log_df}
-                    st.session_state.backtest_triggered = True # Set flag
+                    st.session_state.backtest_triggered = True
                     st.rerun()
 
     elif st.session_state.app_mode == "💼 Portfolio Management":
-        # This section remains self-contained and does not need a separate results area.
-        # The logic is unchanged.
         st.subheader("💼 Portfolio Management")
-        # --- Portfolio Selection ---
         portfolio_names_list = list(st.session_state.portfolios_data.keys())
 
         if not portfolio_names_list:
-            # Create a default portfolio if none exist
-            st.session_state.portfolios_data["My First Portfolio"] = {"holdings": [], "cash": 10000.0} # Initialize with cash
+            st.session_state.portfolios_data["My First Portfolio"] = {"holdings": []} # No initial cash here
             st.session_state.selected_portfolio_name = "My First Portfolio"
             save_portfolios(st.session_state.portfolios_data)
-            st.rerun() # Rerun to show the newly created portfolio
+            st.rerun()
 
         col_pf1, col_pf2, col_pf3 = st.columns([3, 1, 1])
 
@@ -1466,12 +1727,12 @@ with config_cont:
             index=portfolio_names_list.index(st.session_state.selected_portfolio_name) if st.session_state.selected_portfolio_name in portfolio_names_list else 0,
             key="portfolio_selector"
         )
-        current_portfolio = st.session_state.portfolios_data.get(st.session_state.selected_portfolio_name, {"holdings": [], "cash": 0.0})
+        current_portfolio = st.session_state.portfolios_data.get(st.session_state.selected_portfolio_name, {"holdings": []})
 
         new_portfolio_name = col_pf2.text_input("New Portfolio Name:", "", key="new_pf_name")
         if col_pf3.button("➕ Create Portfolio", key="create_pf_btn"):
             if new_portfolio_name and new_portfolio_name not in st.session_state.portfolios_data:
-                st.session_state.portfolios_data[new_portfolio_name] = {"holdings": [], "cash": 10000.0} # New portfolios start with cash
+                st.session_state.portfolios_data[new_portfolio_name] = {"holdings": []}
                 save_portfolios(st.session_state.portfolios_data)
                 st.session_state.selected_portfolio_name = new_portfolio_name
                 st.success(f"Portfolio '{new_portfolio_name}' created!")
@@ -1480,160 +1741,163 @@ with config_cont:
                 st.error("Portfolio name is empty or already exists.")
 
         st.markdown("---")
-        st.subheader(f"Holdings for '{st.session_state.selected_portfolio_name}'")
+        st.subheader(f"Holdings & Analysis for '{st.session_state.selected_portfolio_name}'")
 
-        # Display current cash
-        st.metric("Cash Balance", f"${current_portfolio['cash']:,.2f}")
-
-        # Fetch current prices for holdings to calculate market value and P&L
         holdings_display_data = []
-        total_market_value = 0.0
-        total_unrealized_pnl = 0.0
-        total_invested_cost = 0.0
-
-        if current_portfolio['holdings']:
-            with st.spinner(f"Fetching live prices for {st.session_state.selected_portfolio_name} holdings..."):
-                for holding in current_portfolio['holdings']:
-                    ticker = holding['ticker']
-                    quantity = holding['quantity']
-                    avg_price = holding['avg_price']
-
-                    info = fetch_ticker_info(ticker)
-                    current_price = info.get("currentPrice") or (fetch_price_history(ticker, period="1d").iloc[-1]["Close"] if not fetch_price_history(ticker, period="1d").empty else None)
-
-                    if isinstance(current_price, (int, float)):
-                        market_value = current_price * quantity
-                        unrealized_pnl = (current_price - avg_price) * quantity
-                        total_market_value += market_value
-                        total_unrealized_pnl += unrealized_pnl
-                        total_invested_cost += avg_price * quantity # Track total invested for overall P&L %
-                        holdings_display_data.append({
-                            "Ticker": ticker,
-                            "Quantity": quantity,
-                            "Avg. Cost": avg_price,
-                            "Current Price": current_price,
-                            "Market Value": market_value,
-                            "Unrealized P&L": unrealized_pnl,
-                            "P&L (%)": (unrealized_pnl / (avg_price * quantity) * 100) if (avg_price * quantity) != 0 else 0.0
-                        })
-                    else:
-                        holdings_display_data.append({
-                            "Ticker": ticker,
-                            "Quantity": quantity,
-                            "Avg. Cost": avg_price,
-                            "Current Price": "N/A",
-                            "Market Value": "N/A",
-                            "Unrealized P&L": "N/A",
-                            "P&L (%)": "N/A"
-                        })
+        tickers_to_analyze = [h['ticker'] for h in current_portfolio['holdings']]
         
-        # Display overall portfolio metrics
-        overall_total_value = current_portfolio['cash'] + total_market_value
-        overall_pnl_percent = (total_unrealized_pnl / total_invested_cost * 100) if total_invested_cost != 0 else 0.0
-        overall_pnl_color = "normal" if total_unrealized_pnl >= 0 else "inverse"
+        analysis_run_for_portfolio = False
 
-        st.columns(3)[0].metric("Total Portfolio Value", f"${overall_total_value:,.2f}")
-        st.columns(3)[1].metric("Total Holdings Value", f"${total_market_value:,.2f}")
-        st.columns(3)[2].metric("Total Unrealized P&L", f"${total_unrealized_pnl:,.2f}", f"{overall_pnl_percent:.2f}%", delta_color=overall_pnl_color)
+        if tickers_to_analyze:
+            st.info(f"Running AI analysis on {len(tickers_to_analyze)} holdings...")
+            portfolio_analysis_configs = {
+                "use_sentiment": True, "use_filings": True, "use_politician_filings": True,
+                "use_value_trades": True, "use_sec_summary": True # Ensure all features are on for portfolio analysis
+            }
+            # Only run if not already stored or if forced refresh
+            if 'portfolio_analysis_results' not in st.session_state or \
+               st.session_state.portfolio_analysis_results.get('portfolio_name') != st.session_state.selected_portfolio_name:
+                st.session_state.portfolio_analysis_results = {
+                    'portfolio_name': st.session_state.selected_portfolio_name,
+                    'analysis': run_live_analysis(tickers_to_analyze, llm_client, portfolio_analysis_configs)
+                }
+            
+            analysis_results = st.session_state.portfolio_analysis_results['analysis']
+            analysis_run_for_portfolio = True
+            st.markdown("---")
 
+            total_market_value = 0.0
+            total_unrealized_pnl = 0.0
+            total_invested_cost = 0.001 # Avoid division by zero
 
-        if holdings_display_data:
-            holdings_df = pd.DataFrame(holdings_display_data)
-            st.dataframe(holdings_df, use_container_width=True, hide_index=True,
-                         column_config={
-                             "Quantity": st.column_config.NumberColumn(format="%.4f"),
-                             "Avg. Cost": st.column_config.NumberColumn(format="$%.2f"),
-                             "Current Price": st.column_config.NumberColumn(format="$%.2f"),
-                             "Market Value": st.column_config.NumberColumn(format="$%.2f"),
-                             "Unrealized P&L": st.column_config.NumberColumn(format="$%.2f", help="Unrealized Profit & Loss"),
-                             "P&L (%)": st.column_config.ProgressColumn(format="%.2f%%", min_value=-100, max_value=100)
-                         })
+            for holding in current_portfolio['holdings']:
+                ticker = holding['ticker']
+                quantity = holding['quantity']
+                avg_price = holding['avg_price']
+
+                analysis_res = analysis_results.get(ticker, {})
+
+                current_price = analysis_res.get('current_price_display')
+                final_decision = analysis_res.get('final_decision', 'N/A').upper()
+                composite_score = analysis_res.get('composite_score', 0.0)
+
+                if isinstance(current_price, (int, float)):
+                    market_value = current_price * quantity
+                    unrealized_pnl = (current_price - avg_price) * quantity
+                    total_market_value += market_value
+                    total_unrealized_pnl += unrealized_pnl
+                    total_invested_cost += avg_price * quantity
+                    
+                    holdings_display_data.append({
+                        "Ticker": ticker,
+                        "Quantity": quantity,
+                        "Avg. Cost": avg_price,
+                        "Current Price": current_price,
+                        "Market Value": market_value,
+                        "Unrealized P&L": unrealized_pnl,
+                        "P&L (%)": (unrealized_pnl / (avg_price * quantity) * 100) if (avg_price * quantity) != 0 else 0.0,
+                        "AI Decision": final_decision,
+                        "Composite Score": composite_score
+                    })
+                else:
+                    holdings_display_data.append({
+                        "Ticker": ticker,
+                        "Quantity": quantity,
+                        "Avg. Cost": avg_price,
+                        "Current Price": "N/A",
+                        "Market Value": "N/A",
+                        "Unrealized P&L": "N/A",
+                        "P&L (%)": "N/A",
+                        "AI Decision": final_decision,
+                        "Composite Score": composite_score
+                    })
+            
+            overall_total_value = total_market_value
+            overall_pnl_percent = (total_unrealized_pnl / total_invested_cost * 100) if total_invested_cost != 0 else 0.0
+            overall_pnl_color = "normal" if total_unrealized_pnl >= 0 else "inverse"
+
+            st.columns(2)[0].metric("Total Portfolio Value (Holdings)", f"${overall_total_value:,.2f}")
+            st.columns(2)[1].metric("Total Unrealized P&L", f"${total_unrealized_pnl:,.2f}", f"{overall_pnl_percent:.2f}%", delta_color=overall_pnl_color)
+
+            if holdings_display_data:
+                holdings_df = pd.DataFrame(holdings_display_data)
+                def color_ai_decision(val):
+                    color = get_signal_color(val)
+                    return f'color: {color}; font-weight: bold;'
+
+                st.dataframe(holdings_df.style.applymap(color_ai_decision, subset=['AI Decision']), use_container_width=True, hide_index=True,
+                             column_config={
+                                 "Quantity": st.column_config.NumberColumn(format="%.4f"),
+                                 "Avg. Cost": st.column_config.NumberColumn(format="$%.2f"),
+                                 "Current Price": st.column_config.NumberColumn(format="$%.2f"),
+                                 "Market Value": st.column_config.NumberColumn(format="$%.2f"),
+                                 "Unrealized P&L": st.column_config.NumberColumn(format="$%.2f", help="Unrealized Profit & Loss"),
+                                 "P&L (%)": st.column_config.ProgressColumn(format="%.2f%%", min_value=-100, max_value=100),
+                                 "Composite Score": st.column_config.NumberColumn(format="%.2f", help="Aggregated AI score (-1.0 to 1.0)")
+                             })
+            else:
+                st.info("This portfolio currently has no stock holdings. Use the 'Add Stock' section below.")
+
         else:
-            st.info("This portfolio currently has no stock holdings. Use the 'Add Stock' section below.")
-
+            st.info("This portfolio currently has no stock holdings. Add stocks to analyze them.")
+        
         st.markdown("---")
         st.subheader("Add/Remove Stocks")
         col_add1, col_add2, col_add3 = st.columns(3)
-        add_ticker = col_add1.text_input("Ticker to Add:", "", key="add_ticker_input").upper()
-        add_quantity = col_add2.number_input("Quantity:", min_value=0.01, value=1.0, step=0.1, key="add_quantity_input")
-        add_price = col_add3.number_input("Purchase Price (optional, current if 0):", min_value=0.0, value=0.0, step=0.01, key="add_price_input")
+        add_ticker = col_add1.text_input("Ticker to Add:", "", key="add_ticker_input_pf").upper()
+        add_quantity = col_add2.number_input("Quantity:", min_value=0.01, value=1.0, step=0.1, key="add_quantity_input_pf")
+        add_price = col_add3.number_input("Purchase Price (required):", min_value=0.01, value=0.01, step=0.01, key="add_price_input_pf")
 
-        if st.button("➕ Add Stock to Portfolio", key="add_stock_btn"):
-            if add_ticker and add_quantity > 0:
-                # Fetch current price if not provided
-                if add_price == 0:
-                    info = fetch_ticker_info(add_ticker)
-                    current_price_for_add = info.get("currentPrice") or (fetch_price_history(add_ticker, period="1d").iloc[-1]["Close"] if not fetch_price_history(add_ticker, period="1d").empty else None)
-                    if not current_price_for_add:
-                        st.error(f"Could not fetch current price for {add_ticker}. Please enter a purchase price manually.")
-                        st.stop() # Stop execution to allow user to input price
-                    purchase_price = current_price_for_add
-                else:
-                    purchase_price = add_price
-
-                # Check if holding already exists
+        if st.button("➕ Add Stock to Portfolio", key="add_stock_btn_pf"):
+            if add_ticker and add_quantity > 0 and add_price > 0:
                 existing_holding_index = -1
                 for i, h in enumerate(current_portfolio['holdings']):
                     if h['ticker'] == add_ticker:
                         existing_holding_index = i
                         break
-
-                if current_portfolio['cash'] >= (purchase_price * add_quantity):
-                    current_portfolio['cash'] -= (purchase_price * add_quantity)
-                    if existing_holding_index != -1:
-                        # Update existing holding
-                        existing_holding = current_portfolio['holdings'][existing_holding_index]
-                        new_total_quantity = existing_holding['quantity'] + add_quantity
-                        new_avg_price = ((existing_holding['avg_price'] * existing_holding['quantity']) + (purchase_price * add_quantity)) / new_total_quantity
-                        existing_holding['quantity'] = new_total_quantity
-                        existing_holding['avg_price'] = new_avg_price
-                    else:
-                        # Add new holding
-                        current_portfolio['holdings'].append({"ticker": add_ticker, "quantity": add_quantity, "avg_price": purchase_price})
-                    
-                    save_portfolios(st.session_state.portfolios_data)
-                    st.success(f"Added {add_quantity:.2f} shares of {add_ticker} to '{st.session_state.selected_portfolio_name}'.")
-                    st.rerun()
+                
+                if existing_holding_index != -1:
+                    existing_holding = current_portfolio['holdings'][existing_holding_index]
+                    new_total_quantity = existing_holding['quantity'] + add_quantity
+                    new_avg_price = ((existing_holding['avg_price'] * existing_holding['quantity']) + (add_price * add_quantity)) / new_total_quantity
+                    existing_holding['quantity'] = new_total_quantity
+                    existing_holding['avg_price'] = new_avg_price
                 else:
-                    st.error(f"Insufficient cash to buy {add_quantity:.2f} shares of {add_ticker} at ${purchase_price:.2f}. Available cash: ${current_portfolio['cash']:.2f}")
+                    current_portfolio['holdings'].append({"ticker": add_ticker, "quantity": add_quantity, "avg_price": add_price})
+                
+                save_portfolios(st.session_state.portfolios_data)
+                st.success(f"Added {add_quantity:.2f} shares of {add_ticker} at ${add_price:.2f} to '{st.session_state.selected_portfolio_name}'.")
+                st.session_state.portfolio_analysis_results = None # Clear analysis cache to force re-run
+                st.rerun()
             else:
-                st.error("Please enter a valid ticker and quantity.")
+                st.error("Please enter a valid ticker, quantity, and purchase price.")
 
         col_rem1, col_rem2 = st.columns([1,2])
-        remove_ticker = col_rem1.text_input("Ticker to Remove:", "", key="remove_ticker_input").upper()
-        if col_rem2.button("➖ Remove Stock from Portfolio", key="remove_stock_btn"):
-            if remove_ticker:
-                initial_holdings_count = len(current_portfolio['holdings'])
-                # Find the holding to remove and process sale to cash
-                removed_holding = None
-                for i, h in enumerate(current_portfolio['holdings']):
-                    if h['ticker'] == remove_ticker:
-                        removed_holding = current_portfolio['holdings'].pop(i)
-                        break
+        tickers_in_current_portfolio = [h['ticker'] for h in current_portfolio['holdings']]
+        remove_ticker_selection = col_rem1.selectbox("Select Ticker to Remove:", [""] + tickers_in_current_portfolio, key="remove_ticker_select_pf")
 
-                if removed_holding:
-                    info = fetch_ticker_info(removed_holding['ticker'])
-                    current_price_for_remove = info.get("currentPrice") or (fetch_price_history(removed_holding['ticker'], period="1d").iloc[-1]["Close"] if not fetch_price_history(removed_holding['ticker'], period="1d").empty else None)
-                    
-                    if isinstance(current_price_for_remove, (int,float)):
-                        sale_value = current_price_for_remove * removed_holding['quantity']
-                        current_portfolio['cash'] += sale_value
-                        st.success(f"Removed {removed_holding['quantity']:.2f} shares of {remove_ticker} from '{st.session_state.selected_portfolio_name}'. Sold for ${sale_value:,.2f}.")
-                    else:
-                        st.warning(f"Removed {removed_holding['quantity']:.2f} shares of {remove_ticker}. Could not fetch current price, so cash balance not updated for sale.")
+        if col_rem2.button("➖ Remove Stock from Portfolio", key="remove_stock_btn_pf"):
+            if remove_ticker_selection:
+                initial_holdings_count = len(current_portfolio['holdings'])
+                current_portfolio['holdings'] = [h for h in current_portfolio['holdings'] if h['ticker'] != remove_ticker_selection]
+                
+                if len(current_portfolio['holdings']) < initial_holdings_count:
                     save_portfolios(st.session_state.portfolios_data)
+                    st.success(f"Removed {remove_ticker_selection} from '{st.session_state.selected_portfolio_name}'.")
+                    st.session_state.portfolio_analysis_results = None # Clear analysis cache to force re-run
                     st.rerun()
                 else:
-                    st.error(f"{remove_ticker} not found in '{st.session_state.selected_portfolio_name}' holdings.")
+                    st.error(f"{remove_ticker_selection} not found in '{st.session_state.selected_portfolio_name}' holdings.")
             else:
-                st.error("Please enter a ticker to remove.")
+                st.error("Please select a ticker to remove.")
         
         st.markdown("---")
-        if st.button("🗑️ Delete Current Portfolio", key="delete_portfolio_btn", type="secondary"):
+        if st.button("🗑️ Delete Current Portfolio", key="delete_portfolio_btn_pf", type="secondary"):
             if st.session_state.selected_portfolio_name and st.session_state.selected_portfolio_name in st.session_state.portfolios_data:
                 del st.session_state.portfolios_data[st.session_state.selected_portfolio_name]
                 save_portfolios(st.session_state.portfolios_data)
-                st.session_state.selected_portfolio_name = None # Reset selected portfolio
+                st.session_state.selected_portfolio_name = None
+                st.session_state.portfolio_analysis_results = None # Clear analysis cache
                 st.success(f"Portfolio '{st.session_state.selected_portfolio_name}' deleted.")
                 st.rerun()
             else:
@@ -1664,33 +1928,44 @@ with config_cont:
 
         if st.button("▶️ Run AI Trading Day", type="primary", use_container_width=True):
             all_tickers_to_scan = stock_universe['safe'] + stock_universe['risky']
-            ai_configs = {"use_sentiment": True, "use_filings": True, "use_politician_filings": False, "use_value_trades": False}
+            ai_configs = {
+                "use_sentiment": True, "use_filings": True, "use_politician_filings": True,
+                "use_value_trades": True, "use_sec_summary": True # Ensure all features are on for AI Trader
+            }
             
-            # This is where the analysis and trading happens
-            analysis_results = run_live_analysis(all_tickers_to_scan, llm_client, ai_configs)
-            trader_agent = AITraderAgent(llm_client, stock_universe)
-            trades = trader_agent.run(st.session_state.virtual_portfolio, analysis_results)
-            
-            if not trades:
-                st.toast("AI analyzed the market and decided to hold all positions.", icon="✅")
-            else:
-                for trade in trades:
-                    if trade['type'] == 'buy':
-                        st.toast(f"AI is buying {trade['ticker']}...", icon="📈")
-                        existing_holding = next((h for h in st.session_state.virtual_portfolio['holdings'] if h['ticker'] == trade['ticker']), None)
-                        if existing_holding:
-                            new_total_quantity = existing_holding['quantity'] + trade['quantity']
-                            new_avg_price = ((existing_holding['avg_price'] * existing_holding['quantity']) + (trade['price'] * trade['quantity'])) / new_total_quantity
-                            existing_holding['quantity'] = new_total_quantity; existing_holding['avg_price'] = new_avg_price
-                        else:
-                            st.session_state.virtual_portfolio['holdings'].append({'ticker': trade['ticker'], 'quantity': trade['quantity'], 'avg_price': trade['price']})
-                        st.session_state.virtual_portfolio['cash'] -= trade['price'] * trade['quantity']
-                    elif trade['type'] == 'sell':
-                        st.toast(f"AI is selling {trade['ticker']}...", icon="📉")
-                        st.session_state.virtual_portfolio['cash'] += trade['price'] * trade['quantity']
-                        # Ensure we remove only the exact quantity if partial sale or remove the whole holding
-                        st.session_state.virtual_portfolio['holdings'] = [h for h in st.session_state.virtual_portfolio['holdings'] if h['ticker'] != trade['ticker']]
-                    st.session_state.virtual_portfolio['transaction_history'].insert(0, {"date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ticker": trade['ticker'], "type": trade['type'].upper(), "quantity": f"{trade['quantity']:.4f}", "price": f"${trade['price']:.2f}", "reason": trade['reason']})
+            with st.spinner("⏳ AI analyzing market and executing trades..."):
+                analysis_results = run_live_analysis(all_tickers_to_scan, llm_client, ai_configs)
+                trader_agent = AITraderAgent(llm_client, stock_universe)
+                trades = trader_agent.run(st.session_state.virtual_portfolio, analysis_results)
+                
+                if not trades:
+                    st.toast("AI analyzed the market and decided to hold all positions. No trades executed.", icon="✅")
+                else:
+                    for trade in trades:
+                        if trade['type'] == 'buy':
+                            st.toast(f"AI BUY: {trade['ticker']} Qty: {trade['quantity']:.2f} @ ${trade['price']:.2f}", icon="📈")
+                            existing_holding = next((h for h in st.session_state.virtual_portfolio['holdings'] if h['ticker'] == trade['ticker']), None)
+                            if existing_holding:
+                                new_total_quantity = existing_holding['quantity'] + trade['quantity']
+                                new_avg_price = ((existing_holding['avg_price'] * existing_holding['quantity']) + (trade['price'] * trade['quantity'])) / new_total_quantity
+                                existing_holding['quantity'] = new_total_quantity; existing_holding['avg_price'] = new_avg_price
+                            else:
+                                st.session_state.virtual_portfolio['holdings'].append({'ticker': trade['ticker'], 'quantity': trade['quantity'], 'avg_price': trade['price']})
+                            st.session_state.virtual_portfolio['cash'] -= trade['price'] * trade['quantity']
+                        elif trade['type'] == 'sell':
+                            st.toast(f"AI SELL: {trade['ticker']} Qty: {trade['quantity']:.2f} @ ${trade['price']:.2f}", icon="📉")
+                            st.session_state.virtual_portfolio['cash'] += trade['price'] * trade['quantity']
+                            st.session_state.virtual_portfolio['holdings'] = [h for h in st.session_state.virtual_portfolio['holdings'] if h['ticker'] != trade['ticker']]
+                        
+                        st.session_state.virtual_portfolio['transaction_history'].insert(0, {
+                            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                            "ticker": trade['ticker'], 
+                            "type": trade['type'].upper(), 
+                            "quantity": f"{trade['quantity']:.4f}", 
+                            "price": f"${trade['price']:.2f}", 
+                            "value": f"${trade['price'] * trade['quantity']:.2f}", # Add trade value
+                            "reason": trade['reason']
+                        })
             
             st.session_state.virtual_portfolio["last_scan_date"] = datetime.now().strftime("%Y-%m-%d")
             save_virtual_portfolio(st.session_state.virtual_portfolio)
@@ -1700,7 +1975,6 @@ st.markdown("---")
 
 # ===============================================
 # Main Results Display Area
-# This block now correctly handles the display for each mode.
 # ===============================================
 
 if st.session_state.app_mode == "Live Analysis" and st.session_state.live_analysis_triggered:
@@ -1715,7 +1989,6 @@ if st.session_state.app_mode == "Live Analysis" and st.session_state.live_analys
             for idx, sym in enumerate(row_t):
                 with cols_ui[idx]:
                     res = live_output.get(sym)
-                    # ... (rest of live analysis display logic is unchanged)
                     if not res or res.get("error"): st.error(f"**{sym}**: {res.get('error','No data.') if res else 'No data.'}"); continue
                     dec,score,price = res.get("final_decision","N/A").upper(), res.get("composite_score",float('nan')), res.get("current_price_display")
                     cmap={"BUY":"green","SELL":"red","HOLD":"#FFA500","ERROR":"#808080","N/A":"#D3D3D3"}; color=cmap.get(dec,"#D3D3D3")
@@ -1750,23 +2023,121 @@ elif st.session_state.app_mode == "🤖 Virtual Trading":
     st.header("📈 Virtual Portfolio Dashboard")
     with st.container(border=True):
         holdings_df_data = []
-        total_holdings_value, total_pnl, initial_investment = 0.0, 0.0, 0.001 # Avoid division by zero
+        total_holdings_value, total_pnl, initial_investment = 0.0, 0.0, 0.001
         
-        # Use a single spinner for all price fetches
+        portfolio_value_history = []
+        
+        temp_cash = get_default_virtual_portfolio()["cash"]
+        
+        chronological_transactions = list(reversed(st.session_state.virtual_portfolio['transaction_history']))
+        
+        all_tickers_in_history = list(set([t['ticker'] for t in st.session_state.virtual_portfolio['transaction_history']]))
+        price_data_for_history = {}
+        with st.spinner("Pre-fetching historical prices for portfolio value chart..."):
+            for t in all_tickers_in_history:
+                price_data_for_history[t] = fetch_price_history(t, period="max")
+
+        
+        if chronological_transactions:
+            earliest_tx_date = datetime.strptime(chronological_transactions[0]['date'].split(" ")[0], "%Y-%m-%d") if chronological_transactions else datetime.now()
+            earliest_data_point = earliest_tx_date - timedelta(days=365*2)
+            
+            full_date_range = pd.date_range(start=earliest_data_point, end=datetime.now(), freq='D')
+            
+            daily_portfolio_values = pd.Series(index=full_date_range, dtype=float).fillna(np.nan)
+            daily_portfolio_values[full_date_range[0]] = get_default_virtual_portfolio()["cash"]
+
+            current_holdings_for_chart = {}
+            current_cash_for_chart = get_default_virtual_portfolio()["cash"]
+            last_date_processed = full_date_range[0]
+
+            for tx in chronological_transactions:
+                tx_date = datetime.strptime(tx['date'].split(" ")[0], "%Y-%m-%d")
+                tx_quantity = float(tx['quantity'])
+                tx_price = float(tx['price'].replace('$', ''))
+                tx_type = tx['type']
+
+                for day in pd.date_range(start=last_date_processed + timedelta(days=1), end=tx_date, freq='D'):
+                    portfolio_val_on_day = current_cash_for_chart
+                    for ticker_chart, qty_chart in current_holdings_for_chart.items():
+                        day_price_series = price_data_for_history.get(ticker_chart, pd.DataFrame())
+                        day_price = None
+                        if not day_price_series.empty:
+                            try:
+                                day_price = day_price_series.loc[day.strftime("%Y-%m-%d")].get("Close")
+                            except KeyError:
+                                # Fallback if specific date not in index, find nearest previous
+                                nearest_idx = day_price_series.index.asof(day)
+                                if nearest_idx is not pd.NaT:
+                                    day_price = day_price_series.loc[nearest_idx].get("Close")
+
+                        if day_price:
+                            portfolio_val_on_day += qty_chart * day_price
+                    if pd.notna(portfolio_val_on_day):
+                        daily_portfolio_values.loc[day] = portfolio_val_on_day
+                
+                last_date_processed = tx_date
+
+                if tx_type == 'BUY':
+                    current_holdings_for_chart[tx['ticker']] = current_holdings_for_chart.get(tx['ticker'], 0) + tx_quantity
+                    current_cash_for_chart -= tx_quantity * tx_price
+                elif tx_type == 'SELL':
+                    current_holdings_for_chart[tx['ticker']] = current_holdings_for_chart.get(tx['ticker'], 0) - tx_quantity
+                    if current_holdings_for_chart[tx['ticker']] <= 0.0001:
+                        del current_holdings_for_chart[tx['ticker']]
+                    current_cash_for_chart += tx_quantity * tx_price
+                
+                portfolio_val_on_tx_day = current_cash_for_chart
+                for ticker_chart, qty_chart in current_holdings_for_chart.items():
+                    tx_day_price_series = price_data_for_history.get(ticker_chart, pd.DataFrame())
+                    tx_day_price = None
+                    if not tx_day_price_series.empty:
+                        try:
+                            tx_day_price = tx_day_price_series.loc[tx_date.strftime("%Y-%m-%d")].get("Close")
+                        except KeyError:
+                            nearest_idx = tx_day_price_series.index.asof(tx_date)
+                            if nearest_idx is not pd.NaT:
+                                tx_day_price = tx_day_price_series.loc[nearest_idx].get("Close")
+                    if tx_day_price:
+                        portfolio_val_on_tx_day += qty_chart * tx_day_price
+                if pd.notna(portfolio_val_on_tx_day):
+                    daily_portfolio_values.loc[tx_date] = portfolio_val_on_tx_day
+            
+            daily_portfolio_values = daily_portfolio_values.fillna(method='ffill').fillna(method='bfill')
+
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            if today not in daily_portfolio_values.index:
+                last_known_value = daily_portfolio_values.iloc[-1] if not daily_portfolio_values.empty else get_default_virtual_portfolio()["cash"]
+                daily_portfolio_values.loc[today] = last_known_value
+            
+            daily_portfolio_values = daily_portfolio_values.reindex(pd.date_range(start=daily_portfolio_values.index.min(), end=today, freq='D')).fillna(method='ffill').fillna(method='bfill')
+            daily_portfolio_values_df = pd.DataFrame(daily_portfolio_values, columns=['Portfolio Value'])
+            daily_portfolio_values_df.index.name = 'Date'
+
+        else:
+            daily_portfolio_values_df = pd.DataFrame({
+                'Date': [datetime.now() - timedelta(days=7), datetime.now()],
+                'Portfolio Value': [get_default_virtual_portfolio()["cash"], get_default_virtual_portfolio()["cash"]]
+            }).set_index('Date')
+
+
         if st.session_state.virtual_portfolio['holdings']:
             with st.spinner("Fetching latest prices for dashboard..."):
                 for holding in st.session_state.virtual_portfolio['holdings']:
                     info = fetch_ticker_info(holding['ticker'])
                     price = info.get("currentPrice")
+                    if price is None and not price_data_for_history.get(holding['ticker'], pd.DataFrame()).empty:
+                        price = price_data_for_history[holding['ticker']].iloc[-1].get("Close")
+
                     current_value = price * holding['quantity'] if isinstance(price, (int,float)) else 0
                     pnl = (price - holding['avg_price']) * holding['quantity'] if isinstance(price, (int,float)) else 0
                     total_holdings_value += current_value
                     total_pnl += pnl
                     initial_investment += holding['avg_price'] * holding['quantity']
                     holdings_df_data.append({"Ticker": holding['ticker'], "Quantity": holding['quantity'], "Avg. Price": holding['avg_price'], "Current Price": price, "Current Value": current_value, "P&L": pnl})
-
+        
         total_portfolio_value = st.session_state.virtual_portfolio['cash'] + total_holdings_value
-        pnl_percent = (total_pnl / initial_investment * 100)
+        pnl_percent = (total_pnl / initial_investment * 100) if initial_investment != 0 else 0.0
 
         pnl_color = "normal" if total_pnl >= 0 else "inverse"
         dash_cols = st.columns(4)
@@ -1783,11 +2154,12 @@ elif st.session_state.app_mode == "🤖 Virtual Trading":
         else:
             st.info("The portfolio currently holds no stocks. Run the AI Trader to start investing.")
 
+        st.subheader("Portfolio Value Over Time")
+        st.line_chart(daily_portfolio_values_df, use_container_width=True, color="#0072F0")
+
         st.subheader("Transaction History")
         if st.session_state.virtual_portfolio['transaction_history']:
             history_df = pd.DataFrame(st.session_state.virtual_portfolio['transaction_history'])
             st.dataframe(history_df, use_container_width=True, hide_index=True)
         else:
             st.info("No transactions have been made yet.")
-
-
