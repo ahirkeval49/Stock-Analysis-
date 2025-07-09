@@ -99,7 +99,7 @@ if 'backtest_triggered' not in st.session_state:
 # Data Fetchers
 # --------------------------------
 @st.cache_data
-def fetch_price_history(ticker: str, period: str = "max", interval: str = "1wk") -> pd.DataFrame:
+def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame:
     try:
         ticker_obj = yf.Ticker(ticker)
         df = ticker_obj.history(period=period, interval=interval)
@@ -112,32 +112,59 @@ def fetch_price_history(ticker: str, period: str = "max", interval: str = "1wk")
 
 @st.cache_data
 def fetch_ticker_info(ticker: str) -> dict:
-    try:
-        info = yf.Ticker(ticker).info
-        if not info or (info.get('regularMarketPrice') is None and info.get('currentPrice') is None and info.get('financialCurrency') is None):
-            return {}
-        return {
-            "marketCap": info.get("marketCap"), "freeCashflow": info.get("freeCashflow"),
-            "forwardPE": info.get("forwardPE"), "trailingPE": info.get("trailingPE"),
-            "priceToBook": info.get("priceToBook"), "enterpriseToRevenue": info.get("enterpriseToRevenue"),
-            "enterpriseToEbitda": info.get("enterpriseToEbitda"), "returnOnEquity": info.get("returnOnEquity"),
-            "debtToEquity": info.get("debtToEquity"), "beta": info.get("beta"),
-            "targetMeanPrice": info.get("targetMeanPrice"), "recommendationKey": info.get("recommendationKey"),
-            "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"), "industry": info.get("industry"),
-            "sector": info.get("sector"), "longName": info.get("longName"), "shortName": info.get("shortName"),
-            "longBusinessSummary": info.get("longBusinessSummary"),
-            "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
-            "financialCurrency": info.get("financialCurrency")
-        }
-    except Exception as e:
-         st.error(f"Attempt {attempt + 1}/{max_retries}: Error fetching ticker info for {ticker}: {e}")
-         if attempt < max_retries - 1:
-             import time
-             time.sleep(2 ** attempt) # Exponential backoff
-             continue
-         else:
-             st.error(f"Final failure fetching info for {ticker} after {max_retries} attempts.")
-             return {} # Return empty dict after all retries fail
+    """
+    Fetches ticker information from yfinance with enhanced error handling and retries.
+    """
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            ticker_obj = yf.Ticker(ticker)
+            info = ticker_obj.info
+
+            # Check for essential data points. If any are missing, consider it a failure for this attempt.
+            if not info or \
+               (info.get('regularMarketPrice') is None and info.get('currentPrice') is None and info.get('financialCurrency') is None):
+                # Log a warning for this attempt, but allow retry
+                missing_keys = []
+                if (info.get('regularMarketPrice') is None and info.get('currentPrice') is None):
+                    missing_keys.append("price")
+                if info.get('financialCurrency') is None:
+                    missing_keys.append("currency")
+                
+                error_detail = f"Missing essential info: {', '.join(missing_keys)}" if missing_keys else "Incomplete data returned."
+                st.warning(f"Attempt {attempt + 1}/{max_retries}: Failed to fetch complete info for {ticker}: {error_detail}.")
+                
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(2 ** attempt) # Exponential backoff: 1s, 2s, 4s
+                    continue # Retry
+                else:
+                    st.error(f"Failed to fetch info for {ticker} after {max_retries} attempts.")
+                    return {} # Return empty dict after all retries fail
+            
+            # If successful, return the data
+            return {
+                "marketCap": info.get("marketCap"), "freeCashflow": info.get("freeCashflow"),
+                "forwardPE": info.get("forwardPE"), "trailingPE": info.get("trailingPE"),
+                "priceToBook": info.get("priceToBook"), "enterpriseToRevenue": info.get("enterpriseToRevenue"),
+                "enterpriseToEbitda": info.get("enterpriseToEbitda"), "returnOnEquity": info.get("returnOnEquity"),
+                "debtToEquity": info.get("debtToEquity"), "beta": info.get("beta"),
+                "targetMeanPrice": info.get("targetMeanPrice"), "recommendationKey": info.get("recommendationKey"),
+                "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"), "industry": info.get("industry"),
+                "sector": info.get("sector"), "longName": info.get("longName"), "shortName": info.get("shortName"),
+                "longBusinessSummary": info.get("longBusinessSummary"),
+                "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
+                "financialCurrency": info.get("financialCurrency")
+            }
+        except Exception as e:
+            st.error(f"Attempt {attempt + 1}/{max_retries}: Error fetching ticker info for {ticker}: {e}")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(2 ** attempt) # Exponential backoff
+                continue
+            else:
+                st.error(f"Final failure fetching info for {ticker} after {max_retries} attempts.")
+                return {} # Return empty dict after all retries fail
 
 @st.cache_data
 def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
@@ -466,7 +493,7 @@ class PriceAgent:
             bb_signal = "sell"
             if signal == "sell": confidence_score -= 0.1
             elif signal == "hold":
-                signal = "sell"; confidence_score -= 0.05
+                signal = "sell"; confidence_score += 0.05
         
         if signal == "hold":
             if latest.RSI14 < 40 and latest.RSI14 > 30:
@@ -1025,7 +1052,7 @@ class PortfolioAgent:
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
         curr_w, total_score, sum_w, agg_s = agent_weights or self.WEIGHTS, 0,0,{}
         for s_dict in signals:
-            if isinstance(s_dict): agg_s.update(s_dict)
+            if isinstance(s_dict, dict): agg_s.update(s_dict) # Corrected: isinstance(s_dict, dict)
         
         # Mapping signals to their corresponding weights and confidence scores (if available)
         s_map = {
@@ -1051,11 +1078,9 @@ class PortfolioAgent:
             
             # Special handling for SEC Summary if it's a text summary, or use default signal value
             if s_key == "sec_summary_llm" and s_val and w > 0:
-                # LLM outputting a summary, not a direct signal. We need to infer a score or just use the weight.
-                # For simplicity in this simulator, we will treat its presence (and lack of error) as a neutral-to-positive factor if it exists.
-                # A more advanced version would ask the LLM for a sentiment score from its own summary.
-                # For now, let's assume if it exists and is not an error, it contributes a small positive or neutral effect.
-                if "negative" in s_val.lower() and "no significant events" not in s_val.lower():
+                if "error" in s_key: # If there was an error in summary generation
+                    raw_score = 0 # Neutral score if summary failed
+                elif "negative" in s_val.lower() and "no significant events" not in s_val.lower():
                     raw_score = -0.5 # Infer negative if summary contains negative words
                 elif "positive" in s_val.lower() and "no significant events" not in s_val.lower():
                     raw_score = 0.5 # Infer positive
@@ -1069,11 +1094,8 @@ class PortfolioAgent:
                 # Incorporate confidence score from agents if available
                 if conf_key and pd.notna(agg_s.get(conf_key)):
                     agent_confidence = agg_s.get(conf_key)
-                    # Adjust raw_score by agent_confidence. E.g., if agent_confidence is 0.8 and raw_score is 1 (buy),
-                    # it could be 1 * 0.8. If raw_score is -1 (sell) and confidence is 0.8, it's -1 * 0.8.
-                    # This amplifies strong signals and dampens weak ones.
                     total_score += (raw_score * agent_confidence) * w
-                    sum_w += w * agent_confidence # Weight sum by confidence too
+                    sum_w += w * agent_confidence
                 else:
                     total_score += raw_score * w
                     sum_w += w
@@ -1234,7 +1256,6 @@ def run_live_analysis(tickers, llm_client, configs):
     results = {}
     progress_bar = st.progress(0, text="Starting analysis...")
     
-    # Define a default set of backtest weights for live analysis detail
     default_live_backtest_weights = {
         "price": 1.0, "momentum": 0.8, "volatility": 0.3, 
         "sentiment": 0., "fund": 0., "valuation_dcf": 0., "valuation_pe": 0.,
@@ -1247,18 +1268,39 @@ def run_live_analysis(tickers, llm_client, configs):
         progress_text = f"Analyzing {t}... ({i+1}/{len(tickers)})"
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
         
+        # --- Handle Price History Fetch ---
         price_history_full = fetch_price_history(t, period="max")
         if price_history_full.empty:
-            results[t] = {"error": f"Price history unavailable for {t}. This may be due to an invalid ticker, a delisted stock, or a temporary issue with data providers.", "ticker": t, "final_decision":"error", "composite_score":0}
+            results[t] = {
+                "error": f"Price history unavailable for {t}. This can happen for invalid tickers, delisted stocks, or temporary data provider issues.",
+                "ticker": t, "final_decision": "error", "composite_score": 0
+            }
             continue
 
+        # --- Handle Ticker Info Fetch ---
         ticker_info = fetch_ticker_info(t)
         if not ticker_info or not ticker_info.get("financialCurrency"):
-            err_msg = f"Core ticker info (e.g., currency) unavailable for {t}. Invalid/delisted/no yfinance data."
-            results[t] = {"error": err_msg, "ticker": t, "final_decision":"error", "composite_score":0}; continue
+            # The fetch_ticker_info function now handles its own retries and warnings.
+            # Here, we just check if it ultimately failed.
+            err_msg = f"Core ticker info (e.g., currency) unavailable for {t}. This likely indicates an invalid ticker, a delisted stock, or persistent issues with yfinance data for this symbol."
+            results[t] = {"error": err_msg, "ticker": t, "final_decision": "error", "composite_score": 0}
+            continue
+        
         current_price_for_ticker = ticker_info.get("currentPrice")
-        if current_price_for_ticker is None and not price_history_full.empty: current_price_for_ticker = price_history_full["Close"].iloc[-1]
+        if current_price_for_ticker is None and not price_history_full.empty:
+            current_price_for_ticker = price_history_full["Close"].iloc[-1]
+        
+        # If still no current price, this is a critical data failure for real-time analysis
+        if current_price_for_ticker is None:
+            results[t] = {
+                "error": f"Current price could not be determined for {t}. Missing essential market data.",
+                "ticker": t, "final_decision": "error", "composite_score": 0
+            }
+            continue
+
         company_name_for_news = ticker_info.get('longName', ticker_info.get('shortName', t))
+        
+        # ... (rest of run_live_analysis remains the same) ...
         combined_news, news_fetch_msgs = [], []
         if configs["use_sentiment"]:
             yf_news = fetch_enriched_news(t, ticker_info)
@@ -1290,7 +1332,8 @@ def run_live_analysis(tickers, llm_client, configs):
         if configs["use_sentiment"] and llm_client: agents.extend([SentimentAgent(llm_client), NewsSummaryAgent(llm_client)])
         if configs["use_filings"]: agents.extend([SECFilingAgent(), InstitutionalHoldingsAgent()])
         # Add SECSummaryAgent if LLM is available and filings are used
-        if configs["use_filings"] and llm_client: agents.append(SECSummaryAgent(llm_client))
+        if configs["use_filings"] and llm_client and configs.get("use_sec_summary", False): # Only add if enabled in configs
+             agents.append(SECSummaryAgent(llm_client))
         if configs["use_politician_filings"]: agents.append(PoliticianFilingsAgent())
         if configs["use_value_trades"]: agents.append(ValueInvestingIOAgent())
         
@@ -1300,13 +1343,14 @@ def run_live_analysis(tickers, llm_client, configs):
             try:
                 if isinstance(agent,(PriceAgent,MomentumAgent)): res_a = agent.run(t, data_bundle["price_history"])
                 elif isinstance(agent,VolatilityAgent): res_a = agent.run(t, data_bundle, data_bundle["price_history"])
+                elif name == "SECSummaryAgent": # Call SECSummaryAgent specifically
+                    res_a = agent.run(t, data_bundle)
                 else: res_a = agent.run(t, data_bundle)
                 agent_res_list.append(res_a)
             except Exception as e:
                 err_k, sig_k = name.lower().replace("agent","")+"_error", name.lower().replace("agent","")+"_signal"
-                # For SECSummaryAgent, the signal is not a simple 'buy/sell/hold', so default to 'error' message for now
                 if name == "SECSummaryAgent":
-                     agent_res_list.append({"sec_summary": f"Error during summary: {str(e)[:150]}", "sec_summary_error":f"Agent {name} error: {str(e)[:150]}"})
+                     agent_res_list.append({"sec_summary": "Error generating summary.", "sec_summary_error":f"Agent {name} error: {str(e)[:150]}"})
                 else:
                     agent_res_list.append({sig_k:"error", err_k:f"Agent {name} error: {str(e)[:150]}"}); st.warning(f"Error in {name} for {t}: {e}")
         
@@ -1320,12 +1364,7 @@ def run_live_analysis(tickers, llm_client, configs):
             if isinstance(r_dict,dict): curr_res_dict.update(r_dict)
         curr_res_dict.update(final_dec)
         
-        # --- Run simulated backtest for the ticker within Live Analysis ---
-        bt_end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        bt_start_date = (datetime.now() - pd.DateOffset(years=1, days=1)).strftime("%Y-%m-%d") # 1 year back
-        initial_capital_for_sim_bt = 10000 # Fixed capital for this quick backtest
-        
-        sim_bt_metrics, sim_bt_log_df = run_backtest(t, bt_start_date, bt_end_date, initial_capital_for_sim_bt, llm_client, default_live_backtest_weights)
+        sim_bt_metrics, sim_bt_log_df = run_backtest(t, (datetime.now() - pd.DateOffset(years=1, days=1)).strftime("%Y-%m-%d"), (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), 10000, llm_client, default_live_backtest_weights)
         curr_res_dict["simulated_backtest_results"] = {"metrics": sim_bt_metrics, "log_df": sim_bt_log_df.to_dict('records') if not sim_bt_log_df.empty else []}
 
         results[t] = curr_res_dict
@@ -2089,7 +2128,7 @@ elif st.session_state.app_mode == "🤖 Virtual Trading":
                     current_cash_for_chart -= tx_quantity * tx_price
                 elif tx_type == 'SELL':
                     current_holdings_for_chart[tx['ticker']] = current_holdings_for_chart.get(tx['ticker'], 0) - tx_quantity
-                    if current_holdings_for_chart[tx['ticker']] <= 0.0001:
+                    if current_holdings_for_chart[tx['ticker']] <= 0.0001: # Handle floating point near zero
                         del current_holdings_for_chart[tx['ticker']]
                     current_cash_for_chart += tx_quantity * tx_price
                 
