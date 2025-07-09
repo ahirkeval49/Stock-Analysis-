@@ -132,12 +132,12 @@ def fetch_ticker_info(ticker: str) -> dict:
     except Exception as e:
          st.error(f"Attempt {attempt + 1}/{max_retries}: Error fetching ticker info for {ticker}: {e}")
          if attempt < max_retries - 1:
-                import time
-                time.sleep(2 ** attempt) # Exponential backoff
-                continue
+             import time
+             time.sleep(2 ** attempt) # Exponential backoff
+             continue
          else:
-                st.error(f"Final failure fetching info for {ticker} after {max_retries} attempts.")
-                return {} # Return empty dict after all retries fail
+             st.error(f"Final failure fetching info for {ticker} after {max_retries} attempts.")
+             return {} # Return empty dict after all retries fail
 
 @st.cache_data
 def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
