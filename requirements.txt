@@ -8,6 +8,7 @@ pandas
 numpy
 yfinance
 sec-edgar-downloader
+altair
 # HTTP & scraping
 requests
 beautifulsoup4
