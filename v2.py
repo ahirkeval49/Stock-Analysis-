@@ -135,7 +135,7 @@ def fetch_ticker_info(ticker: str) -> dict:
                 import time
                 time.sleep(2 ** attempt) # Exponential backoff
                 continue
-            else:
+         else:
                 st.error(f"Final failure fetching info for {ticker} after {max_retries} attempts.")
                 return {} # Return empty dict after all retries fail
 
