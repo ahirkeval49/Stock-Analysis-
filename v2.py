@@ -152,6 +152,7 @@ def fetch_ticker_info(ticker: str) -> dict:
         # Catch broader exceptions during fetch.
         st.error(f"Error fetching ticker info for {ticker}: {e}")
         return {} # Return empty dict on any exception
+
 @st.cache_data
 def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
     try:
