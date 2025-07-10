@@ -99,7 +99,7 @@ if 'backtest_triggered' not in st.session_state:
 # Data Fetchers
 # --------------------------------
 @st.cache_data
-def fetch_price_history(ticker: str, period: str = "max", interval: str = "1wk") -> pd.DataFrame:
+def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame:
     try:
         ticker_obj = yf.Ticker(ticker)
         df = ticker_obj.history(period=period, interval=interval)
