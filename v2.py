@@ -1572,21 +1572,26 @@ def display_detailed_analysis(res_detail):
                 if not holders_df.empty and 'Holder' in holders_df.columns and 'Shares' in holders_df.columns:
                     # Limit to top N for pie chart if many holders, or just use all if few
                     top_n_holders = holders_df.nlargest(5, 'Shares') if len(holders_df) > 5 else holders_df
-                    chart = alt.Chart(top_n_holders).mark_arc(outerRadius=120).encode(
-                        theta=alt.Theta(field="Shares", type="quantitative"),
-                        color=alt.Color(field="Holder", type="nominal", title="Top Holders"),
-                        order=alt.Order("Shares", sort="descending"),
-                        tooltip=["Holder", "Shares", alt.Tooltip("% Out", format=".1%")]
-                    ).properties(
-                        title="Top Institutional Holders (by Shares)"
-                    )
-                    try:
-                        st.altair_chart(chart, use_container_width=True)
-                    except Exception as chart_err:
-                        st.error(f"Error rendering institutional holdings chart: {chart_err}")
-                        st.json(top_n_holders.to_dict('records')) # Show raw data if chart fails
+                    
+                    # Ensure top_n_holders is not empty after nlargest, which it can be if all remaining shares are 0
+                    if not top_n_holders.empty: # <-- This is the crucial check to prevent Altair error
+                        chart = alt.Chart(top_n_holders).mark_arc(outerRadius=120).encode(
+                            theta=alt.Theta(field="Shares", type="quantitative"),
+                            color=alt.Color(field="Holder", type="nominal", title="Top Holders"),
+                            order=alt.Order("Shares", sort="descending"),
+                            tooltip=["Holder", "Shares", alt.Tooltip("% Out", format=".1%")]
+                        ).properties(
+                            title="Top Institutional Holders (by Shares)"
+                        )
+                        try:
+                            st.altair_chart(chart, use_container_width=True)
+                        except Exception as chart_err:
+                            st.error(f"Error rendering institutional holdings chart for {ticker}: {chart_err}")
+                            st.json(top_n_holders.to_dict('records')) # Show raw data if chart fails
+                    else: # If top_n_holders is empty after nlargest/filtering
+                        st.info(f"Not enough positive share data for institutional holdings chart for {ticker}.")
                 else:
-                    st.info("Not enough valid data points for institutional holdings chart.")
+                    st.info(f"Not enough valid data points for institutional holdings chart for {ticker}.")
             else:
                 st.info("No institutional holder data available.")
 
