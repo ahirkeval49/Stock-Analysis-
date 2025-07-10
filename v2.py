@@ -14,6 +14,9 @@ from urllib.parse import urljoin, urlparse
 from newsapi import NewsApiClient
 import json
 import altair as alt # Import altair for charting
+import time # Import time for sleeps
+import random # Import random for random delays
+
 
 # --- Page Config (Must be the first Streamlit command) ---
 st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
@@ -98,49 +101,54 @@ if 'backtest_triggered' not in st.session_state:
 # --------------------------------
 # Data Fetchers
 # --------------------------------
-@st.cache_data
+@st.cache_data(ttl=300) # Cache for 5 minutes
 def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame:
     try:
         ticker_obj = yf.Ticker(ticker)
         df = ticker_obj.history(period=period, interval=interval)
-        if df.empty: return pd.DataFrame()
+        if df.empty:
+            st.warning(f"No price history returned from yfinance for {ticker}.")
+            return pd.DataFrame()
         df.index = pd.to_datetime(df.index).tz_localize(None)
         return df
     except Exception as e:
-        st.warning(f"Error fetching price history for {ticker}: {e}")
+        st.error(f"Critical error fetching price history for {ticker}: {e}")
         return pd.DataFrame()
 
-@st.cache_data
+@st.cache_data(ttl=300) # Cache for 5 minutes
 def fetch_ticker_info(ticker: str) -> dict:
     """
     Fetches ticker information from yfinance with enhanced error handling and retries.
+    Returns {..., "_error": "error message"} on final failure.
     """
     max_retries = 3
+    # Introduce a base delay and jitter
+    base_delay = 1.0 # seconds
+    
     for attempt in range(max_retries):
         try:
             ticker_obj = yf.Ticker(ticker)
             info = ticker_obj.info
 
             # Check for essential data points. If any are missing, consider it a failure for this attempt.
-            if not info or \
-               (info.get('regularMarketPrice') is None and info.get('currentPrice') is None and info.get('financialCurrency') is None):
-                # Log a warning for this attempt, but allow retry
+            # Using financialCurrency as a strong indicator that it's a real stock with full data.
+            if not info or not info.get('financialCurrency'):
                 missing_keys = []
-                if (info.get('regularMarketPrice') is None and info.get('currentPrice') is None):
-                    missing_keys.append("price")
-                if info.get('financialCurrency') is None:
-                    missing_keys.append("currency")
+                if not info:
+                    missing_keys.append("empty_info_dict")
+                if info and info.get('financialCurrency') is None:
+                    missing_keys.append("financialCurrency")
                 
-                error_detail = f"Missing essential info: {', '.join(missing_keys)}" if missing_keys else "Incomplete data returned."
-                st.warning(f"Attempt {attempt + 1}/{max_retries}: Failed to fetch complete info for {ticker}: {error_detail}.")
+                error_detail = f"Missing essential info: {', '.join(missing_keys)}. Raw keys: {list(info.keys()) if info else 'None'}."
+                st.warning(f"Attempt {attempt + 1}/{max_retries}: Failed to get complete info for {ticker}: {error_detail}")
                 
                 if attempt < max_retries - 1:
-                    import time
-                    time.sleep(2 ** attempt) # Exponential backoff: 1s, 2s, 4s
+                    time.sleep(base_delay * (2 ** attempt) + random.uniform(0.1, 0.5)) # Exponential backoff with jitter
                     continue # Retry
                 else:
-                    st.error(f"Failed to fetch info for {ticker} after {max_retries} attempts.")
-                    return {} # Return empty dict after all retries fail
+                    final_error_msg = f"Failed to get complete info for {ticker} after {max_retries} attempts. Reason: {error_detail}. This may indicate an invalid ticker, a delisted stock, or persistent upstream data issues."
+                    st.error(final_error_msg)
+                    return {"_error": final_error_msg} # Return error message in dict
             
             # If successful, return the data
             return {
@@ -154,19 +162,20 @@ def fetch_ticker_info(ticker: str) -> dict:
                 "sector": info.get("sector"), "longName": info.get("longName"), "shortName": info.get("shortName"),
                 "longBusinessSummary": info.get("longBusinessSummary"),
                 "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
-                "financialCurrency": info.get("financialCurrency")
+                "financialCurrency": info.get("financialCurrency"),
+                "_error": None # Indicate no error if successful
             }
         except Exception as e:
-            st.error(f"Attempt {attempt + 1}/{max_retries}: Error fetching ticker info for {ticker}: {e}")
+            st.error(f"Attempt {attempt + 1}/{max_retries}: Exception fetching ticker info for {ticker}: {e}")
             if attempt < max_retries - 1:
-                import time
-                time.sleep(2 ** attempt) # Exponential backoff
+                time.sleep(base_delay * (2 ** attempt) + random.uniform(0.1, 0.5)) # Exponential backoff with jitter
                 continue
             else:
-                st.error(f"Final failure fetching info for {ticker} after {max_retries} attempts.")
-                return {} # Return empty dict after all retries fail
+                final_error_msg = f"Final exception fetching info for {ticker} after {max_retries} attempts: {e}. This may indicate an invalid ticker, a delisted stock, or persistent upstream data issues."
+                st.error(final_error_msg)
+                return {"_error": final_error_msg} # Return error message in dict
 
-@st.cache_data
+@st.cache_data(ttl=300) # Cache for 5 minutes
 def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
     try:
         company_name = ticker_info_data.get('longName', ticker_info_data.get('shortName', ticker))
@@ -260,7 +269,7 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                     if datetime.strptime(dates[i], '%Y-%m-%d').replace(tzinfo=timezone.utc) >= date_limit:
                         metadata.append({"form_type": forms[i], "filing_date_str": dates[i], "accession_number": acc_nos[i], "primary_document": docs[i]})
                 except (ValueError, IndexError): continue
-            xml_fetches, max_xml, max_other = 0, 20, 15
+            xml_fetches, max_xml, max_other = 20, 20, 15 # Adjusted initial xml_fetches to max_xml if starting empty for some reason
             for info in metadata:
                 form, date_str, acc_no, doc_name = info["form_type"], info["filing_date_str"], info["accession_number"], info["primary_document"]
                 acc_no_dashless = acc_no.replace('-', '')
@@ -1052,7 +1061,7 @@ class PortfolioAgent:
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
         curr_w, total_score, sum_w, agg_s = agent_weights or self.WEIGHTS, 0,0,{}
         for s_dict in signals:
-            if isinstance(s_dict, dict): agg_s.update(s_dict) # Corrected: isinstance(s_dict, dict)
+            if isinstance(s_dict, dict): agg_s.update(s_dict)
         
         # Mapping signals to their corresponding weights and confidence scores (if available)
         s_map = {
@@ -1279,12 +1288,15 @@ def run_live_analysis(tickers, llm_client, configs):
 
         # --- Handle Ticker Info Fetch ---
         ticker_info = fetch_ticker_info(t)
-        if not ticker_info or not ticker_info.get("financialCurrency"):
-            # The fetch_ticker_info function now handles its own retries and warnings.
-            # Here, we just check if it ultimately failed.
-            err_msg = f"Core ticker info (e.g., currency) unavailable for {t}. This likely indicates an invalid ticker, a delisted stock, or persistent issues with yfinance data for this symbol."
-            results[t] = {"error": err_msg, "ticker": t, "final_decision": "error", "composite_score": 0}
+        # Check if fetch_ticker_info itself returned an error flag
+        if ticker_info.get("_error"):
+            results[t] = {"error": ticker_info["_error"], "ticker": t, "final_decision": "error", "composite_score": 0}
             continue
+        # Ensure it's not just an empty dict, but a valid one (without the error key)
+        elif not ticker_info or not ticker_info.get("financialCurrency"):
+             err_msg = f"Core ticker info (e.g., currency) unavailable for {t}. This likely indicates an invalid ticker, a delisted stock, or persistent issues with yfinance data for this symbol."
+             results[t] = {"error": err_msg, "ticker": t, "final_decision": "error", "composite_score": 0}
+             continue
         
         current_price_for_ticker = ticker_info.get("currentPrice")
         if current_price_for_ticker is None and not price_history_full.empty:
