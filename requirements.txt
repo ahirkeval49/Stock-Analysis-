@@ -9,6 +9,8 @@ numpy
 yfinance
 sec-edgar-downloader
 altair
+time
+random
 # HTTP & scraping
 requests
 beautifulsoup4
