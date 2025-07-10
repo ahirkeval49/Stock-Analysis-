@@ -269,20 +269,15 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                     if datetime.strptime(dates[i], '%Y-%m-%d').replace(tzinfo=timezone.utc) >= date_limit:
                         metadata.append({"form_type": forms[i], "filing_date_str": dates[i], "accession_number": acc_nos[i], "primary_document": docs[i]})
                 except (ValueError, IndexError): continue
-            xml_fetches, max_xml, max_other = 20, 20, 15 # Adjusted initial xml_fetches to max_xml if starting empty for some reason
+            xml_fetches, max_xml, max_other = 0, 20, 15 
             for info in metadata:
                 form, date_str, acc_no, doc_name = info["form_type"], info["filing_date_str"], info["accession_number"], info["primary_document"]
                 acc_no_dashless = acc_no.replace('-', '')
                 idx_link = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{acc_no}-index.html"
                 
                 # Placeholder for fetching document content for LLM summary.
-                # In a real app, you would download and parse the 'primaryDocument' here.
-                # For this simulation, we'll just indicate if content *could* be fetched.
                 document_content_placeholder = ""
                 if form in ['10-K', '10-Q', '8-K']:
-                    # Simulate content fetch: In a real scenario, this is where you'd scrape the document content
-                    # For example, you'd download the primaryDocument (e.g., a .htm file) and extract text.
-                    # As a placeholder, let's assume we can fetch some 'content' for these forms.
                     document_content_placeholder = f"Content for {form} on {date_str} (Placeholder for actual scraped text from {doc_name})."
                 
 
@@ -320,7 +315,8 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                                     except ValueError: price = None
                                 ad_node = tx.find('transactionAcquiredDisposedCode'); ad_code = ad_node.find('value').text.strip().upper() if ad_node and ad_node.find('value') else "N/A"
                                 if shares != 0: filings_list.append({"is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": date_str, "transaction_date": tx_date, "reporting_owner": owner_name, "owner_relationship": owner_rel, "transaction_code": tx_code, "acq_disp_code": ad_code, "shares": shares, "price_per_share": price, "link_to_filing": idx_link})
-                    except: pass
+                    except Exception: # Broad catch for parsing issues in individual Form 4s
+                        continue # continue to next filing in metadata
                 elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other:
                     # Add content placeholder for LLM summary
                     filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": date_str, "form_type": form, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}", "summary_link": idx_link, "document_content_for_llm": document_content_placeholder})
@@ -502,7 +498,7 @@ class PriceAgent:
             bb_signal = "sell"
             if signal == "sell": confidence_score -= 0.1
             elif signal == "hold":
-                signal = "sell"; confidence_score += 0.05
+                signal = "sell"; confidence_score -= 0.05
         
         if signal == "hold":
             if latest.RSI14 < 40 and latest.RSI14 > 30:
@@ -967,6 +963,9 @@ class InstitutionalHoldingsAgent:
                 num_h = len(valid_h)
                 try:
                     total_s = sum(d.get('Shares',0) for d in valid_h); total_pct = sum(d.get('% Out',0.0) for d in valid_h)
+                    # Ensure 'Shares' for sorting are numeric and handle potential NaNs before sorting
+                    for d in valid_h:
+                        d['Shares'] = pd.to_numeric(d.get('Shares'), errors='coerce').fillna(0)
                     top_h = sorted(valid_h, key=lambda x: x.get('Shares',0), reverse=True)[:10]
                 except Exception as e: err = f"Error processing inst holdings: {e}"
             elif not err: err = "No valid inst holdings."
@@ -1087,8 +1086,10 @@ class PortfolioAgent:
             
             # Special handling for SEC Summary if it's a text summary, or use default signal value
             if s_key == "sec_summary_llm" and s_val and w > 0:
-                if "error" in s_key: # If there was an error in summary generation
-                    raw_score = 0 # Neutral score if summary failed
+                # The 'error' key is for the overall data bundle. sec_summary_llm is the actual summary text.
+                # Need to check sec_summary_error for actual LLM generation errors.
+                if agg_s.get("sec_summary_error"): # Check if the LLM summary agent itself reported an error
+                    raw_score = 0 # Neutral score if summary failed to generate
                 elif "negative" in s_val.lower() and "no significant events" not in s_val.lower():
                     raw_score = -0.5 # Infer negative if summary contains negative words
                 elif "positive" in s_val.lower() and "no significant events" not in s_val.lower():
@@ -1268,7 +1269,7 @@ def run_live_analysis(tickers, llm_client, configs):
     default_live_backtest_weights = {
         "price": 1.0, "momentum": 0.8, "volatility": 0.3, 
         "sentiment": 0., "fund": 0., "valuation_dcf": 0., "valuation_pe": 0.,
-        "sec_filings": 0., "sec_summary": 0., # Ensure sec_summary is included if we add it to the composite
+        "sec_filings": 0., "sec_summary": 0.,
         "inst_holdings": 0., "analyst": 0.,
         "politician_filings": 0., "vi_signal": 0.
     }
@@ -1559,8 +1560,15 @@ def display_detailed_analysis(res_detail):
             """, unsafe_allow_html=True)
             
             holders = res_detail.get('inst_top_holders', [])
+            # Filter out any non-numeric Shares or holders with 0 shares that might cause plotting issues
             if holders:
                 holders_df = pd.DataFrame(holders)
+                # Ensure 'Shares' column is numeric, coercing errors to NaN, then drop NaNs
+                holders_df['Shares'] = pd.to_numeric(holders_df['Shares'], errors='coerce')
+                holders_df = holders_df.dropna(subset=['Shares'])
+                # Filter out holders with zero shares, as they won't contribute to a pie chart slice
+                holders_df = holders_df[holders_df['Shares'] > 0]
+
                 if not holders_df.empty and 'Holder' in holders_df.columns and 'Shares' in holders_df.columns:
                     # Limit to top N for pie chart if many holders, or just use all if few
                     top_n_holders = holders_df.nlargest(5, 'Shares') if len(holders_df) > 5 else holders_df
@@ -1572,16 +1580,13 @@ def display_detailed_analysis(res_detail):
                     ).properties(
                         title="Top Institutional Holders (by Shares)"
                     )
-                    st.altair_chart(chart, use_container_width=True)
-
-                with st.expander("View All Top Institutional Holders"): # Changed from popover
-                    df_holders = pd.DataFrame(holders)
-                    df_holders = df_holders.rename(columns={"% Out":"% of Outstanding"})
-                    available_cols = [col for col in ["Holder", "Shares", "% of Outstanding", "Date Reported"] if col in df_holders.columns]
-                    column_config = {}
-                    if "% of Outstanding" in df_holders.columns:
-                        column_config["% of Outstanding"] = st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=max(0.10, df_holders["% of Outstanding"].max()))
-                    st.dataframe(df_holders[available_cols], column_config=column_config, hide_index=True, use_container_width=True)
+                    try:
+                        st.altair_chart(chart, use_container_width=True)
+                    except Exception as chart_err:
+                        st.error(f"Error rendering institutional holdings chart: {chart_err}")
+                        st.json(top_n_holders.to_dict('records')) # Show raw data if chart fails
+                else:
+                    st.info("Not enough valid data points for institutional holdings chart.")
             else:
                 st.info("No institutional holder data available.")
 
@@ -1731,11 +1736,8 @@ with config_cont:
             if not portfolio_names_bt: st.warning("No portfolios found.")
             else:
                 sel_pf_bt = st.selectbox("Select Portfolio to use its total value:", portfolio_names_bt, key="bt_pf_select")
-                # Need to calculate current value of selected portfolio to use as initial capital
-                # This requires fetching live prices within this branch, which could be slow.
-                # For simplicity, we'll assume a fixed value or prompt user.
                 st.info("Using a fixed $10,000 for backtesting from saved portfolio. Live value fetching is not implemented here for performance.")
-                bt_capital = 10000 # Placeholder for actual portfolio value
+                bt_capital = 10000 
 
         bt_c1, bt_c2 = st.columns(2)
         with bt_c1:
@@ -1753,7 +1755,7 @@ with config_cont:
             st.session_state.bt_weights = {
                 "price":w_p, "momentum":w_m, "volatility":w_v,
                 "sentiment":0.,"fund":0.,"valuation_dcf":0.,"valuation_pe":0.,
-                "sec_filings":0.,"sec_summary":0., # Explicitly set to 0 for backtest
+                "sec_filings":0.,"sec_summary":0., 
                 "inst_holdings":0.,"analyst":0.,"politician_filings":0.,"vi_signal":0.
             }
             st.session_state.bt_capital = bt_capital
@@ -1771,7 +1773,7 @@ with config_cont:
         portfolio_names_list = list(st.session_state.portfolios_data.keys())
 
         if not portfolio_names_list:
-            st.session_state.portfolios_data["My First Portfolio"] = {"holdings": []} # No initial cash here
+            st.session_state.portfolios_data["My First Portfolio"] = {"holdings": []} 
             st.session_state.selected_portfolio_name = "My First Portfolio"
             save_portfolios(st.session_state.portfolios_data)
             st.rerun()
@@ -1809,9 +1811,8 @@ with config_cont:
             st.info(f"Running AI analysis on {len(tickers_to_analyze)} holdings...")
             portfolio_analysis_configs = {
                 "use_sentiment": True, "use_filings": True, "use_politician_filings": True,
-                "use_value_trades": True, "use_sec_summary": True # Ensure all features are on for portfolio analysis
+                "use_value_trades": True, "use_sec_summary": True 
             }
-            # Only run if not already stored or if forced refresh
             if 'portfolio_analysis_results' not in st.session_state or \
                st.session_state.portfolio_analysis_results.get('portfolio_name') != st.session_state.selected_portfolio_name:
                 st.session_state.portfolio_analysis_results = {
@@ -1825,7 +1826,7 @@ with config_cont:
 
             total_market_value = 0.0
             total_unrealized_pnl = 0.0
-            total_invested_cost = 0.001 # Avoid division by zero
+            total_invested_cost = 0.001 
 
             for holding in current_portfolio['holdings']:
                 ticker = holding['ticker']
@@ -1924,7 +1925,7 @@ with config_cont:
                 
                 save_portfolios(st.session_state.portfolios_data)
                 st.success(f"Added {add_quantity:.2f} shares of {add_ticker} at ${add_price:.2f} to '{st.session_state.selected_portfolio_name}'.")
-                st.session_state.portfolio_analysis_results = None # Clear analysis cache to force re-run
+                st.session_state.portfolio_analysis_results = None 
                 st.rerun()
             else:
                 st.error("Please enter a valid ticker, quantity, and purchase price.")
@@ -1941,7 +1942,7 @@ with config_cont:
                 if len(current_portfolio['holdings']) < initial_holdings_count:
                     save_portfolios(st.session_state.portfolios_data)
                     st.success(f"Removed {remove_ticker_selection} from '{st.session_state.selected_portfolio_name}'.")
-                    st.session_state.portfolio_analysis_results = None # Clear analysis cache to force re-run
+                    st.session_state.portfolio_analysis_results = None 
                     st.rerun()
                 else:
                     st.error(f"{remove_ticker_selection} not found in '{st.session_state.selected_portfolio_name}' holdings.")
@@ -1954,7 +1955,7 @@ with config_cont:
                 del st.session_state.portfolios_data[st.session_state.selected_portfolio_name]
                 save_portfolios(st.session_state.portfolios_data)
                 st.session_state.selected_portfolio_name = None
-                st.session_state.portfolio_analysis_results = None # Clear analysis cache
+                st.session_state.portfolio_analysis_results = None 
                 st.success(f"Portfolio '{st.session_state.selected_portfolio_name}' deleted.")
                 st.rerun()
             else:
@@ -1962,261 +1963,145 @@ with config_cont:
 
 
     elif st.session_state.app_mode == "🤖 Virtual Trading":
-        st.subheader("🤖 AI Virtual Trader Controls")
-        st.markdown("The AI Trader manages a virtual portfolio, aiming for a **60/40 split** between safe and high-risk stocks. Click below to have it analyze the market and execute trades.")
-
-        stock_universe = { "safe": ['MSFT', 'AAPL', 'JNJ', 'V', 'PG', 'GOOGL', 'JPM'], "risky": ['CRWD', 'PLTR', 'U', 'COIN', 'RBLX', 'SNOW', 'MDB'] }
-        with st.expander("View AI's Stock Universe"):
-            col1, col2 = st.columns(2)
-            col1.markdown("**Safe Stocks (60% target)**"); col1.json(stock_universe['safe'])
-            col2.markdown("**Risky Stocks (40% target)**"); col2.json(stock_universe['risky'])
-
-        vt_controls_cols = st.columns([2,1,1])
-        add_capital_amount = vt_controls_cols[0].number_input("Add Capital", min_value=0, value=0, step=100, key="vt_add_capital", help="Enter an amount and click the button to add it to your cash balance.")
-        if vt_controls_cols[1].button("💰 Add Capital", key="vt_add_capital_btn"):
-            st.session_state.virtual_portfolio['cash'] += add_capital_amount
-            save_virtual_portfolio(st.session_state.virtual_portfolio)
-            st.success(f"${add_capital_amount:,.2f} added to cash.")
-            st.rerun()
-        if vt_controls_cols[2].button("🔄 Reset Simulation", type="secondary"):
-            st.session_state.virtual_portfolio = get_default_virtual_portfolio()
-            save_virtual_portfolio(st.session_state.virtual_portfolio)
-            st.info("Virtual portfolio has been reset."); st.rerun()
-
-        if st.button("▶️ Run AI Trading Day", type="primary", use_container_width=True):
-            all_tickers_to_scan = stock_universe['safe'] + stock_universe['risky']
-            ai_configs = {
-                "use_sentiment": True, "use_filings": True, "use_politician_filings": True,
-                "use_value_trades": True, "use_sec_summary": True # Ensure all features are on for AI Trader
-            }
+        st.header("📈 Virtual Portfolio Dashboard")
+        with st.container(border=True):
+            holdings_df_data = []
+            total_holdings_value, total_pnl, initial_investment = 0.0, 0.0, 0.001
             
-            with st.spinner("⏳ AI analyzing market and executing trades..."):
-                analysis_results = run_live_analysis(all_tickers_to_scan, llm_client, ai_configs)
-                trader_agent = AITraderAgent(llm_client, stock_universe)
-                trades = trader_agent.run(st.session_state.virtual_portfolio, analysis_results)
+            portfolio_value_history = []
+            
+            temp_cash = get_default_virtual_portfolio()["cash"]
+            
+            chronological_transactions = list(reversed(st.session_state.virtual_portfolio['transaction_history']))
+            
+            all_tickers_in_history = list(set([t['ticker'] for t in st.session_state.virtual_portfolio['transaction_history']]))
+            price_data_for_history = {}
+            with st.spinner("Pre-fetching historical prices for portfolio value chart..."):
+                for t in all_tickers_in_history:
+                    price_data_for_history[t] = fetch_price_history(t, period="max")
+
+            
+            if chronological_transactions:
+                earliest_tx_date = datetime.strptime(chronological_transactions[0]['date'].split(" ")[0], "%Y-%m-%d") if chronological_transactions else datetime.now()
+                earliest_data_point = earliest_tx_date - timedelta(days=365*2)
                 
-                if not trades:
-                    st.toast("AI analyzed the market and decided to hold all positions. No trades executed.", icon="✅")
-                else:
-                    for trade in trades:
-                        if trade['type'] == 'buy':
-                            st.toast(f"AI BUY: {trade['ticker']} Qty: {trade['quantity']:.2f} @ ${trade['price']:.2f}", icon="📈")
-                            existing_holding = next((h for h in st.session_state.virtual_portfolio['holdings'] if h['ticker'] == trade['ticker']), None)
-                            if existing_holding:
-                                new_total_quantity = existing_holding['quantity'] + trade['quantity']
-                                new_avg_price = ((existing_holding['avg_price'] * existing_holding['quantity']) + (trade['price'] * trade['quantity'])) / new_total_quantity
-                                existing_holding['quantity'] = new_total_quantity; existing_holding['avg_price'] = new_avg_price
-                            else:
-                                st.session_state.virtual_portfolio['holdings'].append({'ticker': trade['ticker'], 'quantity': trade['quantity'], 'avg_price': trade['price']})
-                            st.session_state.virtual_portfolio['cash'] -= trade['price'] * trade['quantity']
-                        elif trade['type'] == 'sell':
-                            st.toast(f"AI SELL: {trade['ticker']} Qty: {trade['quantity']:.2f} @ ${trade['price']:.2f}", icon="📉")
-                            st.session_state.virtual_portfolio['cash'] += trade['price'] * trade['quantity']
-                            st.session_state.virtual_portfolio['holdings'] = [h for h in st.session_state.virtual_portfolio['holdings'] if h['ticker'] != trade['ticker']]
-                        
-                        st.session_state.virtual_portfolio['transaction_history'].insert(0, {
-                            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                            "ticker": trade['ticker'], 
-                            "type": trade['type'].upper(), 
-                            "quantity": f"{trade['quantity']:.4f}", 
-                            "price": f"${trade['price']:.2f}", 
-                            "value": f"${trade['price'] * trade['quantity']:.2f}", # Add trade value
-                            "reason": trade['reason']
-                        })
-            
-            st.session_state.virtual_portfolio["last_scan_date"] = datetime.now().strftime("%Y-%m-%d")
-            save_virtual_portfolio(st.session_state.virtual_portfolio)
-            st.rerun()
+                full_date_range = pd.date_range(start=earliest_data_point, end=datetime.now(), freq='D')
+                
+                daily_portfolio_values = pd.Series(index=full_date_range, dtype=float).fillna(np.nan)
+                daily_portfolio_values[full_date_range[0]] = get_default_virtual_portfolio()["cash"]
 
-st.markdown("---")
+                current_holdings_for_chart = {}
+                current_cash_for_chart = get_default_virtual_portfolio()["cash"]
+                last_date_processed = full_date_range[0]
 
-# ===============================================
-# Main Results Display Area
-# ===============================================
+                for tx in chronological_transactions:
+                    tx_date = datetime.strptime(tx['date'].split(" ")[0], "%Y-%m-%d")
+                    tx_quantity = float(tx['quantity'])
+                    tx_price = float(tx['price'].replace('$', ''))
+                    tx_type = tx['type']
 
-if st.session_state.app_mode == "Live Analysis" and st.session_state.live_analysis_triggered:
-    st.header("📊 Live Analysis Summary")
-    live_output = st.session_state.live_output
-    live_tickers = list(live_output.keys())
-    n_tickers = len(live_tickers)
-    cols_pr = min(n_tickers, 3)
-    if n_tickers > 0:
-        for i in range(0, n_tickers, cols_pr):
-            row_t = live_tickers[i:i+cols_pr]; cols_ui = st.columns(len(row_t))
-            for idx, sym in enumerate(row_t):
-                with cols_ui[idx]:
-                    res = live_output.get(sym)
-                    if not res or res.get("error"): st.error(f"**{sym}**: {res.get('error','No data.') if res else 'No data.'}"); continue
-                    dec,score,price = res.get("final_decision","N/A").upper(), res.get("composite_score",float('nan')), res.get("current_price_display")
-                    cmap={"BUY":"green","SELL":"red","HOLD":"#FFA500","ERROR":"#808080","N/A":"#D3D3D3"}; color=cmap.get(dec,"#D3D3D3")
-                    p_html = f'<p style="font-size:0.9em;">Price:<strong>${price:,.2f}</strong></p>' if isinstance(price,(int,float)) else '<p style="font-size:0.9em;">Price:<strong>N/A</strong></p>'
-                    s_html = f'<p style="font-size:0.9em;">Score:<strong style="color:{color};">{score:.2f}</strong></p>' if pd.notna(score) else f'<p style="font-size:0.9em;">Score:<strong style="color:{color};">N/A</strong></p>'
-                    st.markdown(f"""<div style="border:1px solid {color};border-radius:8px;padding:15px;margin-bottom:10px;background-color:{color}20;"><h3 style="margin-bottom:5px;color:{color};">{sym}</h3><p style="font-size:1.6em;font-weight:bold;color:{color};margin-bottom:5px;">{dec}</p>{s_html}{p_html}</div>""", unsafe_allow_html=True)
-        st.markdown("---")
-        for sym_detail in live_tickers:
-            res_detail = live_output.get(sym_detail)
-            if not res_detail or res_detail.get("error"): continue
-            with st.expander(f"🔍 Detailed Analysis for {sym_detail} ({res_detail.get('ticker_info',{}).get('longName','N/A')})"):
-                display_detailed_analysis(res_detail)
+                    for day in pd.date_range(start=last_date_processed + timedelta(days=1), end=tx_date, freq='D'):
+                        portfolio_val_on_day = current_cash_for_chart
+                        for ticker_chart, qty_chart in current_holdings_for_chart.items():
+                            day_price_series = price_data_for_history.get(ticker_chart, pd.DataFrame())
+                            day_price = None
+                            if not day_price_series.empty:
+                                try:
+                                    day_price = day_price_series.loc[day.strftime("%Y-%m-%d")].get("Close")
+                                except KeyError:
+                                    nearest_idx = day_price_series.index.asof(day)
+                                    if nearest_idx is not pd.NaT:
+                                        day_price = day_price_series.loc[nearest_idx].get("Close")
 
-elif st.session_state.app_mode == "Backtesting" and st.session_state.backtest_triggered:
-    bt_ticker = st.session_state.get('bt_ticker')
-    if bt_ticker and bt_ticker in st.session_state.backtest_results:
-        bt_res_for_ticker = st.session_state.backtest_results[bt_ticker]
-        metrics, log_df = bt_res_for_ticker.get("metrics"), bt_res_for_ticker.get("log_df")
-        if metrics and not (metrics.get("message") or metrics.get("error")):
-            st.header(f"📈 Backtest Results for {bt_ticker}")
-            metrics_df_bt = pd.DataFrame.from_dict(metrics, orient='index', columns=['Value'])
-            st.table(metrics_df_bt)
-            if log_df is not None and not log_df.empty:
-                st.subheader("Portfolio Value Over Time"); st.line_chart(log_df["portfolio_value"])
-                st.subheader("Drawdown Over Time"); st.area_chart(log_df["drawdown"].fillna(0))
-                with st.expander("View Raw Backtest Log (Last 1000)"): st.dataframe(log_df.tail(1000))
-            else: st.warning("Backtest log empty.")
-        elif metrics:
-            st.error(f"Backtest failed: {metrics.get('message','') or metrics.get('error','Unknown error')}")
+                            if day_price:
+                                portfolio_val_on_day += qty_chart * day_price
+                        if pd.notna(portfolio_val_on_day):
+                            daily_portfolio_values.loc[day] = portfolio_val_on_day
+                    
+                    last_date_processed = tx_date
 
-elif st.session_state.app_mode == "🤖 Virtual Trading":
-    st.header("📈 Virtual Portfolio Dashboard")
-    with st.container(border=True):
-        holdings_df_data = []
-        total_holdings_value, total_pnl, initial_investment = 0.0, 0.0, 0.001
-        
-        portfolio_value_history = []
-        
-        temp_cash = get_default_virtual_portfolio()["cash"]
-        
-        chronological_transactions = list(reversed(st.session_state.virtual_portfolio['transaction_history']))
-        
-        all_tickers_in_history = list(set([t['ticker'] for t in st.session_state.virtual_portfolio['transaction_history']]))
-        price_data_for_history = {}
-        with st.spinner("Pre-fetching historical prices for portfolio value chart..."):
-            for t in all_tickers_in_history:
-                price_data_for_history[t] = fetch_price_history(t, period="max")
-
-        
-        if chronological_transactions:
-            earliest_tx_date = datetime.strptime(chronological_transactions[0]['date'].split(" ")[0], "%Y-%m-%d") if chronological_transactions else datetime.now()
-            earliest_data_point = earliest_tx_date - timedelta(days=365*2)
-            
-            full_date_range = pd.date_range(start=earliest_data_point, end=datetime.now(), freq='D')
-            
-            daily_portfolio_values = pd.Series(index=full_date_range, dtype=float).fillna(np.nan)
-            daily_portfolio_values[full_date_range[0]] = get_default_virtual_portfolio()["cash"]
-
-            current_holdings_for_chart = {}
-            current_cash_for_chart = get_default_virtual_portfolio()["cash"]
-            last_date_processed = full_date_range[0]
-
-            for tx in chronological_transactions:
-                tx_date = datetime.strptime(tx['date'].split(" ")[0], "%Y-%m-%d")
-                tx_quantity = float(tx['quantity'])
-                tx_price = float(tx['price'].replace('$', ''))
-                tx_type = tx['type']
-
-                for day in pd.date_range(start=last_date_processed + timedelta(days=1), end=tx_date, freq='D'):
-                    portfolio_val_on_day = current_cash_for_chart
+                    if tx_type == 'BUY':
+                        current_holdings_for_chart[tx['ticker']] = current_holdings_for_chart.get(tx['ticker'], 0) + tx_quantity
+                        current_cash_for_chart -= tx_quantity * tx_price
+                    elif tx_type == 'SELL':
+                        current_holdings_for_chart[tx['ticker']] = current_holdings_for_chart.get(tx['ticker'], 0) - tx_quantity
+                        if current_holdings_for_chart[tx['ticker']] <= 0.0001: 
+                            del current_holdings_for_chart[tx['ticker']]
+                        current_cash_for_chart += tx_quantity * tx_price
+                    
+                    portfolio_val_on_tx_day = current_cash_for_chart
                     for ticker_chart, qty_chart in current_holdings_for_chart.items():
-                        day_price_series = price_data_for_history.get(ticker_chart, pd.DataFrame())
-                        day_price = None
-                        if not day_price_series.empty:
+                        tx_day_price_series = price_data_for_history.get(ticker_chart, pd.DataFrame())
+                        tx_day_price = None
+                        if not tx_day_price_series.empty:
                             try:
-                                day_price = day_price_series.loc[day.strftime("%Y-%m-%d")].get("Close")
+                                tx_day_price = tx_day_price_series.loc[tx_date.strftime("%Y-%m-%d")].get("Close")
                             except KeyError:
-                                # Fallback if specific date not in index, find nearest previous
-                                nearest_idx = day_price_series.index.asof(day)
+                                nearest_idx = tx_day_price_series.index.asof(tx_date)
                                 if nearest_idx is not pd.NaT:
-                                    day_price = day_price_series.loc[nearest_idx].get("Close")
-
-                        if day_price:
-                            portfolio_val_on_day += qty_chart * day_price
-                    if pd.notna(portfolio_val_on_day):
-                        daily_portfolio_values.loc[day] = portfolio_val_on_day
+                                    tx_day_price = tx_day_price_series.loc[nearest_idx].get("Close")
+                        if tx_day_price:
+                            portfolio_val_on_tx_day += qty_chart * tx_day_price
+                    if pd.notna(portfolio_val_on_tx_day):
+                        daily_portfolio_values.loc[tx_date] = portfolio_val_on_tx_day
                 
-                last_date_processed = tx_date
+                daily_portfolio_values = daily_portfolio_values.fillna(method='ffill').fillna(method='bfill')
 
-                if tx_type == 'BUY':
-                    current_holdings_for_chart[tx['ticker']] = current_holdings_for_chart.get(tx['ticker'], 0) + tx_quantity
-                    current_cash_for_chart -= tx_quantity * tx_price
-                elif tx_type == 'SELL':
-                    current_holdings_for_chart[tx['ticker']] = current_holdings_for_chart.get(tx['ticker'], 0) - tx_quantity
-                    if current_holdings_for_chart[tx['ticker']] <= 0.0001: # Handle floating point near zero
-                        del current_holdings_for_chart[tx['ticker']]
-                    current_cash_for_chart += tx_quantity * tx_price
+                today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                if today not in daily_portfolio_values.index:
+                    last_known_value = daily_portfolio_values.iloc[-1] if not daily_portfolio_values.empty else get_default_virtual_portfolio()["cash"]
+                    daily_portfolio_values.loc[today] = last_known_value
                 
-                portfolio_val_on_tx_day = current_cash_for_chart
-                for ticker_chart, qty_chart in current_holdings_for_chart.items():
-                    tx_day_price_series = price_data_for_history.get(ticker_chart, pd.DataFrame())
-                    tx_day_price = None
-                    if not tx_day_price_series.empty:
-                        try:
-                            tx_day_price = tx_day_price_series.loc[tx_date.strftime("%Y-%m-%d")].get("Close")
-                        except KeyError:
-                            nearest_idx = tx_day_price_series.index.asof(tx_date)
-                            if nearest_idx is not pd.NaT:
-                                tx_day_price = tx_day_price_series.loc[nearest_idx].get("Close")
-                    if tx_day_price:
-                        portfolio_val_on_tx_day += qty_chart * tx_day_price
-                if pd.notna(portfolio_val_on_tx_day):
-                    daily_portfolio_values.loc[tx_date] = portfolio_val_on_tx_day
+                daily_portfolio_values = daily_portfolio_values.reindex(pd.date_range(start=daily_portfolio_values.index.min(), end=today, freq='D')).fillna(method='ffill').fillna(method='bfill')
+                daily_portfolio_values_df = pd.DataFrame(daily_portfolio_values, columns=['Portfolio Value'])
+                daily_portfolio_values_df.index.name = 'Date'
+
+            else:
+                daily_portfolio_values_df = pd.DataFrame({
+                    'Date': [datetime.now() - timedelta(days=7), datetime.now()],
+                    'Portfolio Value': [get_default_virtual_portfolio()["cash"], get_default_virtual_portfolio()["cash"]]
+                }).set_index('Date')
+
+
+            if st.session_state.virtual_portfolio['holdings']:
+                with st.spinner("Fetching latest prices for dashboard..."):
+                    for holding in st.session_state.virtual_portfolio['holdings']:
+                        info = fetch_ticker_info(holding['ticker'])
+                        price = info.get("currentPrice")
+                        if price is None and not price_data_for_history.get(holding['ticker'], pd.DataFrame()).empty:
+                            price = price_data_for_history[holding['ticker']].iloc[-1].get("Close")
+
+                        current_value = price * holding['quantity'] if isinstance(price, (int,float)) else 0
+                        pnl = (price - holding['avg_price']) * holding['quantity'] if isinstance(price, (int,float)) else 0
+                        total_holdings_value += current_value
+                        total_pnl += pnl
+                        initial_investment += holding['avg_price'] * holding['quantity']
+                        holdings_df_data.append({"Ticker": holding['ticker'], "Quantity": holding['quantity'], "Avg. Price": holding['avg_price'], "Current Price": price, "Current Value": current_value, "P&L": pnl})
             
-            daily_portfolio_values = daily_portfolio_values.fillna(method='ffill').fillna(method='bfill')
+            total_portfolio_value = st.session_state.virtual_portfolio['cash'] + total_holdings_value
+            pnl_percent = (total_pnl / initial_investment * 100) if initial_investment != 0 else 0.0
 
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            if today not in daily_portfolio_values.index:
-                last_known_value = daily_portfolio_values.iloc[-1] if not daily_portfolio_values.empty else get_default_virtual_portfolio()["cash"]
-                daily_portfolio_values.loc[today] = last_known_value
-            
-            daily_portfolio_values = daily_portfolio_values.reindex(pd.date_range(start=daily_portfolio_values.index.min(), end=today, freq='D')).fillna(method='ffill').fillna(method='bfill')
-            daily_portfolio_values_df = pd.DataFrame(daily_portfolio_values, columns=['Portfolio Value'])
-            daily_portfolio_values_df.index.name = 'Date'
+            pnl_color = "normal" if total_pnl >= 0 else "inverse"
+            dash_cols = st.columns(4)
+            dash_cols[0].metric("Total Portfolio Value", f"${total_portfolio_value:,.2f}")
+            dash_cols[1].metric("Cash Balance", f"${st.session_state.virtual_portfolio['cash']:,.2f}")
+            dash_cols[2].metric("Total Profit/Loss", f"${total_pnl:,.2f}", f"{pnl_percent:.2f}%", delta_color=pnl_color)
+            if st.session_state.virtual_portfolio.get('last_scan_date'):
+                dash_cols[3].metric("AI Last Active", st.session_state.virtual_portfolio.get('last_scan_date'))
 
-        else:
-            daily_portfolio_values_df = pd.DataFrame({
-                'Date': [datetime.now() - timedelta(days=7), datetime.now()],
-                'Portfolio Value': [get_default_virtual_portfolio()["cash"], get_default_virtual_portfolio()["cash"]]
-            }).set_index('Date')
+            st.subheader("Current Holdings")
+            if holdings_df_data:
+                holdings_df = pd.DataFrame(holdings_df_data)
+                st.dataframe(holdings_df, use_container_width=True, column_config={ "Avg. Price": st.column_config.NumberColumn(format="$%.2f"), "Current Price": st.column_config.NumberColumn(format="$%.2f"), "Current Value": st.column_config.NumberColumn(format="$%.2f"), "P&L": st.column_config.NumberColumn(format="$%.2f"), "Quantity": st.column_config.NumberColumn(format="%.4f") })
+            else:
+                st.info("The portfolio currently holds no stocks. Run the AI Trader to start investing.")
 
+            st.subheader("Portfolio Value Over Time")
+            st.line_chart(daily_portfolio_values_df, use_container_width=True, color="#0072F0")
 
-        if st.session_state.virtual_portfolio['holdings']:
-            with st.spinner("Fetching latest prices for dashboard..."):
-                for holding in st.session_state.virtual_portfolio['holdings']:
-                    info = fetch_ticker_info(holding['ticker'])
-                    price = info.get("currentPrice")
-                    if price is None and not price_data_for_history.get(holding['ticker'], pd.DataFrame()).empty:
-                        price = price_data_for_history[holding['ticker']].iloc[-1].get("Close")
-
-                    current_value = price * holding['quantity'] if isinstance(price, (int,float)) else 0
-                    pnl = (price - holding['avg_price']) * holding['quantity'] if isinstance(price, (int,float)) else 0
-                    total_holdings_value += current_value
-                    total_pnl += pnl
-                    initial_investment += holding['avg_price'] * holding['quantity']
-                    holdings_df_data.append({"Ticker": holding['ticker'], "Quantity": holding['quantity'], "Avg. Price": holding['avg_price'], "Current Price": price, "Current Value": current_value, "P&L": pnl})
-        
-        total_portfolio_value = st.session_state.virtual_portfolio['cash'] + total_holdings_value
-        pnl_percent = (total_pnl / initial_investment * 100) if initial_investment != 0 else 0.0
-
-        pnl_color = "normal" if total_pnl >= 0 else "inverse"
-        dash_cols = st.columns(4)
-        dash_cols[0].metric("Total Portfolio Value", f"${total_portfolio_value:,.2f}")
-        dash_cols[1].metric("Cash Balance", f"${st.session_state.virtual_portfolio['cash']:,.2f}")
-        dash_cols[2].metric("Total Profit/Loss", f"${total_pnl:,.2f}", f"{pnl_percent:.2f}%", delta_color=pnl_color)
-        if st.session_state.virtual_portfolio.get('last_scan_date'):
-            dash_cols[3].metric("AI Last Active", st.session_state.virtual_portfolio.get('last_scan_date'))
-
-        st.subheader("Current Holdings")
-        if holdings_df_data:
-            holdings_df = pd.DataFrame(holdings_df_data)
-            st.dataframe(holdings_df, use_container_width=True, column_config={ "Avg. Price": st.column_config.NumberColumn(format="$%.2f"), "Current Price": st.column_config.NumberColumn(format="$%.2f"), "Current Value": st.column_config.NumberColumn(format="$%.2f"), "P&L": st.column_config.NumberColumn(format="$%.2f"), "Quantity": st.column_config.NumberColumn(format="%.4f") })
-        else:
-            st.info("The portfolio currently holds no stocks. Run the AI Trader to start investing.")
-
-        st.subheader("Portfolio Value Over Time")
-        st.line_chart(daily_portfolio_values_df, use_container_width=True, color="#0072F0")
-
-        st.subheader("Transaction History")
-        if st.session_state.virtual_portfolio['transaction_history']:
-            history_df = pd.DataFrame(st.session_state.virtual_portfolio['transaction_history'])
-            st.dataframe(history_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No transactions have been made yet.")
+            st.subheader("Transaction History")
+            if st.session_state.virtual_portfolio['transaction_history']:
+                history_df = pd.DataFrame(st.session_state.virtual_portfolio['transaction_history'])
+                st.dataframe(history_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No transactions have been made yet.")
