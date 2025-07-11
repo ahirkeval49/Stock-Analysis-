@@ -1,6 +1,6 @@
 import os
 import streamlit as st
-import yfinance as yf # Keep yfinance for all data fetching for now
+import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
@@ -13,18 +13,14 @@ import re
 from urllib.parse import urljoin, urlparse
 from newsapi import NewsApiClient
 import json
-import altair as alt # Import altair for charting
-import time # Import time for sleeps
-import random # Import random for random delays
-
-# --- REMOVED ALPHA VANTAGE IMPORTS (no longer needed) ---
-# from alpha_vantage.timeseries import TimeSeries
-# from alpha_vantage.fundamentaldata import FundamentalData
+import altair as alt
+import time
+import random
 
 # --- Page Config (Must be the first Streamlit command) ---
 st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
 
-st.write("DEBUG: App started and page config set.") # DEBUG
+st.write("DEBUG: App started and page config set.")
 
 # Load environment variables (if running locally)
 load_dotenv()
@@ -36,6 +32,17 @@ PORTFOLIOS_FILE = "portfolios.json"
 VIRTUAL_PORTFOLIO_FILE = "virtual_portfolio.json"
 
 # --------------------------------
+# Utility Functions (Global Scope)
+# --------------------------------
+
+def get_signal_color(signal):
+    """Returns a color (green, red, orange) based on the signal."""
+    signal = str(signal).upper()
+    if signal in ["BUY", "STRONG_BUY"]: return "green"
+    if signal == "SELL": return "red"
+    return "orange"
+
+# --------------------------------
 # Portfolio Helper Functions
 # --------------------------------
 def load_portfolios():
@@ -45,19 +52,19 @@ def load_portfolios():
                 data = json.load(f)
                 return data if isinstance(data, dict) else {}
         except json.JSONDecodeError:
-            print("DEBUG: JSONDecodeError loading portfolios. Returning empty dict.") # DEBUG
+            print("DEBUG: JSONDecodeError loading portfolios. Returning empty dict.")
             return {}
-    print("DEBUG: Portfolios file not found. Returning empty dict.") # DEBUG
+    print("DEBUG: Portfolios file not found. Returning empty dict.")
     return {}
 
 def save_portfolios(portfolios_data):
     if not isinstance(portfolios_data, dict):
         st.error("Error saving portfolios: Data is not in the correct format.")
-        print("DEBUG: Error saving portfolios: Data is not in the correct format.") # DEBUG
+        print("DEBUG: Error saving portfolios: Data is not in the correct format.")
         return
     with open(PORTFOLIOS_FILE, 'w') as f:
         json.dump(portfolios_data, f, indent=4)
-    print(f"DEBUG: Portfolios data saved to {PORTFOLIOS_FILE}") # DEBUG
+    print(f"DEBUG: Portfolios data saved to {PORTFOLIOS_FILE}")
 
 def load_virtual_portfolio():
     if os.path.exists(VIRTUAL_PORTFOLIO_FILE):
@@ -65,15 +72,15 @@ def load_virtual_portfolio():
             with open(VIRTUAL_PORTFOLIO_FILE, 'r') as f:
                 return json.load(f)
         except json.JSONDecodeError:
-            print("DEBUG: JSONDecodeError loading virtual portfolio. Returning default.") # DEBUG
+            print("DEBUG: JSONDecodeError loading virtual portfolio. Returning default.")
             return get_default_virtual_portfolio()
-    print("DEBUG: Virtual portfolio file not found. Returning default.") # DEBUG
+    print("DEBUG: Virtual portfolio file not found. Returning default.")
     return get_default_virtual_portfolio()
 
 def save_virtual_portfolio(data):
     with open(VIRTUAL_PORTFOLIO_FILE, 'w') as f:
         json.dump(data, f, indent=4, default=str) # Use default=str to handle datetimes if they exist
-    print(f"DEBUG: Virtual portfolio saved to {VIRTUAL_PORTFOLIO_FILE}") # DEBUG
+    print(f"DEBUG: Virtual portfolio saved to {VIRTUAL_PORTFOLIO_FILE}")
 
 def get_default_virtual_portfolio():
     return {
@@ -86,58 +93,58 @@ def get_default_virtual_portfolio():
 # --- Session State Initialization ---
 if 'portfolios_data' not in st.session_state:
     st.session_state.portfolios_data = load_portfolios()
-    print(f"DEBUG: Initialized portfolios_data from file: {st.session_state.portfolios_data.keys()}") # DEBUG
+    print(f"DEBUG: Initialized portfolios_data from file: {st.session_state.portfolios_data.keys()}")
 
 if 'selected_portfolio_name' not in st.session_state:
     st.session_state.selected_portfolio_name = None
     if st.session_state.portfolios_data:
         st.session_state.selected_portfolio_name = list(st.session_state.portfolios_data.keys())[0]
-    print(f"DEBUG: Initial selected_portfolio_name: {st.session_state.selected_portfolio_name}") # DEBUG
+    print(f"DEBUG: Initial selected_portfolio_name: {st.session_state.selected_portfolio_name}")
 
 if 'portfolio_stock_analysis' not in st.session_state:
     st.session_state.portfolio_stock_analysis = {}
-    print("DEBUG: Initialized portfolio_stock_analysis.") # DEBUG
+    print("DEBUG: Initialized portfolio_stock_analysis.")
 
 if 'backtest_results' not in st.session_state:
     st.session_state.backtest_results = {}
-    print("DEBUG: Initialized backtest_results.") # DEBUG
+    print("DEBUG: Initialized backtest_results.")
 
 if 'live_output' not in st.session_state:
     st.session_state.live_output = {}
-    print("DEBUG: Initialized live_output.") # DEBUG
+    print("DEBUG: Initialized live_output.")
 
 if 'virtual_portfolio' not in st.session_state:
     st.session_state.virtual_portfolio = load_virtual_portfolio()
-    print(f"DEBUG: Initialized virtual_portfolio. Cash: {st.session_state.virtual_portfolio['cash']}") # DEBUG
+    print(f"DEBUG: Initialized virtual_portfolio. Cash: {st.session_state.virtual_portfolio['cash']}")
 
 # Initialize flags for running analysis
 if 'live_analysis_triggered' not in st.session_state:
     st.session_state.live_analysis_triggered = False
-    print("DEBUG: Initialized live_analysis_triggered to False.") # DEBUG
+    print("DEBUG: Initialized live_analysis_triggered to False.")
 if 'backtest_triggered' not in st.session_state:
     st.session_state.backtest_triggered = False
-    print("DEBUG: Initialized backtest_triggered to False.") # DEBUG
+    print("DEBUG: Initialized backtest_triggered to False.")
 
 # --------------------------------
-# Data Fetchers (All reverted to yfinance)
+# Data Fetchers (All using yfinance)
 # --------------------------------
 
 @st.cache_data(ttl=300) # Cache for 5 minutes
 def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame:
-    print(f"DEBUG: Calling fetch_price_history (yfinance) for {ticker} with period={period}, interval={interval}") # DEBUG
+    print(f"DEBUG: Calling fetch_price_history (yfinance) for {ticker} with period={period}, interval={interval}")
     try:
         ticker_obj = yf.Ticker(ticker)
         df = ticker_obj.history(period=period, interval=interval)
         if df.empty:
             st.warning(f"No price history returned from yfinance for {ticker} (period={period}).")
-            print(f"DEBUG: No price history returned from yfinance for {ticker}. DataFrame is empty.") # DEBUG
+            print(f"DEBUG: No price history returned from yfinance for {ticker}. DataFrame is empty.")
             return pd.DataFrame()
         df.index = pd.to_datetime(df.index).tz_localize(None)
-        print(f"DEBUG: Successfully fetched {len(df)} rows of price history for {ticker}.") # DEBUG
+        print(f"DEBUG: Successfully fetched {len(df)} rows of price history for {ticker}.")
         return df
     except Exception as e:
         st.error(f"Critical error fetching price history for {ticker}: {e}")
-        print(f"DEBUG: CRITICAL ERROR in fetch_price_history for {ticker}: {e}") # DEBUG
+        print(f"DEBUG: CRITICAL ERROR in fetch_price_history for {ticker}: {e}")
         return pd.DataFrame()
 
 
@@ -147,7 +154,7 @@ def fetch_ticker_info(ticker: str) -> dict:
     Fetches ticker information from yfinance with enhanced error handling and retries.
     Returns {..., "_error": "error message"} on final failure.
     """
-    print(f"DEBUG: Calling fetch_ticker_info (yfinance) for {ticker}") # DEBUG
+    print(f"DEBUG: Calling fetch_ticker_info (yfinance) for {ticker}")
     max_retries = 3
     base_delay = 1.0 # seconds
     
@@ -165,7 +172,7 @@ def fetch_ticker_info(ticker: str) -> dict:
                 
                 error_detail = f"Missing essential info: {', '.join(missing_keys)}. Raw keys: {list(info.keys()) if info else 'None'}."
                 st.warning(f"Attempt {attempt + 1}/{max_retries}: Failed to get complete info for {ticker}: {error_detail}")
-                print(f"DEBUG: Attempt {attempt + 1}/{max_retries}: Incomplete info for {ticker}: {error_detail}") # DEBUG
+                print(f"DEBUG: Attempt {attempt + 1}/{max_retries}: Incomplete info for {ticker}: {error_detail}")
                 
                 if attempt < max_retries - 1:
                     time.sleep(base_delay * (2 ** attempt) + random.uniform(0.1, 0.5))
@@ -173,10 +180,10 @@ def fetch_ticker_info(ticker: str) -> dict:
                 else:
                     final_error_msg = f"Failed to get complete info for {ticker} after {max_retries} attempts. Reason: {error_detail}. This may indicate an invalid ticker, a delisted stock, or persistent upstream data issues."
                     st.error(final_error_msg)
-                    print(f"DEBUG: FINAL ERROR in fetch_ticker_info for {ticker}: {final_error_msg}") # DEBUG
+                    print(f"DEBUG: FINAL ERROR in fetch_ticker_info for {ticker}: {final_error_msg}")
                     return {"_error": final_error_msg}
             
-            print(f"DEBUG: Successfully fetched ticker info for {ticker}. Keys: {list(info.keys())[:5]}...") # DEBUG
+            print(f"DEBUG: Successfully fetched ticker info for {ticker}. Keys: {list(info.keys())[:5]}...")
             return {
                 "marketCap": info.get("marketCap"), "freeCashflow": info.get("freeCashflow"),
                 "forwardPE": info.get("forwardPE"), "trailingPE": info.get("trailingPE"),
@@ -193,35 +200,35 @@ def fetch_ticker_info(ticker: str) -> dict:
             }
         except Exception as e:
             st.error(f"Attempt {attempt + 1}/{max_retries}: Exception fetching ticker info for {ticker}: {e}")
-            print(f"DEBUG: Attempt {attempt + 1}/{max_retries}: EXCEPTION in fetch_ticker_info for {ticker}: {e}") # DEBUG
+            print(f"DEBUG: Attempt {attempt + 1}/{max_retries}: EXCEPTION in fetch_ticker_info for {ticker}: {e}")
             if attempt < max_retries - 1:
                 time.sleep(base_delay * (2 ** attempt) + random.uniform(0.1, 0.5))
                 continue
             else:
                 final_error_msg = f"Final exception fetching info for {ticker} after {max_retries} attempts: {e}. This may indicate an invalid ticker, a delisted stock, or persistent upstream data issues."
                 st.error(final_error_msg)
-                print(f"DEBUG: FINAL EXCEPTION in fetch_ticker_info for {ticker}: {final_error_msg}") # DEBUG
+                print(f"DEBUG: FINAL EXCEPTION in fetch_ticker_info for {ticker}: {final_error_msg}")
                 return {"_error": final_error_msg}
 
 @st.cache_data(ttl=300) # Cache for 5 minutes
 def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
-    print(f"DEBUG: Calling fetch_enriched_news (yfinance) for {ticker}") # DEBUG
+    print(f"DEBUG: Calling fetch_enriched_news (yfinance) for {ticker}")
     try:
         company_name = ticker_info_data.get('longName', ticker_info_data.get('shortName', ticker))
         ticker_obj = yf.Ticker(ticker); raw_news = []
         try:
             raw_news = ticker_obj.news
-            print(f"DEBUG: Fetched {len(raw_news)} raw news items for {ticker}.") # DEBUG
+            print(f"DEBUG: Fetched {len(raw_news)} raw news items for {ticker}.")
         except TypeError as te:
-            print(f"DEBUG: Yfinance .news type error for {ticker}: {te}") # DEBUG
+            print(f"DEBUG: Yfinance .news type error for {ticker}: {te}")
             return [{"error": f"yfinance .news type error for {ticker}: {te}", "source_api": "Yahoo Finance"}]
         except Exception as news_exc:
-            print(f"DEBUG: Yfinance .news call failed for {ticker}: {news_exc}") # DEBUG
+            print(f"DEBUG: Yfinance .news call failed for {ticker}: {news_exc}")
             return [{"error": f"yfinance .news call failed for {ticker}: {news_exc}", "source_api": "Yahoo Finance"}]
         
         enriched_news_list = []
         if not raw_news:
-            print(f"DEBUG: No raw news to process for {ticker}.") # DEBUG
+            print(f"DEBUG: No raw news to process for {ticker}.")
             return []
         
         for news_item in raw_news:
@@ -236,18 +243,18 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
             for key in ['title', 'publisher', 'link', 'type']: enriched_item.setdefault(key, 'N/A' if key != 'link' else '#')
             enriched_news_list.append(enriched_item)
         enriched_news_list.sort(key=lambda x: x.get('publish_datetime_utc') or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-        print(f"DEBUG: Processed {len(enriched_news_list)} enriched news items for {ticker}.") # DEBUG
+        print(f"DEBUG: Processed {len(enriched_news_list)} enriched news items for {ticker}.")
         return enriched_news_list
     except Exception as e:
-        print(f"DEBUG: Overall error in fetch_enriched_news for {ticker}: {e}") # DEBUG
+        print(f"DEBUG: Overall error in fetch_enriched_news for {ticker}: {e}")
         return [{"error": f"Processing Yahoo Finance news for {ticker} failed: {e}", "source_api": "Yahoo Finance"}]
 
 @st.cache_data(ttl=1800)
 def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_days: int = 30) -> list[dict]:
-    print(f"DEBUG: Calling fetch_comprehensive_news_from_api (NewsAPI.org) for {ticker}") # DEBUG
+    print(f"DEBUG: Calling fetch_comprehensive_news_from_api (NewsAPI.org) for {ticker}")
     api_key = st.secrets.get("NEWSAPI_KEY")
     if not api_key:
-        print("DEBUG: NEWSAPI_KEY not found.") # DEBUG
+        print("DEBUG: NEWSAPI_KEY not found.")
         return [{"error": "NEWSAPI_KEY not found.", "source_api": "NewsAPI.org"}]
     newsapi = NewsApiClient(api_key=api_key)
     query = f'("{company_name}" OR {ticker.upper()}) AND (stock OR shares OR business OR finance OR earnings OR "product launch" OR "analyst rating" OR "market sentiment")'
@@ -263,33 +270,33 @@ def fetch_comprehensive_news_from_api(ticker: str, company_name: str, lookback_d
                     try: dt_obj_utc = datetime.fromisoformat(article['publishedAt'].replace('Z', '+00:00')); readable_time = dt_obj_utc.strftime('%Y-%m-%d %H:%M:%S %Z')
                     except ValueError: pass
                 articles_list.append({"uuid": article.get('url'), "title": article.get('title', 'No Title'), "publisher": article.get('source', {}).get('name', 'N/A'), "link": article.get('url', '#'), "publish_datetime_utc": dt_obj_utc, "publish_time_readable": readable_time, "description": article.get('description'), "content_snippet": article.get('content'), "company_name": company_name, "ticker": ticker, "source_api": "NewsAPI.org"})
-            print(f"DEBUG: Found {len(articles_list)} NewsAPI.org articles for {ticker}.") # DEBUG
+            print(f"DEBUG: Found {len(articles_list)} NewsAPI.org articles for {ticker}.")
         elif all_articles_response.get("status") == "error":
-            print(f"DEBUG: NewsAPI Error for {ticker}: {all_articles_response.get('code')} - {all_articles_response.get('message')}") # DEBUG
+            print(f"DEBUG: NewsAPI Error for {ticker}: {all_articles_response.get('code')} - {all_articles_response.get('message')}")
             return [{"error": f"NewsAPI Error ({ticker}): {all_articles_response.get('code')} - {all_articles_response.get('message')}", "source_api": "NewsAPI.org"}]
         else:
-            print(f"DEBUG: NewsAPI ({ticker}): No articles or unexpected structure.") # DEBUG
+            print(f"DEBUG: NewsAPI ({ticker}): No articles or unexpected structure.")
             return [{"error": f"NewsAPI ({ticker}): No articles or unexpected structure.", "source_api": "NewsAPI.org"}]
     except requests.exceptions.RequestException as e:
-        print(f"DEBUG: NewsAPI request failed for {ticker}: {e}") # DEBUG
+        print(f"DEBUG: NewsAPI request failed for {ticker}: {e}")
         return [{"error": f"NewsAPI request failed for {ticker}: {e}", "source_api": "NewsAPI.org"}]
     except Exception as e:
-        print(f"DEBUG: Unexpected error with NewsAPI for {ticker}: {e}") # DEBUG
+        print(f"DEBUG: Unexpected error with NewsAPI for {ticker}: {e}")
         return [{"error": f"Unexpected error with NewsAPI for {ticker}: {e}", "source_api": "NewsAPI.org"}]
     return articles_list
 
 @st.cache_data(ttl=24*3600)
 def get_all_cik_ticker_mappings():
-    print("DEBUG: Calling get_all_cik_ticker_mappings.") # DEBUG
+    print("DEBUG: Calling get_all_cik_ticker_mappings.")
     try:
         url = "https://www.sec.gov/files/company_tickers.json"
         response = requests.get(url, headers={'User-Agent': SEC_USER_AGENT}); response.raise_for_status()
         mappings = {item['ticker']: str(item['cik_str']).zfill(10) for item in response.json() if 'ticker' in item and 'cik_str' in item}
-        print(f"DEBUG: Fetched {len(mappings)} CIK mappings.") # DEBUG
+        print(f"DEBUG: Fetched {len(mappings)} CIK mappings.")
         return mappings
     except Exception as e:
         st.error(f"CRITICAL: Failed CIK mappings: {e}.");
-        print(f"DEBUG: CRITICAL ERROR in get_all_cik_ticker_mappings: {e}") # DEBUG
+        print(f"DEBUG: CRITICAL ERROR in get_all_cik_ticker_mappings: {e}")
         return {}
 TICKER_TO_CIK_MAP = get_all_cik_ticker_mappings()
 
@@ -297,10 +304,10 @@ def get_cik_for_ticker(ticker: str) -> str | None: return TICKER_TO_CIK_MAP.get(
 
 @st.cache_data(ttl=4*3600)
 def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[dict]:
-    print(f"DEBUG: Calling fetch_all_sec_filings for {ticker_symbol}") # DEBUG
+    print(f"DEBUG: Calling fetch_all_sec_filings for {ticker_symbol}")
     cik = get_cik_for_ticker(ticker_symbol)
     if not cik:
-        print(f"DEBUG: No CIK found for {ticker_symbol} during initial lookup.") # DEBUG
+        print(f"DEBUG: No CIK found for {ticker_symbol} during initial lookup.")
         try:
             headers = {'User-Agent': SEC_USER_AGENT}
             lookup_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={ticker_symbol.upper()}&owner=exclude&count=10"
@@ -313,12 +320,12 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
             if not cik:
                 cik_text_match = re.search(r"CIK:\s*(\d{10})", soup.get_text(), re.IGNORECASE)
                 if cik_text_match: cik = cik_text_match.group(1)
-            print(f"DEBUG: CIK found via lookup for {ticker_symbol}: {cik}") # DEBUG
+            print(f"DEBUG: CIK found via lookup for {ticker_symbol}: {cik}")
         except Exception as e:
-            print(f"DEBUG: Error during CIK lookup for {ticker_symbol}: {e}") # DEBUG
+            print(f"DEBUG: Error during CIK lookup for {ticker_symbol}: {e}")
             pass
     if not cik:
-        print(f"DEBUG: CIK still not found for {ticker_symbol}.") # DEBUG
+        print(f"DEBUG: CIK still not found for {ticker_symbol}.")
         return [{"error": f"SEC: CIK not found for {ticker_symbol}."}]
     
     cik_padded = str(cik).zfill(10)
@@ -327,7 +334,7 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
     try:
         response = requests.get(submissions_url, headers=headers, timeout=20); response.raise_for_status()
         submissions_data = response.json()
-        print(f"DEBUG: Fetched submissions data for CIK {cik_padded}.") # DEBUG
+        print(f"DEBUG: Fetched submissions data for CIK {cik_padded}.")
 
         today_utc = datetime.now(timezone.utc) # Use timezone-aware datetime
         date_limit = today_utc - timedelta(days=lookback_days)
@@ -342,10 +349,10 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                     if filing_date >= date_limit:
                         metadata.append({"form_type": forms[i], "filing_date_str": dates[i], "accession_number": acc_nos[i], "primary_document": docs[i]})
                 except (ValueError, IndexError) as e:
-                    print(f"DEBUG: Error processing filing metadata for {ticker_symbol} at index {i}: {e}") # DEBUG
+                    print(f"DEBUG: Error processing filing metadata for {ticker_symbol} at index {i}: {e}")
                     continue
             
-            print(f"DEBUG: Found {len(metadata)} recent relevant filings metadata for {ticker_symbol}.") # DEBUG
+            print(f"DEBUG: Found {len(metadata)} recent relevant filings metadata for {ticker_symbol}.")
             xml_fetches, max_xml, max_other = 0, 20, 15 
             for info in metadata:
                 form, date_str, acc_no, doc_name = info["form_type"], info["filing_date_str"], info["accession_number"], info["primary_document"]
@@ -358,13 +365,13 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                 
                 if form == '4' and doc_name.lower().endswith(('.xml', '.xsd')):
                     if xml_fetches >= max_xml:
-                        print(f"DEBUG: Max XML fetches reached for {ticker_symbol}. Skipping Form 4.") # DEBUG
+                        print(f"DEBUG: Max XML fetches reached for {ticker_symbol}. Skipping Form 4.")
                         continue
                     xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}"
                     try:
                         filing_resp = requests.get(xml_url, headers=headers, timeout=10)
                         if filing_resp.status_code != 200:
-                            print(f"DEBUG: Failed to fetch Form 4 XML {xml_url}: Status {filing_resp.status_code}") # DEBUG
+                            print(f"DEBUG: Failed to fetch Form 4 XML {xml_url}: Status {filing_resp.status_code}")
                             continue
                         soup_xml = BeautifulSoup(filing_resp.content, 'xml'); xml_fetches += 1
                         
@@ -397,56 +404,56 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                                 ad_node = tx.find('transactionAcquiredDisposedCode'); ad_code = ad_node.find('value').text.strip().upper() if ad_node and ad_node.find('value') else "N/A"
                                 if shares != 0:
                                     filings_list.append({"is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": date_str, "transaction_date": tx_date, "reporting_owner": owner_name, "owner_relationship": owner_rel, "transaction_code": tx_code, "acq_disp_code": ad_code, "shares": shares, "price_per_share": price, "link_to_filing": idx_link})
-                                    print(f"DEBUG: Parsed Form 4 TX for {ticker_symbol}: {tx_code} {shares} @ {price}") # DEBUG
+                                    print(f"DEBUG: Parsed Form 4 TX for {ticker_symbol}: {tx_code} {shares} @ {price}")
                     except Exception as e: # Broad catch for parsing issues in individual Form 4s
-                        print(f"DEBUG: Error parsing Form 4 for {ticker_symbol} from {xml_url}: {e}") # DEBUG
+                        print(f"DEBUG: Error parsing Form 4 for {ticker_symbol} from {xml_url}: {e}")
                         continue # continue to next filing in metadata
                 elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other:
                     filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": date_str, "form_type": form, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}", "summary_link": idx_link, "document_content_for_llm": document_content_placeholder})
-                    print(f"DEBUG: Added other filing for {ticker_symbol}: {form} on {date_str}") # DEBUG
+                    print(f"DEBUG: Added other filing for {ticker_symbol}: {form} on {date_str}")
             
             if not filings_list and xml_fetches > 0:
-                print(f"DEBUG: SEC: {xml_fetches} Form 4s for {ticker_symbol}, but no tx parsed.") # DEBUG
+                print(f"DEBUG: SEC: {xml_fetches} Form 4s for {ticker_symbol}, but no tx parsed.")
                 return [{"error": f"SEC: {xml_fetches} Form 4s for {ticker_symbol}, but no tx parsed."}]
             if not filings_list:
-                print(f"DEBUG: SEC: No relevant filings for {ticker_symbol} (CIK:{cik_padded}).") # DEBUG
+                print(f"DEBUG: SEC: No relevant filings for {ticker_symbol} (CIK:{cik_padded}).")
                 return [{"error": f"SEC: No relevant filings for {ticker_symbol} (CIK:{cik_padded})."}]
         else:
-            print(f"DEBUG: SEC: No recent filings data for {ticker_symbol} (CIK:{cik_padded}).") # DEBUG
+            print(f"DEBUG: SEC: No recent filings data for {ticker_symbol} (CIK:{cik_padded}).")
             return [{"error": f"SEC: No recent filings data for {ticker_symbol} (CIK:{cik_padded})."}]
     except requests.exceptions.HTTPError as e:
-        print(f"DEBUG: SEC HTTP error ({ticker_symbol}, CIK:{cik_padded}): {e}") # DEBUG
+        print(f"DEBUG: SEC HTTP error ({ticker_symbol}, CIK:{cik_padded}): {e}")
         return [{"error": f"SEC HTTP error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
     except requests.exceptions.RequestException as e:
-        print(f"DEBUG: SEC Request error ({ticker_symbol}, CIK:{cik_padded}): {e}") # DEBUG
+        print(f"DEBUG: SEC Request error ({ticker_symbol}, CIK:{cik_padded}): {e}")
         return [{"error": f"SEC Request error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
     except Exception as e:
-        print(f"DEBUG: SEC Unexpected error ({ticker_symbol}, CIK:{cik_padded}): {e}") # DEBUG
+        print(f"DEBUG: SEC Unexpected error ({ticker_symbol}, CIK:{cik_padded}): {e}")
         return [{"error": f"SEC Unexpected error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
     filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True);
-    print(f"DEBUG: Returned {len(filings_list)} SEC filings for {ticker_symbol}.") # DEBUG
+    print(f"DEBUG: Returned {len(filings_list)} SEC filings for {ticker_symbol}.")
     return filings_list
 
 @st.cache_data(ttl=6*3600)
 def fetch_inst_filings(ticker: str) -> list[dict]:
-    print(f"DEBUG: Calling fetch_inst_filings (yfinance) for {ticker}") # DEBUG
+    print(f"DEBUG: Calling fetch_inst_filings (yfinance) for {ticker}")
     try:
         df_holders = yf.Ticker(ticker).institutional_holders
         if df_holders is not None and not df_holders.empty:
             if 'Shares' in df_holders.columns: df_holders['Shares'] = pd.to_numeric(df_holders['Shares'], errors='coerce').fillna(0)
             if '% Out' in df_holders.columns: df_holders['% Out'] = pd.to_numeric(df_holders['% Out'], errors='coerce').fillna(0.0)
             if 'Date Reported' in df_holders.columns: df_holders['Date Reported'] = df_holders['Date Reported'].astype(str)
-            print(f"DEBUG: Fetched {len(df_holders)} institutional holders for {ticker}.") # DEBUG
+            print(f"DEBUG: Fetched {len(df_holders)} institutional holders for {ticker}.")
             return df_holders.to_dict("records")
-        print(f"DEBUG: No yfinance institutional holder data for {ticker}.") # DEBUG
+        print(f"DEBUG: No yfinance institutional holder data for {ticker}.")
         return [{"error": f"No yfinance institutional holder data for {ticker}."}]
     except Exception as e:
-        print(f"DEBUG: Error fetching institutional holders for {ticker}: {e}") # DEBUG
+        print(f"DEBUG: Error fetching institutional holders for {ticker}: {e}")
         return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
 
 @st.cache_data(ttl=4 * 3600)
 def fetch_value_investing_io_data(ticker: str) -> dict:
-    print(f"DEBUG: Calling fetch_value_investing_io_data for {ticker}") # DEBUG
+    print(f"DEBUG: Calling fetch_value_investing_io_data for {ticker}")
     url = f"https://valueinvesting.io/{ticker.upper()}/valuation/fair-value"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36'}
     try:
@@ -457,34 +464,34 @@ def fetch_value_investing_io_data(ticker: str) -> dict:
             if ticker.upper() in text and "Fair Value" in text and ("Peter Lynch" in text or "based on" in text or "valuation model" in text):
                 target_text = text; break
         if not target_text:
-            print(f"DEBUG: VI.io: Peter Lynch Fair Value paragraph not found for {ticker}.") # DEBUG
+            print(f"DEBUG: VI.io: Peter Lynch Fair Value paragraph not found for {ticker}.")
             return {"error": f"VI.io: Peter Lynch Fair Value paragraph not found for {ticker}."}
         pattern = re.compile(r"As of (?P<date>[\d]{4}-[\d]{2}-[\d]{2}), the Fair Value of .*?\(.*?" + re.escape(ticker.upper()) + r".*?\) is (?P<fair_value>[\d\.]+) USD\.?" + r"(?:.*?With the current market price of (?P<market_price>[\d\.]+) USD, the upside of .*? is (?P<upside_percent>[-+]?\d+\.?\d*)%\.?)?")
         match = pattern.search(target_text)
         if match:
             data = match.groupdict()
-            print(f"DEBUG: VI.io: Successfully parsed data for {ticker}.") # DEBUG
+            print(f"DEBUG: VI.io: Successfully parsed data for {ticker}.")
             return {"ticker": ticker, "vi_valuation_date": data.get("date"), "vi_fair_value": float(data.get("fair_value")) if data.get("fair_value") else None, "vi_site_market_price": float(data.get("market_price")) if data.get("market_price") else None, "vi_upside_percent": float(data.get("upside_percent")) if data.get("upside_percent") else None, "vi_full_text": target_text, "vi_data_source_url": url, "error": None}
         else:
             fv_match = re.search(r"Fair Value.*?is ([\d\.]+) USD", target_text)
             if fv_match:
-                print(f"DEBUG: VI.io: Generic parse for {ticker}.") # DEBUG
+                print(f"DEBUG: VI.io: Generic parse for {ticker}.")
                 return {"ticker": ticker, "vi_valuation_date": "N/A (generic)", "vi_fair_value": float(fv_match.group(1)) if fv_match.group(1) else None, "vi_site_market_price": None, "vi_upside_percent": None, "vi_full_text": target_text, "vi_data_source_url": url, "error": None, "note": "Generic parse."}
-            print(f"DEBUG: VI.io: Could not parse details for {ticker}.") # DEBUG
+            print(f"DEBUG: VI.io: Could not parse details for {ticker}.")
             return {"error": f"VI.io: Could not parse details for {ticker} from: '{target_text[:200]}...'"}
     except requests.exceptions.HTTPError as http_err:
-        print(f"DEBUG: VI.io: HTTP error for {ticker}: {http_err.response.status_code}") # DEBUG
+        print(f"DEBUG: VI.io: HTTP error for {ticker}: {http_err.response.status_code}")
         return {"error": f"VI.io: HTTP error for {ticker} ({http_err.response.status_code if http_err.response else 'Unknown'}): {url}"}
     except requests.exceptions.RequestException as req_err:
-        print(f"DEBUG: VI.io: Request error for {ticker}: {req_err}") # DEBUG
+        print(f"DEBUG: VI.io: Request error for {ticker}: {req_err}")
         return {"error": f"VI.io: Request error for {ticker}: {req_err}"}
     except Exception as e:
-        print(f"DEBUG: VI.io: Unexpected error for {ticker}: {e}") # DEBUG
+        print(f"DEBUG: VI.io: Unexpected error for {ticker}: {e}")
         return {"error": f"VI.io: Unexpected error for {ticker}: {e}"}
 
 @st.cache_data(ttl=3600)
 def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
-    print(f"DEBUG: Calling fetch_politician_trades for {ticker}") # DEBUG
+    print(f"DEBUG: Calling fetch_politician_trades for {ticker}")
     url = f"https://www.capitoltrades.com/trades?asset={ticker.upper()}&pageSize=100&perPage=100"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.capitoltrades.com/'}
     trades_list = []
@@ -494,10 +501,10 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
         trade_rows = soup.select("a[href^='/trades/'][class*='trade-row'], a[href^='/trades/'][class*='issuer-trade-row']")
         if not trade_rows: trade_rows = soup.find_all('a', href=lambda href: href and href.startswith('/trades/'))
         if not trade_rows:
-            print(f"DEBUG: CT: No trade rows found for {ticker}.") # DEBUG
+            print(f"DEBUG: CT: No trade rows found for {ticker}.")
             return [{"error": f"CT: No trade rows found for {ticker}. Website HTML structure may have changed or scraping blocked. This feature is experimental."}]
         
-        print(f"DEBUG: Found {len(trade_rows)} potential trade rows for {ticker}.") # DEBUG
+        print(f"DEBUG: Found {len(trade_rows)} potential trade rows for {ticker}.")
         for row in trade_rows[:20]: # Limit to first 20 for performance/relevance
             name_tag = row.find(['div','span'], class_=lambda x: x and ('politician-name' in x or 'filer-name' in x))
             type_tag = row.find(['div','span'], class_=lambda x: x and ('tx-type' in x or 'transaction-type' in x))
@@ -514,21 +521,21 @@ def fetch_politician_trades(ticker: str, days_back: int = 365) -> list[dict]:
                 trades_list.append({"politician_name": name, "transaction_type": tx_type, "value_range": val_range, "value_estimate_lower": val_est, "date_str": date_str, "source_url": urljoin("https://www.capitoltrades.com", row['href'])})
         
         if not trades_list and trade_rows:
-            print(f"DEBUG: CT: Found rows for {ticker}, but failed parsing.") # DEBUG
+            print(f"DEBUG: CT: Found rows for {ticker}, but failed parsing.")
             return [{"error": f"CT: Found rows for {ticker}, but failed parsing. HTML details may have changed."}]
-        print(f"DEBUG: Processed {len(trades_list)} politician trades for {ticker}.") # DEBUG
+        print(f"DEBUG: Processed {len(trades_list)} politician trades for {ticker}.")
         return trades_list
     except requests.exceptions.Timeout:
-        print(f"DEBUG: CT: Timeout fetching {ticker}.") # DEBUG
+        print(f"DEBUG: CT: Timeout fetching {ticker}.")
         return [{"error": f"CT: Timeout fetching {ticker}."}]
     except requests.exceptions.HTTPError as e:
-        print(f"DEBUG: CT: HTTP error {e.response.status_code if e.response else ''} for {ticker}.") # DEBUG
+        print(f"DEBUG: CT: HTTP error {e.response.status_code if e.response else ''} for {ticker}.")
         return [{"error": f"CT: HTTP error {e.response.status_code if e.response else ''} for {ticker}."}]
     except requests.exceptions.RequestException as e:
-        print(f"DEBUG: CT: Request error for {ticker}: {e}.") # DEBUG
+        print(f"DEBUG: CT: Request error for {ticker}: {e}.")
         return [{"error": f"CT: Request error for {ticker}: {e}."}]
     except Exception as e:
-        print(f"DEBUG: CT: Parsing error for {ticker}: {e}.") # DEBUG
+        print(f"DEBUG: CT: Parsing error for {ticker}: {e}.")
         return [{"error": f"CT: Parsing error for {ticker}: {e}."}]
 
 # --- LLM Client and Agent Classes ---
@@ -541,27 +548,27 @@ class ModelClient:
         if not self.model_name: raise ValueError(f"Unsupported provider: {provider}")
         if provider == "deepseek": self.client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
         elif provider == "openai": self.client = OpenAI(api_key=api_key)
-        print(f"DEBUG: ModelClient initialized for {provider} with model {self.model_name}.") # DEBUG
+        print(f"DEBUG: ModelClient initialized for {provider} with model {self.model_name}.")
 
     def generate(self, prompt: str) -> str:
         try:
-            print(f"DEBUG: Generating LLM response (first 100 chars of prompt): {prompt[:100]}...") # DEBUG
+            print(f"DEBUG: Generating LLM response (first 100 chars of prompt): {prompt[:100]}...")
             stream = self.client.chat.completions.create(model=self.model_name, messages=[{"role": "user", "content": prompt}], stream=True)
             response_content = "".join(c.choices[0].delta.content for c in stream if c.choices and c.choices[0].delta and c.choices[0].delta.content)
-            print(f"DEBUG: LLM response generated (first 100 chars): {response_content[:100]}...") # DEBUG
+            print(f"DEBUG: LLM response generated (first 100 chars): {response_content[:100]}...")
             return response_content
         except Exception as e:
-            print(f"DEBUG: LLM Error in generate: {e}") # DEBUG
+            print(f"DEBUG: LLM Error in generate: {e}")
             raise Exception(f"LLM Error ({self.provider}, {self.model_name}): {e}")
 
 class PriceAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
-        print(f"DEBUG: PriceAgent running for {ticker}. Data shape: {price_data_slice.shape if not price_data_slice.empty else 'empty'}") # DEBUG
+        print(f"DEBUG: PriceAgent running for {ticker}. Data shape: {price_data_slice.shape if not price_data_slice.empty else 'empty'}")
         required_data_points = 200
 
         if price_data_slice.empty or len(price_data_slice) < required_data_points:
-            error_msg = f"Not enough data ({len(price_data_slice)} rows) for comprehensive PriceAgent analysis (requires {required_data_points})." # DEBUG
-            print(f"DEBUG: PriceAgent error: {error_msg}") # DEBUG
+            error_msg = f"Not enough data ({len(price_data_slice)} rows) for comprehensive PriceAgent analysis (requires {required_data_points})."
+            print(f"DEBUG: PriceAgent error: {error_msg}")
             return {
                 "ticker": ticker,
                 "price_signal": "hold",
@@ -597,8 +604,8 @@ class PriceAgent:
 
         if pd.isna(latest.SMA50) or pd.isna(latest.SMA200) or pd.isna(latest.RSI14) or \
            pd.isna(latest.BB_Upper) or pd.isna(latest.BB_Lower):
-            error_msg = "Some key indicators are NaN at the latest data point after calculation." # DEBUG
-            print(f"DEBUG: PriceAgent calculation error: {error_msg}") # DEBUG
+            error_msg = "Some key indicators are NaN at the latest data point after calculation."
+            print(f"DEBUG: PriceAgent calculation error: {error_msg}")
             return {
                 "ticker": ticker,
                 "price_signal": "hold",
@@ -614,7 +621,43 @@ class PriceAgent:
 
         current_close = latest.Close
 
-        # ... (rest of PriceAgent logic unchanged) ...
+        if latest.SMA50 > latest.SMA200 and current_close > latest.SMA50:
+            if len(df) >= 205 and df["SMA50"].iloc[-5] < df["SMA200"].iloc[-5]:
+                signal = "buy"; confidence_score += 0.4
+            else:
+                signal = "buy"; confidence_score += 0.2
+        elif latest.SMA50 < latest.SMA200 and current_close < latest.SMA50:
+            if len(df) >= 205 and df["SMA50"].iloc[-5] > df["SMA200"].iloc[-5]:
+                signal = "sell"; confidence_score -= 0.4
+            else:
+                signal = "sell"; confidence_score -= 0.2
+
+        if latest.RSI14 < 30:
+            if signal == "buy": confidence_score += 0.2
+            elif signal == "hold":
+                signal = "buy"; confidence_score += 0.1
+        elif latest.RSI14 > 70:
+            if signal == "sell": confidence_score -= 0.2
+            elif signal == "hold":
+                signal = "sell"; confidence_score -= 0.1
+
+        if current_close < latest.BB_Lower:
+            bb_signal = "buy"
+            if signal == "buy": confidence_score += 0.1
+            elif signal == "hold":
+                signal = "buy"; confidence_score += 0.05
+        elif current_close > latest.BB_Upper:
+            bb_signal = "sell"
+            if signal == "sell": confidence_score -= 0.1
+            elif signal == "hold":
+                signal = "sell"; confidence_score -= 0.05
+        
+        if signal == "hold":
+            if latest.RSI14 < 40 and latest.RSI14 > 30:
+                confidence_score += 0.05
+            elif latest.RSI14 > 60 and latest.RSI14 < 70:
+                confidence_score -= 0.05
+
         if confidence_score > 0.3:
             final_price_signal = "buy"
         elif confidence_score < -0.3:
@@ -623,7 +666,7 @@ class PriceAgent:
             final_price_signal = "hold"
             
         confidence_score = max(-1.0, min(1.0, confidence_score))
-        print(f"DEBUG: PriceAgent for {ticker} signal: {final_price_signal}, confidence: {confidence_score:.2f}") # DEBUG
+        print(f"DEBUG: PriceAgent for {ticker} signal: {final_price_signal}, confidence: {confidence_score:.2f}")
         return {
             "ticker": ticker,
             "sma50": float(latest.SMA50), "sma200": float(latest.SMA200), "rsi14": float(latest.RSI14),
@@ -637,12 +680,12 @@ class PriceAgent:
 
 class MomentumAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
-        print(f"DEBUG: MomentumAgent running for {ticker}. Data shape: {price_data_slice.shape if not price_data_slice.empty else 'empty'}") # DEBUG
+        print(f"DEBUG: MomentumAgent running for {ticker}. Data shape: {price_data_slice.shape if not price_data_slice.empty else 'empty'}")
         required_data_points = 253
 
         if price_data_slice.empty or len(price_data_slice) < required_data_points:
-            error_msg = f"Not enough data ({len(price_data_slice)} rows) for 1-year and 1-month momentum (requires {required_data_points})." # DEBUG
-            print(f"DEBUG: MomentumAgent error: {error_msg}") # DEBUG
+            error_msg = f"Not enough data ({len(price_data_slice)} rows) for 1-year and 1-month momentum (requires {required_data_points})."
+            print(f"DEBUG: MomentumAgent error: {error_msg}")
             return {
                 "ticker": ticker,
                 "momentum_signal": "hold",
@@ -654,16 +697,14 @@ class MomentumAgent:
         df = price_data_slice.copy()
 
         if 'Close' not in df.columns or not pd.api.types.is_numeric_dtype(df['Close']):
-            error_msg = "Price data is missing 'Close' column or not numeric for momentum." # DEBUG
-            print(f"DEBUG: MomentumAgent data quality error: {error_msg}") # DEBUG
+            error_msg = "Price data is missing 'Close' column or not numeric for momentum."
+            print(f"DEBUG: MomentumAgent data quality error: {error_msg}")
             return {
                 "ticker": ticker, "momentum_signal": "hold",
                 "momentum_1m": np.nan, "momentum_12m": np.nan,
                 "momentum_confidence_score": 0.0,
                 "momentum_error": error_msg
             }
-        
-        # ... (rest of MomentumAgent logic unchanged) ...
         
         P_t = df["Close"].iloc[-1]
         P_1m_series = df["Close"].shift(21)
@@ -678,6 +719,11 @@ class MomentumAgent:
         signal = "hold"
         confidence_score = 0.0
 
+        STRONG_POSITIVE_MOMENTUM_THRESHOLD = 0.10
+        MODERATE_POSITIVE_MOMENTUM_THRESHOLD = 0.03
+        STRONG_NEGATIVE_MOMENTUM_THRESHOLD = -0.10
+        MODERATE_NEGATIVE_MOMENTUM_THRESHOLD = -0.03
+
         if pd.notna(m1) and pd.notna(m12):
             raw_combined_momentum = (m1 + m12) / 2
             scaled_confidence = raw_combined_momentum * 5.0 
@@ -690,9 +736,9 @@ class MomentumAgent:
             else:
                 signal = "hold"
         else:
-            print(f"DEBUG: MomentumAgent: m1 or m12 is NaN. Cannot generate strong signal.") # DEBUG
+            print(f"DEBUG: MomentumAgent: m1 or m12 is NaN. Cannot generate strong signal.")
 
-        print(f"DEBUG: MomentumAgent for {ticker} signal: {signal}, confidence: {confidence_score:.2f}") # DEBUG
+        print(f"DEBUG: MomentumAgent for {ticker} signal: {signal}, confidence: {confidence_score:.2f}")
         return {
             "ticker": ticker,
             "momentum_1m": float(m1) if pd.notna(m1) else np.nan,
@@ -702,10 +748,9 @@ class MomentumAgent:
             "momentum_error": None
         }
 
-
 class VolatilityAgent:
     def run(self, ticker: str, data: dict, price_data_slice: pd.DataFrame = None) -> dict:
-        print(f"DEBUG: VolatilityAgent running for {ticker}. Price data shape: {price_data_slice.shape if price_data_slice is not None and not price_data_slice.empty else 'empty'}") # DEBUG
+        print(f"DEBUG: VolatilityAgent running for {ticker}. Price data shape: {price_data_slice.shape if price_data_slice is not None and not price_data_slice.empty else 'empty'}")
         beta_val = data.get("ticker_info", {}).get("beta")
         beta = float(beta_val) if isinstance(beta_val, (int, float)) else 1.0
 
@@ -718,7 +763,7 @@ class VolatilityAgent:
         if price_data_slice is not None and not price_data_slice.empty and len(price_data_slice) > 1:
             if 'Close' not in price_data_slice.columns or not pd.api.types.is_numeric_dtype(price_data_slice['Close']):
                 volatility_error = "Price data is missing 'Close' column or not numeric for volatility calculation."
-                print(f"DEBUG: VolatilityAgent data quality error: {volatility_error}") # DEBUG
+                print(f"DEBUG: VolatilityAgent data quality error: {volatility_error}")
             else:
                 ret = np.log(price_data_slice.Close / price_data_slice.Close.shift(1)).dropna()
 
@@ -727,19 +772,35 @@ class VolatilityAgent:
                     if daily_std > 0:
                         ann_vol = float(daily_std * np.sqrt(252))
                         vol_weight = float(1 / ann_vol)
-                        print(f"DEBUG: VolatilityAgent calculated ann_vol: {ann_vol:.2f}") # DEBUG
+                        print(f"DEBUG: VolatilityAgent calculated ann_vol: {ann_vol:.2f}")
                     else:
                         volatility_error = "Daily returns standard deviation is zero (no price movement)."
-                        print(f"DEBUG: VolatilityAgent calculation error: {volatility_error}") # DEBUG
+                        print(f"DEBUG: VolatilityAgent calculation error: {volatility_error}")
                 else:
                     volatility_error = "Not enough valid returns to calculate historical volatility."
-                    print(f"DEBUG: VolatilityAgent data insufficiency: {volatility_error}") # DEBUG
+                    print(f"DEBUG: VolatilityAgent data insufficiency: {volatility_error}")
         else:
             volatility_error = "Not enough price data for historical volatility calculation."
-            print(f"DEBUG: VolatilityAgent data insufficiency: {volatility_error}") # DEBUG
+            print(f"DEBUG: VolatilityAgent data insufficiency: {volatility_error}")
 
-        # ... (rest of VolatilityAgent logic unchanged) ...
-        print(f"DEBUG: VolatilityAgent for {ticker} signal: {volatility_signal}, confidence: {volatility_confidence_score:.2f}") # DEBUG
+        if beta > 1.2:
+            volatility_signal = "sell"; volatility_confidence_score -= (beta - 1.2) * 0.5
+        elif beta < 0.8:
+            volatility_signal = "buy"; volatility_confidence_score += (0.8 - beta) * 0.5
+        else:
+            volatility_signal = "hold"
+
+        if pd.notna(ann_vol):
+            HIGH_VOL_THRESHOLD = 0.30
+            LOW_VOL_THRESHOLD = 0.15
+
+            if ann_vol > HIGH_VOL_THRESHOLD:
+                volatility_confidence_score -= (ann_vol - HIGH_VOL_THRESHOLD) * 1.0
+            elif ann_vol < LOW_VOL_THRESHOLD:
+                volatility_confidence_score += (LOW_VOL_THRESHOLD - ann_vol) * 1.0
+
+        volatility_confidence_score = max(-1.0, min(1.0, volatility_confidence_score))
+        print(f"DEBUG: VolatilityAgent for {ticker} signal: {volatility_signal}, confidence: {volatility_confidence_score:.2f}")
         return {
             "ticker": ticker,
             "beta": float(beta),
@@ -753,21 +814,21 @@ class VolatilityAgent:
 class SentimentAgent:
     def __init__(self, client):
         self.client = client
-        print("DEBUG: SentimentAgent initialized.") # DEBUG
+        print("DEBUG: SentimentAgent initialized.")
 
     def run(self, ticker: str, data: dict) -> dict:
-        print(f"DEBUG: SentimentAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: SentimentAgent running for {ticker}.")
         news, news_err = data.get("news", []), data.get("news_fetch_status_error")
 
         if news_err:
-            print(f"DEBUG: SentimentAgent: News fetch error: {news_err}") # DEBUG
+            print(f"DEBUG: SentimentAgent: News fetch error: {news_err}")
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": news_err}
 
         valid_news = [item for item in news if isinstance(item, dict) and "error" not in item]
 
         if not valid_news:
             err_msg = news[0].get("error") if news and isinstance(news[0], dict) and "error" in news[0] else "No valid news articles found for sentiment analysis."
-            print(f"DEBUG: SentimentAgent: No valid news: {err_msg}") # DEBUG
+            print(f"DEBUG: SentimentAgent: No valid news: {err_msg}")
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": err_msg}
 
         content_for_llm = []
@@ -797,8 +858,8 @@ class SentimentAgent:
                 content_for_llm.append(snippet)
 
         if not content_for_llm:
-            error_msg = "No processable news articles with sufficient content for sentiment analysis." # DEBUG
-            print(f"DEBUG: SentimentAgent: {error_msg}") # DEBUG
+            error_msg = "No processable news articles with sufficient content for sentiment analysis."
+            print(f"DEBUG: SentimentAgent: {error_msg}")
             return {"ticker": ticker, "sentiment_score": 0.0, "sentiment_signal": "hold", "sentiment_error": error_msg}
 
         prompt = f"""
@@ -832,15 +893,15 @@ class SentimentAgent:
                 
                 if len(resp.split()) > 5 and not resp.strip().replace('-', '').replace('.', '').isdigit():
                     llm_err = f"LLM responded with extra text: '{resp[:50]}...'"
-                    print(f"DEBUG: Sentiment LLM extra text: {llm_err}") # DEBUG
+                    print(f"DEBUG: Sentiment LLM extra text: {llm_err}")
             else:
                 llm_err = f"LLM did not output a recognizable number: '{resp[:50]}...'"
-                print(f"DEBUG: Sentiment LLM no number: {llm_err}") # DEBUG
+                print(f"DEBUG: Sentiment LLM no number: {llm_err}")
                 score = 0.0
 
         except Exception as e:
             llm_err = f"LLM sentiment analysis call failed: {str(e)[:150]}"
-            print(f"DEBUG: Sentiment LLM call failed: {llm_err}") # DEBUG
+            print(f"DEBUG: Sentiment LLM call failed: {llm_err}")
             score = 0.0
 
         final_err = None
@@ -858,7 +919,7 @@ class SentimentAgent:
         elif score <= SELL_THRESHOLD and not final_err:
             sentiment_signal = "sell"
         
-        print(f"DEBUG: SentimentAgent for {ticker} signal: {sentiment_signal}, score: {score:.2f}") # DEBUG
+        print(f"DEBUG: SentimentAgent for {ticker} signal: {sentiment_signal}, score: {score:.2f}")
         return {
             "ticker": ticker,
             "sentiment_score": float(score),
@@ -870,16 +931,16 @@ class SentimentAgent:
 class NewsSummaryAgent:
     def __init__(self, client):
         self.client = client
-        print("DEBUG: NewsSummaryAgent initialized.") # DEBUG
+        print("DEBUG: NewsSummaryAgent initialized.")
     def run(self, ticker: str, data: dict) -> dict:
-        print(f"DEBUG: NewsSummaryAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: NewsSummaryAgent running for {ticker}.")
         news, co_name, news_fetch_err = data.get("news",[]), data.get("ticker_info",{}).get('longName',ticker), data.get("news_fetch_status_error")
         if news_fetch_err:
-            print(f"DEBUG: NewsSummaryAgent: News fetch issues: {news_fetch_err}") # DEBUG
+            print(f"DEBUG: NewsSummaryAgent: News fetch issues: {news_fetch_err}")
             return {"ticker":ticker, "news_summary":"Summary skipped due to news fetch issues.", "news_summary_error":news_fetch_err}
         if not news or (isinstance(news[0],dict) and "error" in news[0] and not any("error" not in item for item in news)):
             err = news[0]["error"] if news and isinstance(news[0],dict) and "error" in news[0] else "No news for summary."
-            print(f"DEBUG: NewsSummaryAgent: No news for summary: {err}") # DEBUG
+            print(f"DEBUG: NewsSummaryAgent: No news for summary: {err}")
             return {"ticker":ticker, "news_summary":"No news for summary.", "news_summary_error":err}
         
         y_news = [item for item in news if item.get('source_api')=='Yahoo Finance' and "error" not in item][:5]
@@ -900,8 +961,8 @@ class NewsSummaryAgent:
             final_snips.append(text)
         
         if not final_snips:
-            error_msg = "No content for summary." # DEBUG
-            print(f"DEBUG: NewsSummaryAgent: {error_msg}") # DEBUG
+            error_msg = "No content for summary."
+            print(f"DEBUG: NewsSummaryAgent: {error_msg}")
             return {"ticker":ticker, "news_summary":"No content for summary.", "news_summary_error":"No articles with content/desc."}
         
         prompt = f"Concise summary (max 200 words) for {co_name} ({ticker})...\n\nArticles:\n" + "\n".join(f"- {s}" for s in final_snips)
@@ -910,18 +971,18 @@ class NewsSummaryAgent:
             resp = self.client.generate(prompt).strip()
             if resp.startswith("Error:"):
                 err_msg = resp
-                print(f"DEBUG: NewsSummaryAgent LLM error: {err_msg}") # DEBUG
+                print(f"DEBUG: NewsSummaryAgent LLM error: {err_msg}")
             else:
                 summary = resp
-                print(f"DEBUG: NewsSummaryAgent LLM summary generated.") # DEBUG
+                print(f"DEBUG: NewsSummaryAgent LLM summary generated.")
         except Exception as e:
             err_msg = f"LLM summary call failed: {str(e)[:150]}"
-            print(f"DEBUG: NewsSummaryAgent LLM call failed: {err_msg}") # DEBUG
+            print(f"DEBUG: NewsSummaryAgent LLM call failed: {err_msg}")
         return {"ticker":ticker, "news_summary":summary, "news_summary_error":err_msg}
 
 class FundamentalsAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        print(f"DEBUG: FundamentalsAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: FundamentalsAgent running for {ticker}.")
         s = data.get("ticker_info",{}); mc, fcf, roe, de = s.get("marketCap"), s.get("freeCashflow"), s.get("returnOnEquity"), s.get("debtToEquity")
         mc_c = mc if isinstance(mc,(int,float)) else 1; fcf_c = fcf if isinstance(fcf,(int,float)) else 0
         roe_c = roe if isinstance(roe,(int,float)) else 0; de_c = de if isinstance(de,(int,float)) else 1000
@@ -929,18 +990,18 @@ class FundamentalsAgent:
         ps = sum([roe_c > 0.01, de_c < 100, fcf_c > 0]); sig = "hold"
         if ps >= 2: sig = "buy"
         elif ps == 0: sig = "sell"
-        print(f"DEBUG: FundamentalsAgent for {ticker} signal: {sig}, Piotroski: {ps}") # DEBUG
+        print(f"DEBUG: FundamentalsAgent for {ticker} signal: {sig}, Piotroski: {ps}")
         return {"ticker":ticker, "fcf_yield":float(fcy), "piotroski_score":int(ps), "fund_signal":sig}
 
 class ValuationAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        print(f"DEBUG: ValuationAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: ValuationAgent running for {ticker}.")
         stats, hist = data.get("ticker_info",{}), data.get("price_history"); price_v = stats.get("currentPrice")
         if price_v is None and hist is not None and not hist.empty: price_v = hist.Close.iloc[-1]
         curr_p = float(price_v) if isinstance(price_v,(int,float)) and price_v > 0 else None
         if curr_p is None:
-            error_msg = "Current price unavailable for valuation." # DEBUG
-            print(f"DEBUG: ValuationAgent error: {error_msg}") # DEBUG
+            error_msg = "Current price unavailable for valuation."
+            print(f"DEBUG: ValuationAgent error: {error_msg}")
             return {"ticker":ticker, "forward_pe":None, "relative_pe_signal":"hold", "dcf_fair_price":np.nan, "dcf_signal":"hold", "valuation_error":error_msg}
         pe_v = stats.get("forwardPE"); pe = float(pe_v) if isinstance(pe_v,(int,float)) else None; rel_sig = "hold"
         if pe is not None and pe > 0: rel_sig = "buy" if pe < 15 else ("sell" if pe > 25 else "hold")
@@ -950,18 +1011,18 @@ class ValuationAgent:
         fp_est = curr_p * (1 + fcy); dcf_sig = "hold"
         if fp_est > curr_p * 1.15: dcf_sig = "buy"
         elif fp_est < curr_p * 0.85: dcf_sig = "sell"
-        print(f"DEBUG: ValuationAgent for {ticker} PE sig: {rel_sig}, DCF sig: {dcf_sig}") # DEBUG
+        print(f"DEBUG: ValuationAgent for {ticker} PE sig: {rel_sig}, DCF sig: {dcf_sig}")
         return {"ticker":ticker, "forward_pe":pe, "relative_pe_signal":rel_sig, "dcf_fair_price":float(fp_est) if pd.notna(fp_est) else np.nan, "dcf_signal":dcf_sig, "valuation_error":None}
 
 class AnalystRatingAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        print(f"DEBUG: AnalystRatingAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: AnalystRatingAgent running for {ticker}.")
         info, hist = data.get("ticker_info",{}), data.get("price_history"); price_v = info.get("currentPrice")
         if price_v is None and hist is not None and not hist.empty: price_v = hist.Close.iloc[-1]
         curr_p = float(price_v) if isinstance(price_v,(int,float)) and price_v > 0 else None
         if curr_p is None:
-            error_msg = "Current price unavailable for analyst rating." # DEBUG
-            print(f"DEBUG: AnalystRatingAgent error: {error_msg}") # DEBUG
+            error_msg = "Current price unavailable for analyst rating."
+            print(f"DEBUG: AnalystRatingAgent error: {error_msg}")
             return {"ticker":ticker, "analyst_buy_pct_inferred":0.5, "target_upside":0.0, "yfinance_recommendation":"N/A", "analyst_signal":"hold", "analyst_error":error_msg}
         target_v = info.get("targetMeanPrice"); target_m = float(target_v) if isinstance(target_v,(int,float)) else None
         rec = str(info.get("recommendationKey","hold")).lower(); upside = 0.0
@@ -973,16 +1034,16 @@ class AnalystRatingAgent:
         elif upside > 0.20: sig = "buy"
         elif upside < -0.15: sig = "sell"
         buy_pct = {"strong_buy":0.9, "buy":0.7, "hold":0.5, "underperform":0.3, "sell":0.1}.get(rec,0.5)
-        print(f"DEBUG: AnalystRatingAgent for {ticker} signal: {sig}, upside: {upside:.2%}") # DEBUG
+        print(f"DEBUG: AnalystRatingAgent for {ticker} signal: {sig}, upside: {upside:.2%}")
         return {"ticker":ticker, "analyst_buy_pct_inferred":float(buy_pct), "target_upside":float(upside), "yfinance_recommendation":rec, "analyst_signal":sig, "analyst_error":None}
 
 class SECFilingAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        print(f"DEBUG: SECFilingAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: SECFilingAgent running for {ticker}.")
         filings, err = data.get("sec_all_filings_raw",[]), None
         if not filings or (isinstance(filings[0],dict) and "error" in filings[0]):
             err = filings[0].get("error") if filings and isinstance(filings[0],dict) else f"SEC: No raw filings for {ticker}."
-            print(f"DEBUG: SECFilingAgent error: {err}") # DEBUG
+            print(f"DEBUG: SECFilingAgent error: {err}")
             return {"ticker":ticker, "sec_net_insider_shares_1y":0, "sec_insider_buy_value_1y":0, "sec_insider_sell_value_1y":0, "sec_filings_signal":"hold", "sec_filings_error":err, "sec_recent_form4_transactions":[], "sec_other_recent_filings":[]}
         
         net_s, buy_v, sell_v, form4, others = 0,0,0,[],[]
@@ -1001,30 +1062,30 @@ class SECFilingAgent:
         sig = "hold"
         if net_s > 2000 or buy_v > 200000: sig = "buy"
         elif net_s < -2000 or sell_v > 200000: sig = "sell"
-        print(f"DEBUG: SECFilingAgent for {ticker} signal: {sig}, net shares: {net_s}") # DEBUG
+        print(f"DEBUG: SECFilingAgent for {ticker} signal: {sig}, net shares: {net_s}")
         return {"ticker":ticker, "sec_net_insider_shares_1y":int(net_s), "sec_insider_buy_value_1y":round(buy_v,2), "sec_insider_sell_value_1y":round(sell_v,2), "sec_filings_signal":sig, "sec_filings_error":None, "sec_recent_form4_transactions":form4[:10], "sec_other_recent_filings":others[:10]}
 
 class SECSummaryAgent:
     def __init__(self, client):
         self.client = client
-        print("DEBUG: SECSummaryAgent initialized.") # DEBUG
+        print("DEBUG: SECSummaryAgent initialized.")
 
     def run(self, ticker: str, data: dict) -> dict:
-        print(f"DEBUG: SECSummaryAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: SECSummaryAgent running for {ticker}.")
         filings_raw = data.get("sec_all_filings_raw", [])
         co_name = data.get("ticker_info", {}).get('longName', ticker)
 
         if not self.client:
-            print("DEBUG: SECSummaryAgent LLM not configured.") # DEBUG
+            print("DEBUG: SECSummaryAgent LLM not configured.")
             return {"ticker": ticker, "sec_summary": "LLM client not available for SEC summary.", "sec_summary_error": "LLM not configured."}
         
         relevant_filings = [
             f for f in filings_raw if not f.get("is_form4_transaction") and f.get("document_content_for_llm")
         ]
-        print(f"DEBUG: SECSummaryAgent found {len(relevant_filings)} relevant filings for LLM.") # DEBUG
+        print(f"DEBUG: SECSummaryAgent found {len(relevant_filings)} relevant filings for LLM.")
         
         if not relevant_filings:
-            print("DEBUG: SECSummaryAgent: No relevant non-Form 4 filings with content found for summary.") # DEBUG
+            print("DEBUG: SECSummaryAgent: No relevant non-Form 4 filings with content found for summary.")
             return {"ticker": ticker, "sec_summary": "No relevant non-Form 4 filings with content found for summary.", "sec_summary_error": None}
 
         sorted_filings = sorted(
@@ -1040,7 +1101,7 @@ class SECSummaryAgent:
         )
         
         filings_for_llm = sorted_filings[:3]
-        print(f"DEBUG: SECSummaryAgent sending {len(filings_for_llm)} filings to LLM.") # DEBUG
+        print(f"DEBUG: SECSummaryAgent sending {len(filings_for_llm)} filings to LLM.")
 
         content_for_llm = []
         for f in filings_for_llm:
@@ -1070,13 +1131,13 @@ class SECSummaryAgent:
             resp = self.client.generate(prompt).strip()
             if resp.startswith("Error:"):
                 llm_err = resp
-                print(f"DEBUG: SECSummaryAgent LLM error: {llm_err}") # DEBUG
+                print(f"DEBUG: SECSummaryAgent LLM error: {llm_err}")
             else:
                 summary = resp
-                print(f"DEBUG: SECSummaryAgent LLM summary generated.") # DEBUG
+                print(f"DEBUG: SECSummaryAgent LLM summary generated.")
         except Exception as e:
             llm_err = f"LLM SEC summary call failed: {str(e)[:150]}"
-            print(f"DEBUG: SECSummaryAgent LLM call failed: {llm_err}") # DEBUG
+            print(f"DEBUG: SECSummaryAgent LLM call failed: {llm_err}")
             
         return {
             "ticker": ticker,
@@ -1087,11 +1148,11 @@ class SECSummaryAgent:
 
 class InstitutionalHoldingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        print(f"DEBUG: InstitutionalHoldingsAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: InstitutionalHoldingsAgent running for {ticker}.")
         holdings, err = data.get("institutional_holdings",[]), None
         if holdings and isinstance(holdings[0],dict) and "error" in holdings[0]:
             err = holdings[0]["error"]
-            print(f"DEBUG: InstitutionalHoldingsAgent error: {err}") # DEBUG
+            print(f"DEBUG: InstitutionalHoldingsAgent error: {err}")
             return {"ticker":ticker, "inst_num_holders":0, "inst_total_shares_held":0, "inst_total_pct_out":0.0, "inst_holdings_signal":"hold", "inst_holdings_error":err, "inst_top_holders":[]}
         
         num_h, total_s, total_pct, top_h = 0,0,0.0,[]
@@ -1104,13 +1165,13 @@ class InstitutionalHoldingsAgent:
                     for d in valid_h:
                         d['Shares'] = pd.to_numeric(d.get('Shares'), errors='coerce').fillna(0)
                     top_h = sorted(valid_h, key=lambda x: x.get('Shares',0), reverse=True)[:10]
-                    print(f"DEBUG: InstitutionalHoldingsAgent processed {num_h} holders for {ticker}.") # DEBUG
+                    print(f"DEBUG: InstitutionalHoldingsAgent processed {num_h} holders for {ticker}.")
                 except Exception as e:
                     err = f"Error processing inst holdings: {e}"
-                    print(f"DEBUG: InstitutionalHoldingsAgent processing error: {e}") # DEBUG
+                    print(f"DEBUG: InstitutionalHoldingsAgent processing error: {e}")
             elif not err:
                 err = "No valid inst holdings."
-                print(f"DEBUG: InstitutionalHoldingsAgent: No valid holdings found.") # DEBUG
+                print(f"DEBUG: InstitutionalHoldingsAgent: No valid holdings found.")
         
         sig = "hold"
         inst_confidence_score = 0.0
@@ -1122,24 +1183,24 @@ class InstitutionalHoldingsAgent:
             elif total_pct < 0.05 and num_h > 0: inst_confidence_score = -0.8
             elif total_pct < 0.10 and num_h > 0: inst_confidence_score = -0.5
         
-        print(f"DEBUG: InstitutionalHoldingsAgent for {ticker} signal: {sig}, pct_out: {total_pct:.2%}") # DEBUG
+        print(f"DEBUG: InstitutionalHoldingsAgent for {ticker} signal: {sig}, pct_out: {total_pct:.2%}")
         return {"ticker":ticker, "inst_num_holders":num_h, "inst_total_shares_held":int(total_s), "inst_total_pct_out":float(total_pct), "inst_holdings_signal":sig, "inst_holdings_error":err, "inst_top_holders":top_h, "inst_confidence_score": float(inst_confidence_score)}
 
 class PoliticianFilingsAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        print(f"DEBUG: PoliticianFilingsAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: PoliticianFilingsAgent running for {ticker}.")
         trades, err = data.get("politician_trades",[]), None
         net_val, buys, sells = 0,0,0
         if trades and isinstance(trades,list) and len(trades)>0 and isinstance(trades[0],dict) and "error" in trades[0]:
             err = trades[0]["error"]
-            print(f"DEBUG: PoliticianFilingsAgent error: {err}") # DEBUG
+            print(f"DEBUG: PoliticianFilingsAgent error: {err}")
         elif trades:
             for trade in trades:
                 if isinstance(trade,dict):
                     val = trade.get("value_estimate_lower",0)
                     if trade.get("transaction_type")=="purchase": net_val += val; buys +=1
                     elif trade.get("transaction_type")=="sale": net_val -= val; sells +=1
-            print(f"DEBUG: PoliticianFilingsAgent processed {buys} buys, {sells} sells for {ticker}.") # DEBUG
+            print(f"DEBUG: PoliticianFilingsAgent processed {buys} buys, {sells} sells for {ticker}.")
         sig = "hold"
         politician_confidence = 0.0
         if not err:
@@ -1154,12 +1215,12 @@ class PoliticianFilingsAgent:
                 sig = "hold"
                 politician_confidence = -0.1
             
-        print(f"DEBUG: PoliticianFilingsAgent for {ticker} signal: {sig}, net_val: {net_val}") # DEBUG
+        print(f"DEBUG: PoliticianFilingsAgent for {ticker} signal: {sig}, net_val: {net_val}")
         return {"ticker":ticker, "politician_net_trade_value_estimate":net_val, "politician_buy_tx_count":buys, "politician_sell_tx_count":sells, "politician_filings_signal":sig, "politician_data_error":err, "politician_confidence_score": float(politician_confidence)}
 
 class ValueInvestingIOAgent:
     def run(self, ticker: str, data: dict) -> dict:
-        print(f"DEBUG: ValueInvestingIOAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: ValueInvestingIOAgent running for {ticker}.")
         vi, err = data.get("value_investing_io_data",{}), data.get("value_investing_io_data",{}).get("error")
         fv, site_mp, up_pct, val_date, text = vi.get("vi_fair_value"), vi.get("vi_site_market_price"), vi.get("vi_upside_percent"), vi.get("vi_valuation_date"), vi.get("vi_full_text")
         sig = "hold"; curr_pyf_val = data.get("ticker_info",{}).get("currentPrice")
@@ -1184,7 +1245,7 @@ class ValueInvestingIOAgent:
                 elif curr_pyf > fv*(1+mos):
                     sig="sell"; vi_confidence_score = -0.6
         
-        print(f"DEBUG: ValueInvestingIOAgent for {ticker} signal: {sig}, FV: {fv}") # DEBUG
+        print(f"DEBUG: ValueInvestingIOAgent for {ticker} signal: {sig}, FV: {fv}")
         return {"ticker":ticker, "vi_fair_value_estimate":fv, "vi_site_market_price":site_mp, "vi_upside_percent":up_pct, "vi_valuation_date":val_date, "vi_valuation_text_display":text, "vi_signal":sig, "vi_data_error":err, "vi_confidence_score": float(vi_confidence_score)}
 
 
@@ -1198,7 +1259,7 @@ class PortfolioAgent:
     }
 
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
-        print(f"DEBUG: PortfolioAgent running for {ticker}.") # DEBUG
+        print(f"DEBUG: PortfolioAgent running for {ticker}.")
         curr_w, total_score, sum_w, agg_s = agent_weights or self.WEIGHTS, 0,0,{}
         for s_dict in signals:
             if isinstance(s_dict, dict): agg_s.update(s_dict)
@@ -1247,18 +1308,18 @@ class PortfolioAgent:
 
         comp_score = (total_score/sum_w) if sum_w else 0.0
         decision = "buy" if comp_score > 0.15 else ("sell" if comp_score < -0.15 else "hold")
-        print(f"DEBUG: PortfolioAgent for {ticker} composite score: {comp_score:.2f}, decision: {decision}") # DEBUG
+        print(f"DEBUG: PortfolioAgent for {ticker} composite score: {comp_score:.2f}, decision: {decision}")
         return {"ticker":ticker, "composite_score":comp_score, "final_decision":decision}
 
 class AITraderAgent:
     def __init__(self, llm_client: ModelClient, stock_universe: dict):
         self.llm_client = llm_client
         self.stock_universe = stock_universe
-        print("DEBUG: AITraderAgent initialized.") # DEBUG
+        print("DEBUG: AITraderAgent initialized.")
 
     def _generate_trade_reason(self, ticker: str, decision: str, analysis: dict) -> str:
         if not self.llm_client:
-            print("DEBUG: AITraderAgent LLM client not available for trade reason.") # DEBUG
+            print("DEBUG: AITraderAgent LLM client not available for trade reason.")
             return "LLM client not available for justification."
 
         co_name = analysis.get('ticker_info', {}).get('longName', ticker)
@@ -1280,22 +1341,23 @@ class AITraderAgent:
         """
         try:
             reason = self.llm_client.generate(prompt).strip()
-            print(f"DEBUG: AITraderAgent generated trade reason for {ticker}: {reason[:50]}...") # DEBUG
+            print(f"DEBUG: AITraderAgent generated trade reason for {ticker}: {reason[:50]}...")
             return reason
         except Exception as e:
-            print(f"DEBUG: AITraderAgent failed to generate reason: {e}") # DEBUG
+            print(f"DEBUG: AITraderAgent failed to generate reason: {e}")
             return f"Could not generate reason due to LLM error: {e}"
 
     def _is_safe(self, analysis: dict) -> bool:
+        """Determines if a stock is 'safe' based on predefined criteria."""
         info = analysis.get("ticker_info", {})
         market_cap = info.get("marketCap", 0)
         beta = info.get("beta", 1.0)
         is_safe_flag = isinstance(market_cap, (int, float)) and market_cap > 200e9 and isinstance(beta, (int, float)) and beta < 1.0
-        print(f"DEBUG: AITraderAgent for {analysis.get('ticker')}: is_safe={is_safe_flag} (MC: {market_cap}, Beta: {beta})") # DEBUG
+        print(f"DEBUG: AITraderAgent for {analysis.get('ticker')}: is_safe={is_safe_flag} (MC: {market_cap}, Beta: {beta})")
         return is_safe_flag
 
     def run(self, portfolio_state: dict, analysis_results: dict):
-        print("DEBUG: AITraderAgent running to decide trades.") # DEBUG
+        print("DEBUG: AITraderAgent running to decide trades.")
         trades_to_make = []
         cash = portfolio_state['cash']
         holdings = list(portfolio_state['holdings'])
@@ -1306,7 +1368,7 @@ class AITraderAgent:
             ticker = holding['ticker']
             analysis = analysis_results.get(ticker)
             if not analysis or analysis.get('error'):
-                print(f"DEBUG: AITraderAgent: Skipping {ticker} for sell decision due to missing or errored analysis.") # DEBUG
+                print(f"DEBUG: AITraderAgent: Skipping {ticker} for sell decision due to missing or errored analysis.")
                 continue
 
             if analysis.get('final_decision') == 'sell':
@@ -1319,9 +1381,9 @@ class AITraderAgent:
                     })
                     cash += holding['quantity'] * price
                     holdings.pop(i)
-                    print(f"DEBUG: AITraderAgent: Decided to SELL {holding['quantity']:.2f} of {ticker} at ${price:.2f}.") # DEBUG
+                    print(f"DEBUG: AITraderAgent: Decided to SELL {holding['quantity']:.2f} of {ticker} at ${price:.2f}.")
                 else:
-                    print(f"DEBUG: AITraderAgent: Cannot sell {ticker}, price invalid: {price}") # DEBUG
+                    print(f"DEBUG: AITraderAgent: Cannot sell {ticker}, price invalid: {price}")
 
         current_holdings_value = 0
         for h in holdings:
@@ -1329,7 +1391,7 @@ class AITraderAgent:
             if isinstance(price, (int, float)):
                 current_holdings_value += h['quantity'] * price
         total_portfolio_value = cash + current_holdings_value
-        print(f"DEBUG: AITraderAgent: Current portfolio value after sells: ${total_portfolio_value:,.2f}") # DEBUG
+        print(f"DEBUG: AITraderAgent: Current portfolio value after sells: ${total_portfolio_value:,.2f}")
 
         target_safe_value = total_portfolio_value * 0.60
         target_risky_value = total_portfolio_value * 0.40
@@ -1345,7 +1407,7 @@ class AITraderAgent:
                         current_safe_value += value
                     else:
                         current_risky_value += value
-        print(f"DEBUG: AITraderAgent: Current safe value: ${current_safe_value:,.2f}, risky value: ${current_risky_value:,.2f}") # DEBUG
+        print(f"DEBUG: AITraderAgent: Current safe value: ${current_safe_value:,.2f}, risky value: ${current_risky_value:,.2f}")
 
         buy_candidates = sorted(
             [res for res in analysis_results.values() 
@@ -1354,19 +1416,19 @@ class AITraderAgent:
              and not res.get('error')],
             key=lambda x: x.get('composite_score', 0), reverse=True
         )
-        print(f"DEBUG: AITraderAgent: Found {len(buy_candidates)} buy candidates.") # DEBUG
+        print(f"DEBUG: AITraderAgent: Found {len(buy_candidates)} buy candidates.")
         
         MIN_INVESTMENT_PER_STOCK = 200
         investment_per_stock = max(MIN_INVESTMENT_PER_STOCK, cash * 0.20)
 
         for candidate in buy_candidates:
             if cash < MIN_INVESTMENT_PER_STOCK:
-                print(f"DEBUG: AITraderAgent: Not enough cash left (${cash:,.2f}) for minimum trade.") # DEBUG
+                print(f"DEBUG: AITraderAgent: Not enough cash left (${cash:,.2f}) for minimum trade.")
                 break
 
             price = candidate.get('current_price_display')
             if not isinstance(price, (int, float)) or price <= 0:
-                print(f"DEBUG: AITraderAgent: Skipping buy candidate {candidate.get('ticker')} due to invalid price: {price}") # DEBUG
+                print(f"DEBUG: AITraderAgent: Skipping buy candidate {candidate.get('ticker')} due to invalid price: {price}")
                 continue
 
             is_safe_candidate = self._is_safe(candidate)
@@ -1380,7 +1442,7 @@ class AITraderAgent:
                 should_buy = True
                 investment_amount = min(investment_per_stock, target_risky_value - current_risky_value, cash)
             else:
-                print(f"DEBUG: AITraderAgent: Skipping {candidate.get('ticker')}. Allocation met or criteria not fit.") # DEBUG
+                print(f"DEBUG: AITraderAgent: Skipping {candidate.get('ticker')}. Allocation met or criteria not fit.")
                 continue
 
             if should_buy and investment_amount > price:
@@ -1396,11 +1458,11 @@ class AITraderAgent:
                 else:
                     current_risky_value += investment_amount
                 tickers_in_portfolio.add(candidate['ticker'])
-                print(f"DEBUG: AITraderAgent: Decided to BUY {quantity_to_buy:.2f} of {candidate.get('ticker')} at ${price:.2f}.") # DEBUG
+                print(f"DEBUG: AITraderAgent: Decided to BUY {quantity_to_buy:.2f} of {candidate.get('ticker')} at ${price:.2f}.")
             else:
-                print(f"DEBUG: AITraderAgent: Cannot buy {candidate.get('ticker')}. Not enough funds allocated or price too high. Inv Amount: {investment_amount:,.2f}, Price: {price:,.2f}") # DEBUG
+                print(f"DEBUG: AITraderAgent: Cannot buy {candidate.get('ticker')}. Not enough funds allocated or price too high. Inv Amount: {investment_amount:,.2f}, Price: {price:,.2f}")
 
-        print(f"DEBUG: AITraderAgent finished. Total trades to make: {len(trades_to_make)}") # DEBUG
+        print(f"DEBUG: AITraderAgent finished. Total trades to make: {len(trades_to_make)}")
         return trades_to_make
 
 # --- Orchestrator and Backtesting ---
@@ -1408,7 +1470,7 @@ def run_live_analysis(tickers, llm_client, configs):
     results = {}
     progress_bar = st.progress(0, text="Starting analysis...")
     
-    st.write(f"DEBUG: Entering run_live_analysis for tickers: {tickers}") # DEBUG
+    st.write(f"DEBUG: Entering run_live_analysis for tickers: {tickers}")
 
     default_live_backtest_weights = {
         "price": 1.0, "momentum": 0.8, "volatility": 0.3, 
@@ -1421,44 +1483,44 @@ def run_live_analysis(tickers, llm_client, configs):
     for i, t in enumerate(tickers):
         progress_text = f"Analyzing {t}... ({i+1}/{len(tickers)})"
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
-        st.write(f"DEBUG: Starting analysis for ticker: {t}") # DEBUG
+        st.write(f"DEBUG: Starting analysis for ticker: {t}")
         
         # --- Using yfinance for price history ---
         price_history_full = fetch_price_history(t, period="max") # Calls yfinance
-        st.write(f"DEBUG: Price history for {t} empty: {price_history_full.empty}, rows: {len(price_history_full)}") # DEBUG
+        st.write(f"DEBUG: Price history for {t} empty: {price_history_full.empty}, rows: {len(price_history_full)}")
         if price_history_full.empty:
             results[t] = {
                 "error": f"Price history unavailable for {t}. This can happen for invalid tickers, delisted stocks, or temporary data provider issues.",
                 "ticker": t, "final_decision": "error", "composite_score": 0
             }
-            st.write(f"DEBUG: Price history empty for {t}. Skipping analysis.") # DEBUG
+            st.write(f"DEBUG: Price history empty for {t}. Skipping analysis.")
             continue
 
         # --- Handle Ticker Info Fetch (still using yfinance) ---
         ticker_info = fetch_ticker_info(t) # This still calls yfinance
-        st.write(f"DEBUG: Ticker info for {t} error: {ticker_info.get('_error')}") # DEBUG
+        st.write(f"DEBUG: Ticker info for {t} error: {ticker_info.get('_error')}")
         if ticker_info.get("_error"):
             results[t] = {"error": ticker_info["_error"], "ticker": t, "final_decision": "error", "composite_score": 0}
-            st.write(f"DEBUG: Ticker info error for {t}. Skipping analysis.") # DEBUG
+            st.write(f"DEBUG: Ticker info error for {t}. Skipping analysis.")
             continue
         elif not ticker_info or not ticker_info.get("financialCurrency"):
              err_msg = f"Core ticker info (e.g., currency) unavailable for {t}. This likely indicates an invalid ticker, a delisted stock, or persistent issues with yfinance data for this symbol."
              results[t] = {"error": err_msg, "ticker": t, "final_decision": "error", "composite_score": 0}
-             st.write(f"DEBUG: Core ticker info missing for {t}. Skipping analysis.") # DEBUG
+             st.write(f"DEBUG: Core ticker info missing for {t}. Skipping analysis.")
              continue
         
         current_price_for_ticker = ticker_info.get("currentPrice")
-        st.write(f"DEBUG: Current price for {t}: {current_price_for_ticker}") # DEBUG
+        st.write(f"DEBUG: Current price for {t}: {current_price_for_ticker}")
         if current_price_for_ticker is None and not price_history_full.empty:
             current_price_for_ticker = price_history_full["Close"].iloc[-1]
-            st.write(f"DEBUG: Using last close price from history as current price for {t}: {current_price_for_ticker}") # DEBUG
+            st.write(f"DEBUG: Using last close price from history as current price for {t}: {current_price_for_ticker}")
         
         if current_price_for_ticker is None:
             results[t] = {
                 "error": f"Current price could not be determined for {t}. Missing essential market data.",
                 "ticker": t, "final_decision": "error", "composite_score": 0
             }
-            st.write(f"DEBUG: Current price could not be determined for {t}. Skipping analysis.") # DEBUG
+            st.write(f"DEBUG: Current price could not be determined for {t}. Skipping analysis.")
             continue
 
         company_name_for_news = ticker_info.get('longName', ticker_info.get('shortName', t))
@@ -1466,27 +1528,27 @@ def run_live_analysis(tickers, llm_client, configs):
         # News fetching section
         combined_news, news_fetch_msgs = [], []
         if configs["use_sentiment"]:
-            st.write(f"DEBUG: Fetching yfinance news for {t}") # DEBUG
+            st.write(f"DEBUG: Fetching yfinance news for {t}")
             yf_news = fetch_enriched_news(t, ticker_info)
             if yf_news and not (isinstance(yf_news[0],dict) and "error" in yf_news[0]):
                 combined_news.extend(yf_news)
-                st.write(f"DEBUG: Found {len(yf_news)} yfinance news for {t}") # DEBUG
+                st.write(f"DEBUG: Found {len(yf_news)} yfinance news for {t}")
             elif yf_news and isinstance(yf_news[0],dict) and "error" in yf_news[0]:
                 news_fetch_msgs.append(f"Yahoo News Error: {yf_news[0]['error']}")
-                st.write(f"DEBUG: Yfinance news error for {t}: {yf_news[0]['error']}") # DEBUG
+                st.write(f"DEBUG: Yfinance news error for {t}: {yf_news[0]['error']}")
             
             if llm_client and st.secrets.get("NEWSAPI_KEY"):
-                st.write(f"DEBUG: Fetching NewsAPI news for {t}") # DEBUG
+                st.write(f"DEBUG: Fetching NewsAPI news for {t}")
                 api_news = fetch_comprehensive_news_from_api(t, company_name_for_news)
                 if api_news and not (isinstance(api_news[0],dict) and "error" in api_news[0]):
                     combined_news.extend(api_news)
-                    st.write(f"DEBUG: Found {len(api_news)} NewsAPI articles for {t}") # DEBUG
+                    st.write(f"DEBUG: Found {len(api_news)} NewsAPI articles for {t}")
                 elif api_news and isinstance(api_news[0],dict) and "error" in api_news[0]:
                     news_fetch_msgs.append(f"NewsAPI Error: {api_news[0]['error']}")
-                    st.write(f"DEBUG: NewsAPI error for {t}: {api_news[0]['error']}") # DEBUG
+                    st.write(f"DEBUG: NewsAPI error for {t}: {api_news[0]['error']}")
             elif configs["use_sentiment"] and not st.secrets.get("NEWSAPI_KEY"):
                 news_fetch_msgs.append("NewsAPI Key missing.")
-                st.write("DEBUG: NewsAPI Key missing.") # DEBUG
+                st.write("DEBUG: NewsAPI Key missing.")
 
         seen_urls, dedup_news = set(), []
         for item in combined_news:
@@ -1496,17 +1558,17 @@ def run_live_analysis(tickers, llm_client, configs):
         if dedup_news: dedup_news.sort(key=lambda x: x.get('publish_datetime_utc') or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         news_status_bundle = " | ".join(news_fetch_msgs) if news_fetch_msgs else "News fetch OK"
         if not dedup_news and not news_fetch_msgs and configs["use_sentiment"]: news_status_bundle="No news articles found."
-        st.write(f"DEBUG: Deduped news for {t}: {len(dedup_news)} articles. Status: {news_status_bundle}") # DEBUG
+        st.write(f"DEBUG: Deduped news for {t}: {len(dedup_news)} articles. Status: {news_status_bundle}")
 
         data_bundle = {
             "price_history":price_history_full, "ticker_info":ticker_info, "news":dedup_news,
-            "news_fetch_status_error": news_status_bundle if any(kw in news_status_bundle.lower() for kw in ["error","failed","no news","missing","issue"]) else None, # Added 'issue'
+            "news_fetch_status_error": news_status_bundle if any(kw in news_status_bundle.lower() for kw in ["error","failed","no news","missing","issue"]) else None,
             "politician_trades":fetch_politician_trades(t) if configs["use_politician_filings"] else [],
             "value_investing_io_data":fetch_value_investing_io_data(t) if configs["use_value_trades"] else {"error":"VI.io: Skipped."},
             "institutional_holdings":fetch_inst_filings(t) if configs["use_filings"] else [],
             "sec_all_filings_raw":fetch_all_sec_filings(t) if configs["use_filings"] else []
         }
-        st.write(f"DEBUG: Data bundle created for {t}.") # DEBUG
+        st.write(f"DEBUG: Data bundle created for {t}.")
 
         agents = [PriceAgent(), MomentumAgent(), VolatilityAgent(), FundamentalsAgent(), ValuationAgent(), AnalystRatingAgent()]
         if configs["use_sentiment"] and llm_client: agents.extend([SentimentAgent(llm_client), NewsSummaryAgent(llm_client)])
@@ -1519,7 +1581,7 @@ def run_live_analysis(tickers, llm_client, configs):
         agent_res_list = []
         for agent in agents:
             name = agent.__class__.__name__
-            st.write(f"DEBUG: Running agent: {name} for {t}") # DEBUG
+            st.write(f"DEBUG: Running agent: {name} for {t}")
             try:
                 if isinstance(agent,(PriceAgent,MomentumAgent)): res_a = agent.run(t, data_bundle["price_history"])
                 elif isinstance(agent,VolatilityAgent): res_a = agent.run(t, data_bundle, data_bundle["price_history"])
@@ -1527,7 +1589,7 @@ def run_live_analysis(tickers, llm_client, configs):
                     res_a = agent.run(t, data_bundle)
                 else: res_a = agent.run(t, data_bundle)
                 agent_res_list.append(res_a)
-                st.write(f"DEBUG: Agent {name} for {t} completed.") # DEBUG
+                st.write(f"DEBUG: Agent {name} for {t} completed.")
             except Exception as e:
                 err_k, sig_k = name.lower().replace("agent","")+"_error", name.lower().replace("agent","")+"_signal"
                 if name == "SECSummaryAgent":
@@ -1535,10 +1597,10 @@ def run_live_analysis(tickers, llm_client, configs):
                 else:
                     agent_res_list.append({sig_k:"error", err_k:f"Agent {name} error: {str(e)[:150]}"});
                 st.error(f"Error in {name} for {t}: {e}") # This warning should show in Streamlit app
-                st.write(f"DEBUG: Agent {name} for {t} FAILED with: {e}") # DEBUG
+                st.write(f"DEBUG: Agent {name} for {t} FAILED with: {e}")
 
         final_dec = PortfolioAgent().run(t, agent_res_list)
-        st.write(f"DEBUG: PortfolioAgent final decision for {t}: {final_dec['final_decision']}, Score: {final_dec['composite_score']:.2f}") # DEBUG
+        st.write(f"DEBUG: PortfolioAgent final decision for {t}: {final_dec['final_decision']}, Score: {final_dec['composite_score']:.2f}")
         
         curr_res_dict = {"ticker":t, "current_price_display":current_price_for_ticker, "market_cap_display":ticker_info.get("marketCap"), "industry_display":ticker_info.get("industry"), "sector_display":ticker_info.get("sector"), "ticker_info":ticker_info,
                              "news_headlines_for_popover":[f"{n.get('publish_time_readable','N/A')} - {n.get('title','N/A')} ({n.get('publisher','N/A')} via {n.get('source_api','Unk')}) [Link]({n.get('link','#')})" + (f" - {n.get('content_snippet',n.get('description',''))[:150]}..." if n.get('content_snippet') or n.get('description') else "") for n in dedup_news[:10]],
@@ -1553,31 +1615,31 @@ def run_live_analysis(tickers, llm_client, configs):
         backtest_end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         backtest_start_date = (datetime.now() - pd.DateOffset(years=1, days=1)).strftime("%Y-%m-%d")
         
-        st.write(f"DEBUG: Running simulated backtest for {t}.") # DEBUG
+        st.write(f"DEBUG: Running simulated backtest for {t}.")
         sim_bt_metrics, sim_bt_log_df = run_backtest(t, backtest_start_date, backtest_end_date, 10000, llm_client, default_live_backtest_weights)
         curr_res_dict["simulated_backtest_results"] = {"metrics": sim_bt_metrics, "log_df": sim_bt_log_df.to_dict('records') if not sim_bt_log_df.empty else []}
-        st.write(f"DEBUG: Simulated backtest for {t} completed.") # DEBUG
+        st.write(f"DEBUG: Simulated backtest for {t} completed.")
 
         results[t] = curr_res_dict
     progress_bar.empty()
-    st.write("DEBUG: All live analysis finished for all tickers.") # DEBUG
+    st.write("DEBUG: All live analysis finished for all tickers.")
     return results
 
 def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_placeholder, backtest_agent_weights):
-    st.write(f"DEBUG: Preparing backtest: {ticker} ({start_date} to {end_date})...") # DEBUG
+    st.write(f"DEBUG: Preparing backtest: {ticker} ({start_date} to {end_date})...")
     s_dt = datetime.strptime(start_date, "%Y-%m-%d"); fetch_s_dt = (s_dt - pd.DateOffset(months=18)).strftime("%Y-%m-%d")
     
     full_hist = fetch_price_history(ticker, period="max", interval="1d") # Calls yfinance
-    st.write(f"DEBUG: Backtest price history for {ticker} empty: {full_hist.empty}") # DEBUG
+    st.write(f"DEBUG: Backtest price history for {ticker} empty: {full_hist.empty}")
     
     if full_hist.empty:
-        st.write(f"DEBUG: Backtest fail {ticker}: Price history empty.") # DEBUG
+        st.write(f"DEBUG: Backtest fail {ticker}: Price history empty.")
         return {"error": f"Backtest fail {ticker}: Price history empty."}, pd.DataFrame()
     
     hist = full_hist[(full_hist.index >= pd.to_datetime(fetch_s_dt)) & (full_hist.index <= pd.to_datetime(end_date))].copy()
-    st.write(f"DEBUG: Backtest filtered history for {ticker} rows: {len(hist)}") # DEBUG
+    st.write(f"DEBUG: Backtest filtered history for {ticker} rows: {len(hist)}")
     if hist.empty or len(hist[hist.index >= pd.to_datetime(start_date)]) < 2:
-        st.write(f"DEBUG: Backtest fail {ticker}: Not enough data in range.") # DEBUG
+        st.write(f"DEBUG: Backtest fail {ticker}: Not enough data in range.")
         return {"error": f"Backtest fail {ticker}: Not enough data in range."}, pd.DataFrame()
     
     info_bt = fetch_ticker_info(ticker); data_static = {"ticker_info": info_bt} # This still calls yfinance
@@ -1585,7 +1647,7 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     log, cash, shares, port_val = [], initial_capital, 0, initial_capital
     run_dates = hist[hist.index >= pd.to_datetime(start_date)].index
     
-    st.write(f"DEBUG: Backtest running simulation for {ticker} over {len(run_dates)} dates.") # DEBUG
+    st.write(f"DEBUG: Backtest running simulation for {ticker} over {len(run_dates)} dates.")
     for curr_dt in run_dates:
         data_sl = hist[hist.index <= curr_dt]
         curr_price_pt = data_sl.Close.iloc[-1] if not data_sl.empty else (port_val / shares if shares else 0)
@@ -1606,7 +1668,7 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     if not log_df.empty: log_df.set_index("date",inplace=True)
     
     if log_df.empty or len(log_df) < 2:
-        st.write(f"DEBUG: Backtest log for {ticker} too short or empty.") # DEBUG
+        st.write(f"DEBUG: Backtest log for {ticker} too short or empty.")
         return {"message":f"Backtest log {ticker} too short."}, pd.DataFrame()
     
     total_ret = (log_df.portfolio_value.iloc[-1]/initial_capital - 1)*100
@@ -1624,28 +1686,22 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     buy_hold_ret = (buy_hold_value / initial_capital - 1) * 100 if initial_capital != 0 else 0
 
     metrics = {"Initial Capital":f"${initial_capital:,.2f}", "Final Portfolio Value":f"${log_df.portfolio_value.iloc[-1]:,.2f}", "Total Return (%)":f"{total_ret:.2f}%", "Buy & Hold Return (%)":f"{buy_hold_ret:.2f}%", "Annualized Return (%)":f"{ann_ret:.2f}%", "Annualized Volatility (%)":f"{ann_vol:.2f}%", "Sharpe Ratio":f"{sharpe:.2f}", "Max Drawdown (%)":f"{max_dd:.2f}%", "Number of Trades (approx)":f"{trades}"}
-    st.write(f"DEBUG: Backtest metrics for {ticker}: {metrics}") # DEBUG
+    st.write(f"DEBUG: Backtest metrics for {ticker}: {metrics}")
     return metrics, log_df
 
 # --- Detailed Analysis Display Function ---
 def display_detailed_analysis(res_detail):
-    print(f"DEBUG: Entering display_detailed_analysis for {res_detail.get('ticker')}") # DEBUG
+    print(f"DEBUG: Entering display_detailed_analysis for {res_detail.get('ticker')}")
     ticker = res_detail.get("ticker", "N/A"); ticker_info = res_detail.get("ticker_info", {})
     
     tab_titles = ["📈 Chart & Core", "📊 Fundamentals", "💰 Analyst & Fair Value", "📰 News & Filings", "⚙️ All Signals", "🧪 Simulated Backtest"]
     tabs = st.tabs(tab_titles)
 
-    def get_signal_color(signal):
-        signal = str(signal).upper()
-        if signal in ["BUY", "STRONG_BUY"]: return "green"
-        if signal == "SELL": return "red"
-        return "orange"
-
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
         # Using yfinance for charting
         price_hist_chart_data = fetch_price_history(ticker, period="1y") # Calls yfinance
-        st.write(f"DEBUG: Chart data for {ticker} empty: {price_hist_chart_data.empty}, rows: {len(price_hist_chart_data)}") # DEBUG
+        st.write(f"DEBUG: Chart data for {ticker} empty: {price_hist_chart_data.empty}, rows: {len(price_hist_chart_data)}")
         if not price_hist_chart_data.empty:
             st.line_chart(price_hist_chart_data["Close"], use_container_width=True, color="#0072F0")
         else: st.warning("Price chart data not available.")
@@ -1873,21 +1929,21 @@ try:
     if ds_key:
         llm_client = ModelClient(api_key=ds_key, provider="deepseek")
         st.sidebar.caption("✅ LLM: DeepSeek")
-        st.write("DEBUG: DeepSeek LLM client initialized.") # DEBUG
+        st.write("DEBUG: DeepSeek LLM client initialized.")
     elif oa_key:
         llm_client = ModelClient(api_key=oa_key, provider="openai")
         st.sidebar.caption("✅ LLM: OpenAI")
-        st.write("DEBUG: OpenAI LLM client initialized.") # DEBUG
+        st.write("DEBUG: OpenAI LLM client initialized.")
     else:
         st.sidebar.warning("LLM API key missing. Sentiment/Summary disabled.")
-        st.write("DEBUG: LLM API key missing. Sentiment/Summary disabled.") # DEBUG
+        st.write("DEBUG: LLM API key missing. Sentiment/Summary disabled.")
 except ValueError as e:
     st.sidebar.error(f"LLM Init Error: {e}")
-    st.write(f"DEBUG: LLM Init ValueError: {e}") # DEBUG
+    st.write(f"DEBUG: LLM Init ValueError: {e}")
     llm_client = None
 except Exception as e:
     st.sidebar.error(f"LLM Unexpected Init Error: {e}")
-    st.write(f"DEBUG: LLM Unexpected Init Error: {e}") # DEBUG
+    st.write(f"DEBUG: LLM Unexpected Init Error: {e}")
     llm_client = None
 
 st.title("🚀 AI Hedge Fund Simulator")
@@ -1896,7 +1952,7 @@ st.header("⚙️ Configuration"); config_cont = st.container(border=True)
 app_mode_options = ["Live Analysis", "Backtesting", "💼 Portfolio Management", "🤖 Virtual Trading"]
 if 'app_mode' not in st.session_state:
     st.session_state.app_mode = app_mode_options[0]
-    st.write(f"DEBUG: Initial app_mode: {st.session_state.app_mode}") # DEBUG
+    st.write(f"DEBUG: Initial app_mode: {st.session_state.app_mode}")
 
 with config_cont:
     current_mode_index = app_mode_options.index(st.session_state.app_mode)
@@ -1905,7 +1961,7 @@ with config_cont:
         st.session_state.app_mode = selected_mode
         st.session_state.live_analysis_triggered = False
         st.session_state.backtest_triggered = False
-        st.write(f"DEBUG: Mode changed to {selected_mode}. Rerunning.") # DEBUG
+        st.write(f"DEBUG: Mode changed to {selected_mode}. Rerunning.")
         st.rerun()
 
     st.markdown("---")
@@ -1927,9 +1983,9 @@ with config_cont:
             live_tickers = [t.strip().upper() for t in tickers_in_live.split(",") if t.strip()]
             if not live_tickers:
                 st.error("Please enter at least one ticker.")
-                st.write("DEBUG: No tickers entered.") # DEBUG
+                st.write("DEBUG: No tickers entered.")
             else:
-                st.write(f"DEBUG: Triggering live analysis for tickers: {live_tickers}") # DEBUG
+                st.write(f"DEBUG: Triggering live analysis for tickers: {live_tickers}")
                 live_configs = {
                     "use_sentiment":use_sent_live,
                     "use_filings":use_filings_live,
@@ -1940,13 +1996,13 @@ with config_cont:
                 with st.spinner("⏳ Processing live analysis..."):
                     st.session_state.live_output = run_live_analysis(live_tickers, llm_client, live_configs)
                     st.session_state.live_analysis_triggered = True
-                    st.write("DEBUG: Live analysis complete. Triggering rerun to display results.") # DEBUG
+                    st.write("DEBUG: Live analysis complete. Triggering rerun to display results.")
                     st.rerun()
 
     # Display Live Analysis Results after rerun
     if st.session_state.app_mode == "Live Analysis" and st.session_state.live_analysis_triggered:
         st.subheader("Live Analysis Results")
-        st.write(f"DEBUG: Attempting to display {len(st.session_state.live_output)} live analysis results.") # DEBUG
+        st.write(f"DEBUG: Attempting to display {len(st.session_state.live_output)} live analysis results.")
         
         summary_data = []
         for ticker, res in st.session_state.live_output.items():
@@ -1977,13 +2033,13 @@ with config_cont:
             
             selected_ticker_for_detail = st.selectbox("Select Ticker for Detailed Analysis:", [""] + list(st.session_state.live_output.keys()))
             if selected_ticker_for_detail:
-                st.write(f"DEBUG: Displaying detailed analysis for {selected_ticker_for_detail}.") # DEBUG
+                st.write(f"DEBUG: Displaying detailed analysis for {selected_ticker_for_detail}.")
                 display_detailed_analysis(st.session_state.live_output[selected_ticker_for_detail])
             else:
-                st.write("DEBUG: No ticker selected for detailed analysis yet.") # DEBUG
+                st.write("DEBUG: No ticker selected for detailed analysis yet.")
         else:
             st.info("No analysis results to display.")
-            st.write("DEBUG: No summary data to display (all tickers might have errors).") # DEBUG
+            st.write("DEBUG: No summary data to display (all tickers might have errors).")
 
     elif st.session_state.app_mode == "Backtesting":
         st.subheader("Backtesting Settings")
@@ -2023,18 +2079,18 @@ with config_cont:
 
         if st.button("📈 Run Backtest",use_container_width=True,type="primary",key="run_bt_btn_main"):
             if st.session_state.bt_ticker:
-                st.write(f"DEBUG: Triggering backtest for {st.session_state.bt_ticker}") # DEBUG
+                st.write(f"DEBUG: Triggering backtest for {st.session_state.bt_ticker}")
                 with st.spinner(f"⏳ Running backtest for {st.session_state.bt_ticker}..."):
                     metrics, log_df = run_backtest(st.session_state.bt_ticker, st.session_state.bt_start_str, st.session_state.bt_end_str, st.session_state.bt_capital, llm_client, st.session_state.bt_weights)
                     st.session_state.backtest_results[st.session_state.bt_ticker] = {"metrics": metrics, "log_df": log_df.to_dict('records') if not log_df.empty else []} # Convert DataFrame to list of dicts for session state
                     st.session_state.backtest_triggered = True
-                    st.write("DEBUG: Backtest complete. Triggering rerun to display results.") # DEBUG
+                    st.write("DEBUG: Backtest complete. Triggering rerun to display results.")
                     st.rerun()
         
         # Display Backtest Results after rerun
         if st.session_state.app_mode == "Backtesting" and st.session_state.backtest_triggered:
             st.subheader(f"Backtest Results for {st.session_state.bt_ticker}")
-            st.write(f"DEBUG: Attempting to display backtest results for {st.session_state.bt_ticker}.") # DEBUG
+            st.write(f"DEBUG: Attempting to display backtest results for {st.session_state.bt_ticker}.")
             
             bt_res = st.session_state.backtest_results.get(st.session_state.bt_ticker, {})
             bt_metrics = bt_res.get("metrics")
@@ -2054,16 +2110,16 @@ with config_cont:
                         st.subheader("Drawdown Over Time"); st.area_chart(bt_log_df["drawdown"].fillna(0))
                     else:
                         st.warning("Backtest log data is not in the expected format or is empty for charting.")
-                        st.write("DEBUG: Backtest log df empty or wrong format for chart.") # DEBUG
+                        st.write("DEBUG: Backtest log df empty or wrong format for chart.")
                 else:
                     st.info("No log data available for backtest chart.")
-                    st.write("DEBUG: No backtest log data raw.") # DEBUG
+                    st.write("DEBUG: No backtest log data raw.")
             elif bt_metrics:
                 st.error(f"Backtest Error: {bt_metrics.get('error','Unknown error')}")
-                st.write(f"DEBUG: Backtest error reported: {bt_metrics.get('error')}") # DEBUG
+                st.write(f"DEBUG: Backtest error reported: {bt_metrics.get('error')}")
             else:
                 st.info("No backtest results available. Run a backtest above.")
-                st.write("DEBUG: No backtest metrics to display.") # DEBUG
+                st.write("DEBUG: No backtest metrics to display.")
 
     elif st.session_state.app_mode == "💼 Portfolio Management":
         st.subheader("💼 Portfolio Management")
@@ -2104,7 +2160,7 @@ with config_cont:
         
         # Only run analysis if tickers exist and haven't been analyzed for this portfolio
         if tickers_to_analyze:
-            st.write(f"DEBUG: Portfolio Management: {len(tickers_to_analyze)} tickers in portfolio to analyze.") # DEBUG
+            st.write(f"DEBUG: Portfolio Management: {len(tickers_to_analyze)} tickers in portfolio to analyze.")
             portfolio_analysis_configs = {
                 "use_sentiment": True, "use_filings": True, "use_politician_filings": True,
                 "use_value_trades": True, "use_sec_summary": True 
@@ -2117,7 +2173,7 @@ with config_cont:
                         'portfolio_name': st.session_state.selected_portfolio_name,
                         'analysis': run_live_analysis(tickers_to_analyze, llm_client, portfolio_analysis_configs)
                     }
-                st.write("DEBUG: Portfolio analysis results updated.") # DEBUG
+                st.write("DEBUG: Portfolio analysis results updated.")
             
             analysis_results = st.session_state.portfolio_analysis_results['analysis']
             st.markdown("---")
@@ -2196,18 +2252,18 @@ with config_cont:
                 if selected_ticker_for_detail:
                     detail_res = analysis_results.get(selected_ticker_for_detail)
                     if detail_res:
-                        st.write(f"DEBUG: Displaying detailed analysis for {selected_ticker_for_detail} from Portfolio Management tab.") # DEBUG
+                        st.write(f"DEBUG: Displaying detailed analysis for {selected_ticker_for_detail} from Portfolio Management tab.")
                         display_detailed_analysis(detail_res)
                     else:
                         st.warning(f"Analysis results not found for {selected_ticker_for_detail}. Please re-run analysis if recent changes were made.")
-                        st.write(f"DEBUG: Analysis results not found for {selected_ticker_for_detail} in portfolio mode.") # DEBUG
+                        st.write(f"DEBUG: Analysis results not found for {selected_ticker_for_detail} in portfolio mode.")
             else:
                 st.info("This portfolio currently has no stock holdings. Use the 'Add Stock' section below.")
-                st.write("DEBUG: Portfolio holdings_display_data is empty.") # DEBUG
+                st.write("DEBUG: Portfolio holdings_display_data is empty.")
 
         else:
             st.info("This portfolio currently has no stock holdings. Add stocks to analyze them.")
-            st.write("DEBUG: Tickers to analyze is empty in portfolio management.") # DEBUG
+            st.write("DEBUG: Tickers to analyze is empty in portfolio management.")
         
         st.markdown("---")
         st.subheader("Add/Remove Stocks")
@@ -2230,17 +2286,17 @@ with config_cont:
                     new_avg_price = ((existing_holding['avg_price'] * existing_holding['quantity']) + (add_price * add_quantity)) / new_total_quantity
                     existing_holding['quantity'] = new_total_quantity
                     existing_holding['avg_price'] = new_avg_price
-                    st.success(f"Updated {add_ticker} in '{st.session_state.selected_portfolio_name}'. New quantity: {new_total_quantity:.2f}, Avg. Price: ${new_avg_price:.2f}.") # DEBUG
+                    st.success(f"Updated {add_ticker} in '{st.session_state.selected_portfolio_name}'. New quantity: {new_total_quantity:.2f}, Avg. Price: ${new_avg_price:.2f}.")
                 else:
                     current_portfolio['holdings'].append({"ticker": add_ticker, "quantity": add_quantity, "avg_price": add_price})
-                    st.success(f"Added {add_quantity:.2f} shares of {add_ticker} at ${add_price:.2f} to '{st.session_state.selected_portfolio_name}'.") # DEBUG
+                    st.success(f"Added {add_quantity:.2f} shares of {add_ticker} at ${add_price:.2f} to '{st.session_state.selected_portfolio_name}'.")
                 
                 save_portfolios(st.session_state.portfolios_data)
                 st.session_state.portfolio_analysis_results = None # Invalidate cached analysis results for this portfolio
                 st.rerun()
             else:
                 st.error("Please enter a valid ticker, quantity, and purchase price.")
-                st.write("DEBUG: Invalid input for Add Stock.") # DEBUG
+                st.write("DEBUG: Invalid input for Add Stock.")
 
         col_rem1, col_rem2 = st.columns([1,2])
         tickers_in_current_portfolio = [h['ticker'] for h in current_portfolio['holdings']]
@@ -2253,20 +2309,20 @@ with config_cont:
                 
                 if len(current_portfolio['holdings']) < initial_holdings_count:
                     save_portfolios(st.session_state.portfolios_data)
-                    st.success(f"Removed {remove_ticker_selection} from '{st.session_state.selected_portfolio_name}'.") # DEBUG
+                    st.success(f"Removed {remove_ticker_selection} from '{st.session_state.selected_portfolio_name}'.")
                     st.session_state.portfolio_analysis_results = None # Invalidate cached analysis results
                     st.rerun()
                 else:
                     st.error(f"{remove_ticker_selection} not found in '{st.session_state.selected_portfolio_name}' holdings.")
-                    st.write(f"DEBUG: Ticker {remove_ticker_selection} not found for removal.") # DEBUG
+                    st.write(f"DEBUG: Ticker {remove_ticker_selection} not found for removal.")
             else:
                 st.error("Please select a ticker to remove.")
-                st.write("DEBUG: No ticker selected for removal.") # DEBUG
+                st.write("DEBUG: No ticker selected for removal.")
         
         st.markdown("---")
         if st.button("🗑️ Delete Current Portfolio", key="delete_portfolio_btn_pf", type="secondary"):
             if st.session_state.selected_portfolio_name and st.session_state.selected_portfolio_name in st.session_state.portfolios_data:
-                st.write(f"DEBUG: Deleting portfolio {st.session_state.selected_portfolio_name}.") # DEBUG
+                st.write(f"DEBUG: Deleting portfolio {st.session_state.selected_portfolio_name}.")
                 del st.session_state.portfolios_data[st.session_state.selected_portfolio_name]
                 save_portfolios(st.session_state.portfolios_data)
                 st.session_state.selected_portfolio_name = None
@@ -2275,7 +2331,7 @@ with config_cont:
                 st.rerun()
             else:
                 st.error("No portfolio selected or found to delete.")
-                st.write("DEBUG: No portfolio selected or found for deletion.") # DEBUG
+                st.write("DEBUG: No portfolio selected or found for deletion.")
 
 
     elif st.session_state.app_mode == "🤖 Virtual Trading":
@@ -2293,18 +2349,23 @@ with config_cont:
             all_tickers_in_history = list(set([t['ticker'] for t in st.session_state.virtual_portfolio['transaction_history']]))
             price_data_for_history = {}
             with st.spinner("Pre-fetching historical prices for portfolio value chart..."):
-                st.write("DEBUG: Virtual Trading: Pre-fetching historical prices for chart.") # DEBUG
+                st.write("DEBUG: Virtual Trading: Pre-fetching historical prices for chart.")
                 for t in all_tickers_in_history:
                     price_data_for_history[t] = fetch_price_history(t, period="max") # Calls yfinance
-                    st.write(f"DEBUG: Virtual Trading: Fetched {len(price_data_for_history[t])} historical rows for {t}.") # DEBUG
+                    st.write(f"DEBUG: Virtual Trading: Fetched {len(price_data_for_history[t])} historical rows for {t}.")
 
             
             if chronological_transactions:
-                st.write(f"DEBUG: Virtual Trading: Processing {len(chronological_transactions)} transactions for chart history.") # DEBUG
-                earliest_tx_date = datetime.strptime(chronological_transactions[0]['date'].split(" ")[0], "%Y-%m-%d") if chronological_transactions else datetime.now()
+                st.write(f"DEBUG: Virtual Trading: Processing {len(chronological_transactions)} transactions for chart history.")
+                # Ensure earliest_tx_date is timezone-aware if comparing with timezone.utc dates
+                # Using current time as timezone-aware reference for all date operations
+                now_utc = datetime.now(timezone.utc)
+                earliest_tx_date_str = chronological_transactions[0]['date'].split(" ")[0] if chronological_transactions else now_utc.strftime("%Y-%m-%d")
+                earliest_tx_date = datetime.strptime(earliest_tx_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                
                 earliest_data_point = earliest_tx_date - timedelta(days=365*2) # Look back 2 years before first transaction
                 
-                full_date_range = pd.date_range(start=earliest_data_point, end=datetime.now(timezone.utc), freq='D')
+                full_date_range = pd.date_range(start=earliest_data_point, end=now_utc, freq='D')
                 
                 daily_portfolio_values = pd.Series(index=full_date_range, dtype=float).fillna(np.nan)
                 daily_portfolio_values[full_date_range[0]] = get_default_virtual_portfolio()["cash"]
@@ -2314,7 +2375,8 @@ with config_cont:
                 last_date_processed = full_date_range[0]
 
                 for tx in chronological_transactions:
-                    tx_date = datetime.strptime(tx['date'].split(" ")[0], "%Y-%m-%d")
+                    tx_date_naive = datetime.strptime(tx['date'].split(" ")[0], "%Y-%m-%d")
+                    tx_date = tx_date_naive.replace(tzinfo=timezone.utc) # Make transaction date timezone-aware
                     tx_quantity = float(tx['quantity'])
                     tx_price = float(tx['price'].replace('$', ''))
                     tx_type = tx['type']
@@ -2327,10 +2389,12 @@ with config_cont:
                             day_price = None
                             if not day_price_series.empty:
                                 try:
-                                    day_price = day_price_series.loc[day.strftime("%Y-%m-%d")].get("Close")
+                                    # Ensure comparison with timezone-naive index
+                                    day_price = day_price_series.loc[day.date().strftime("%Y-%m-%d")].get("Close")
                                 except KeyError:
                                     # Fallback to nearest day if exact date not found
-                                    nearest_idx = day_price_series.index.asof(day)
+                                    # Convert current 'day' to timezone-naive datetime for .asof()
+                                    nearest_idx = day_price_series.index.asof(day.replace(tzinfo=None))
                                     if nearest_idx is not pd.NaT:
                                         day_price = day_price_series.loc[nearest_idx].get("Close")
 
@@ -2357,9 +2421,10 @@ with config_cont:
                         tx_day_price = None
                         if not tx_day_price_series.empty:
                             try:
-                                tx_day_price = tx_day_price_series.loc[tx_date.strftime("%Y-%m-%d")].get("Close")
+                                # Ensure comparison with timezone-naive index
+                                tx_day_price = tx_day_price_series.loc[tx_date.date().strftime("%Y-%m-%d")].get("Close")
                             except KeyError:
-                                nearest_idx = tx_day_price_series.index.asof(tx_date)
+                                nearest_idx = tx_day_price_series.index.asof(tx_date.replace(tzinfo=None))
                                 if nearest_idx is not pd.NaT:
                                     tx_day_price = tx_day_price_series.loc[nearest_idx].get("Close")
                         if tx_day_price:
@@ -2375,21 +2440,24 @@ with config_cont:
                     last_known_value = daily_portfolio_values.iloc[-1] if not daily_portfolio_values.empty else get_default_virtual_portfolio()["cash"]
                     daily_portfolio_values.loc[today_utc] = last_known_value
                 
-                daily_portfolio_values = daily_portfolio_values.reindex(pd.date_range(start=daily_portfolio_values.index.min(), end=today_utc, freq='D')).fillna(method='ffill').fillna(method='bfill')
+                # Ensure the final DataFrame index is also timezone-aware for consistency if needed later
+                daily_portfolio_values = daily_portfolio_values.reindex(pd.date_range(start=daily_portfolio_values.index.min(), end=today_utc, freq='D', tz=timezone.utc)).fillna(method='ffill').fillna(method='bfill')
                 daily_portfolio_values_df = pd.DataFrame(daily_portfolio_values, columns=['Portfolio Value'])
                 daily_portfolio_values_df.index.name = 'Date'
-                st.write("DEBUG: Virtual Trading: Portfolio value history calculated.") # DEBUG
+                st.write("DEBUG: Virtual Trading: Portfolio value history calculated.")
 
             else:
-                st.write("DEBUG: Virtual Trading: No transactions to build history from. Using default range.") # DEBUG
+                st.write("DEBUG: Virtual Trading: No transactions to build history from. Using default range.")
+                # Ensure default range is also timezone-aware
                 daily_portfolio_values_df = pd.DataFrame({
                     'Date': [datetime.now(timezone.utc) - timedelta(days=7), datetime.now(timezone.utc)],
                     'Portfolio Value': [get_default_virtual_portfolio()["cash"], get_default_virtual_portfolio()["cash"]]
                 }).set_index('Date')
+                daily_portfolio_values_df.index = daily_portfolio_values_df.index.tz_localize(timezone.utc)
 
 
             if st.session_state.virtual_portfolio['holdings']:
-                st.write("DEBUG: Virtual Trading: Fetching latest prices for current holdings display.") # DEBUG
+                st.write("DEBUG: Virtual Trading: Fetching latest prices for current holdings display.")
                 with st.spinner("Fetching latest prices for dashboard..."):
                     for holding in st.session_state.virtual_portfolio['holdings']:
                         info = fetch_ticker_info(holding['ticker']) # This calls yfinance for info
@@ -2398,8 +2466,8 @@ with config_cont:
                             price = price_data_for_history[holding['ticker']].iloc[-1].get("Close")
                         
                         if price is None:
-                            st.warning(f"Could not get live price for {holding['ticker']} in virtual portfolio.") # DEBUG
-                            print(f"DEBUG: Virtual Trading: No live price for {holding['ticker']}") # DEBUG
+                            st.warning(f"Could not get live price for {holding['ticker']} in virtual portfolio. Using average cost.")
+                            print(f"DEBUG: Virtual Trading: No live price for {holding['ticker']}")
                             current_value = holding['avg_price'] * holding['quantity'] # Use avg cost as fallback
                             pnl = 0 # No P&L if no live price
                         else:
@@ -2410,7 +2478,7 @@ with config_cont:
                         total_pnl += pnl
                         initial_investment += holding['avg_price'] * holding['quantity']
                         holdings_df_data.append({"Ticker": holding['ticker'], "Quantity": holding['quantity'], "Avg. Price": holding['avg_price'], "Current Price": price, "Current Value": current_value, "P&L": pnl})
-            st.write("DEBUG: Virtual Trading: Holdings data prepared for display.") # DEBUG
+            st.write("DEBUG: Virtual Trading: Holdings data prepared for display.")
             
             total_portfolio_value = st.session_state.virtual_portfolio['cash'] + total_holdings_value
             pnl_percent = (total_pnl / initial_investment * 100) if initial_investment != 0 else 0.0
