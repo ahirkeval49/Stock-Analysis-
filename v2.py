@@ -40,6 +40,54 @@ def get_signal_color(signal):
     return "orange"
 
 # --------------------------------
+# Portfolio Helper Functions
+# --------------------------------
+def load_portfolios():
+    """Loads all saved portfolios from the JSON file."""
+    if os.path.exists(PORTFOLIOS_FILE):
+        try:
+            with open(PORTFOLIOS_FILE, 'r') as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {} # Ensure it's a dict
+        except json.JSONDecodeError:
+            st.warning("Error decoding portfolios.json. Starting with empty portfolios.")
+            return {}
+    return {}
+
+def save_portfolios(portfolios_data):
+    """Saves all portfolios to the JSON file."""
+    if not isinstance(portfolios_data, dict):
+        st.error("Error saving portfolios: Data is not in the correct format.")
+        return
+    with open(PORTFOLIOS_FILE, 'w') as f:
+        json.dump(portfolios_data, f, indent=4)
+
+def load_virtual_portfolio():
+    """Loads the virtual trading portfolio state."""
+    if os.path.exists(VIRTUAL_PORTFOLIO_FILE):
+        try:
+            with open(VIRTUAL_PORTFOLIO_FILE, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            st.warning("Error decoding virtual_portfolio.json. Starting with default virtual portfolio.")
+            return get_default_virtual_portfolio()
+    return get_default_virtual_portfolio()
+
+def save_virtual_portfolio(data):
+    """Saves the virtual trading portfolio state."""
+    with open(VIRTUAL_PORTFOLIO_FILE, 'w') as f:
+        json.dump(data, f, indent=4, default=str) # Use default=str to handle datetimes if they exist
+
+def get_default_virtual_portfolio():
+    """Returns the default structure for a new virtual portfolio."""
+    return {
+        "cash": 3500.0,
+        "holdings": [],
+        "transaction_history": [],
+        "last_scan_date": None
+    }
+
+# --------------------------------
 # Data Fetchers (All using yfinance and direct scraping, defined globally and early)
 # --------------------------------
 
@@ -581,7 +629,6 @@ class VolatilityAgent:
         else:
             volatility_signal = "hold"
 
-        # Factor in Annualized Volatility
         if pd.notna(ann_vol):
             HIGH_VOL_THRESHOLD = 0.30 # Example: 30% annualized vol
             LOW_VOL_THRESHOLD = 0.15 # Example: 15% annualized vol
@@ -985,7 +1032,6 @@ class InstitutionalHoldingsAgent:
         
         num_h, total_s, total_pct, top_h_raw = 0,0,0.0,[]
         if holdings:
-            # Fixed: Corrected syntax error from 'for d d in holdings' to 'for d in holdings'
             valid_h = [d for d in holdings if isinstance(d,dict) and "error" not in d]
             if valid_h:
                 num_h = len(valid_h)
@@ -1797,6 +1843,7 @@ def display_detailed_analysis(res_detail):
                     if not sim_bt_log_df.empty and 'date' in sim_bt_log_df.columns:
                         sim_bt_log_df['date'] = pd.to_datetime(sim_bt_log_df['date'])
                         # Ensure 'date' is timezone-naive to match expected yfinance index type for plotting
+                        # If yfinance df is tz-naive, this is safe.
                         sim_bt_log_df.set_index(sim_bt_log_df['date'].dt.tz_localize(None), inplace=True)
                         
                         st.subheader("Portfolio Value Over Time (Simulated)"); st.line_chart(sim_bt_log_df["portfolio_value"])
