@@ -13,7 +13,7 @@ import re
 from urllib.parse import urljoin, urlparse
 import time
 import random
-from newsapi import NewsApiClient # Ensure this is imported if used
+from newsapi import NewsApiClient
 
 # --- Page Config (Must be the first Streamlit command) ---
 st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
@@ -29,7 +29,7 @@ PORTFOLIOS_FILE = "portfolios.json"
 VIRTUAL_PORTFOLIO_FILE = "virtual_portfolio.json"
 
 # --------------------------------
-# Utility Functions (Global Scope)
+# Global Utility Functions
 # --------------------------------
 
 def get_signal_color(signal):
@@ -40,83 +40,7 @@ def get_signal_color(signal):
     return "orange"
 
 # --------------------------------
-# Portfolio Helper Functions
-# --------------------------------
-def load_portfolios():
-    """Loads all saved portfolios from the JSON file."""
-    if os.path.exists(PORTFOLIOS_FILE):
-        try:
-            with open(PORTFOLIOS_FILE, 'r') as f:
-                data = json.load(f)
-                return data if isinstance(data, dict) else {} # Ensure it's a dict
-        except json.JSONDecodeError:
-            st.warning("Error decoding portfolios.json. Starting with empty portfolios.")
-            return {}
-    return {}
-
-def save_portfolios(portfolios_data):
-    """Saves all portfolios to the JSON file."""
-    if not isinstance(portfolios_data, dict):
-        st.error("Error saving portfolios: Data is not in the correct format.")
-        return
-    with open(PORTFOLIOS_FILE, 'w') as f:
-        json.dump(portfolios_data, f, indent=4)
-
-def load_virtual_portfolio():
-    """Loads the virtual trading portfolio state."""
-    if os.path.exists(VIRTUAL_PORTFOLIO_FILE):
-        try:
-            with open(VIRTUAL_PORTFOLIO_FILE, 'r') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            st.warning("Error decoding virtual_portfolio.json. Starting with default virtual portfolio.")
-            return get_default_virtual_portfolio()
-    return get_default_virtual_portfolio()
-
-def save_virtual_portfolio(data):
-    """Saves the virtual trading portfolio state."""
-    with open(VIRTUAL_PORTFOLIO_FILE, 'w') as f:
-        json.dump(data, f, indent=4, default=str) # Use default=str to handle datetimes if they exist
-
-def get_default_virtual_portfolio():
-    """Returns the default structure for a new virtual portfolio."""
-    return {
-        "cash": 3500.0,
-        "holdings": [],
-        "transaction_history": [],
-        "last_scan_date": None
-    }
-
-# --- Session State Initialization ---
-# Initialize session state variables if they don't exist, loading from files
-if 'portfolios_data' not in st.session_state:
-    st.session_state.portfolios_data = load_portfolios()
-
-if 'selected_portfolio_name' not in st.session_state:
-    st.session_state.selected_portfolio_name = None
-    if st.session_state.portfolios_data:
-        st.session_state.selected_portfolio_name = list(st.session_state.portfolios_data.keys())[0]
-
-if 'portfolio_stock_analysis' not in st.session_state:
-    st.session_state.portfolio_stock_analysis = {}
-
-if 'backtest_results' not in st.session_state:
-    st.session_state.backtest_results = {}
-
-if 'live_output' not in st.session_state:
-    st.session_state.live_output = {}
-
-if 'virtual_portfolio' not in st.session_state:
-    st.session_state.virtual_portfolio = load_virtual_portfolio()
-
-# Flags to control when to display analysis results (to avoid re-displaying on every rerun)
-if 'live_analysis_triggered' not in st.session_state:
-    st.session_state.live_analysis_triggered = False
-if 'backtest_triggered' not in st.session_state:
-    st.session_state.backtest_triggered = False
-
-# --------------------------------
-# Data Fetchers (All using yfinance and direct scraping for non-standard data)
+# Data Fetchers (All using yfinance and direct scraping, defined globally and early)
 # --------------------------------
 
 @st.cache_data(ttl=300) # Cache for 5 minutes
@@ -128,8 +52,7 @@ def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") 
         if df.empty:
             st.warning(f"No price history returned from yfinance for {ticker} (period={period}). This might be an invalid ticker or data issue.")
             return pd.DataFrame()
-        # Remove timezone info to match typical pandas indexing for dates
-        df.index = pd.to_datetime(df.index).tz_localize(None) 
+        df.index = pd.to_datetime(df.index).tz_localize(None) # Remove timezone info for consistency
         return df
     except Exception as e:
         st.error(f"Critical error fetching price history for {ticker}: {e}")
@@ -330,18 +253,6 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                 # Libraries like `sec-api.io` or custom scraping logic would be needed.
                 document_content_for_llm = ""
                 if form in ['10-K', '10-Q', '8-K']:
-                    # This is a simplified placeholder. In a real scenario, you'd fetch the document:
-                    # try:
-                    #     doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}"
-                    #     doc_response = requests.get(doc_url, headers={'User-Agent': SEC_USER_AGENT}, timeout=10)
-                    #     if doc_response.status_code == 200:
-                    #         # Basic text extraction, might need more advanced parsing for cleaner text
-                    #         soup_doc = BeautifulSoup(doc_response.content, 'html.parser')
-                    #         document_content_for_llm = soup_doc.get_text(separator=' ', strip=True)[:2000] # Limit content length
-                    #     else:
-                    #         document_content_for_llm = f"Could not fetch content from {doc_name} (Status: {doc_response.status_code})."
-                    # except Exception as e:
-                    #     document_content_for_llm = f"Error fetching content from {doc_name}: {e}"
                     document_content_for_llm = f"Content for {form} filed on {date_str}. (Actual content extraction from SEC documents is complex and omitted for demo. This acts as a placeholder for LLM.)"
                 
                 if form == '4' and doc_name.lower().endswith(('.xml', '.xsd')):
@@ -393,8 +304,8 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
     except requests.exceptions.RequestException as e: return [{"error": f"SEC Request error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
     except Exception as e: return [{"error": f"SEC Unexpected error ({ticker_symbol}, CIK:{cik_padded}): {e}"}]
     
-    # Ensure sorting handles potential missing 'filing_date' (though it should be present by now)
-    filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True)
+    # Ensure sorting handles potential missing 'filing_date_str' gracefully
+    filings_list.sort(key=lambda x: x.get('filing_date_str', '1900-01-01'), reverse=True)
     return filings_list
 
 @st.cache_data(ttl=6*3600) # Cache for 6 hours
@@ -412,9 +323,37 @@ def fetch_inst_filings(ticker: str) -> list[dict]:
         return [{"error": f"No yfinance institutional holder data for {ticker}."}]
     except Exception as e: return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
 
+@st.cache_data(ttl=4 * 3600)
+def fetch_value_investing_io_data(ticker: str) -> dict:
+    """Scrapes Peter Lynch Fair Value from ValueInvesting.io (experimental)."""
+    url = f"https://valueinvesting.io/{ticker.upper()}/valuation/fair-value"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36'}
+    try:
+        response = requests.get(url, headers=headers, timeout=15); response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser'); target_text = None
+        for p in soup.find_all('p'):
+            text = p.get_text(strip=True)
+            if ticker.upper() in text and "Fair Value" in text and ("Peter Lynch" in text or "based on" in text or "valuation model" in text):
+                target_text = text; break
+        if not target_text: return {"error": f"VI.io: Peter Lynch Fair Value paragraph not found for {ticker}."}
+        pattern = re.compile(r"As of (?P<date>[\d]{4}-[\d]{2}-[\d]{2}), the Fair Value of .*?\(.*?" + re.escape(ticker.upper()) + r".*?\) is (?P<fair_value>[\d\.]+) USD\.?" + r"(?:.*?With the current market price of (?P<market_price>[\d\.]+) USD, the upside of .*? is (?P<upside_percent>[-+]?\d+\.?\d*)%\.?)?")
+        match = pattern.search(target_text)
+        if match:
+            data = match.groupdict()
+            return {"ticker": ticker, "vi_valuation_date": data.get("date"), "vi_fair_value": float(data.get("fair_value")) if data.get("fair_value") else None, "vi_site_market_price": float(data.get("market_price")) if data.get("market_price") else None, "vi_upside_percent": float(data.get("upside_percent")) if data.get("upside_percent") else None, "vi_full_text": target_text, "vi_data_source_url": url, "error": None}
+        else:
+            fv_match = re.search(r"Fair Value.*?is ([\d\.]+) USD", target_text)
+            if fv_match: return {"ticker": ticker, "vi_valuation_date": "N/A (generic)", "vi_fair_value": float(fv_match.group(1)) if fv_match.group(1) else None, "vi_site_market_price": None, "vi_upside_percent": None, "vi_full_text": target_text, "vi_data_source_url": url, "error": None, "note": "Generic parse."}
+            return {"error": f"VI.io: Could not parse details for {ticker} from: '{target_text[:200]}...'"}
+    except requests.exceptions.HTTPError as http_err: return {"error": f"VI.io: HTTP error for {ticker} ({http_err.response.status_code if http_err.response else 'Unknown'}): {url}"}
+    except requests.exceptions.RequestException as req_err: return {"error": f"VI.io: Request error for {ticker}: {req_err}"}
+    except Exception as e: return {"error": f"VI.io: Unexpected error for {ticker}: {e}"}
+
 # Removed fetch_politician_trades as requested
 
-# --- LLM Client and Agent Classes ---
+# --------------------------------
+# LLM Client and Agent Classes
+# --------------------------------
 class ModelClient:
     """Manages interaction with various LLM providers."""
     def __init__(self, api_key: str, provider: str = "openai"):
@@ -1046,7 +985,7 @@ class InstitutionalHoldingsAgent:
         
         num_h, total_s, total_pct, top_h_raw = 0,0,0.0,[]
         if holdings:
-            # Fix: Corrected syntax error from 'for d d in holdings' to 'for d in holdings'
+            # Fixed: Corrected syntax error from 'for d d in holdings' to 'for d in holdings'
             valid_h = [d for d in holdings if isinstance(d,dict) and "error" not in d]
             if valid_h:
                 num_h = len(valid_h)
@@ -1078,7 +1017,7 @@ class InstitutionalHoldingsAgent:
         
         return {"ticker":ticker, "inst_num_holders":num_h, "inst_total_shares_held":int(total_s), "inst_total_pct_out":float(total_pct), "inst_holdings_signal":sig, "inst_holdings_error":err, "inst_top_holders":top_h_raw, "inst_confidence_score": float(inst_confidence_score)}
 
-# Removed PoliticianFilingsAgent as requested
+# Removed PoliticianFilingsAgent class as requested
 
 class ValueInvestingIOAgent:
     """Scrapes Peter Lynch Fair Value from ValueInvesting.io and provides a signal (experimental)."""
@@ -1110,6 +1049,9 @@ class ValueInvestingIOAgent:
         return {"ticker":ticker, "vi_fair_value_estimate":fv, "vi_site_market_price":site_mp, "vi_upside_percent":up_pct, "vi_valuation_date":val_date, "vi_valuation_text_display":text, "vi_signal":sig, "vi_data_error":err, "vi_confidence_score": float(vi_confidence_score)}
 
 
+# --------------------------------
+# AI Agent Orchestration and Trading Logic
+# --------------------------------
 class PortfolioAgent:
     """Aggregates signals from various agents and provides a final buy/sell/hold decision."""
     WEIGHTS = {
@@ -1117,7 +1059,7 @@ class PortfolioAgent:
         "sentiment": 0.7, "fund": 0.9, "valuation_dcf": 0.6, "valuation_pe": 0.4,
         "sec_filings": 0.6, "sec_summary": 0.7,
         "inst_holdings": 0.3, "analyst": 0.5,
-        "vi_signal": 0.8 
+        "vi_signal": 0.8 # Politician filings removed from weights
     }
 
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
@@ -1324,7 +1266,9 @@ class AITraderAgent:
 
         return trades_to_make
 
-# --- Orchestrator and Backtesting ---
+# --------------------------------
+# Orchestrator and Backtesting Functions
+# --------------------------------
 def run_live_analysis(tickers, llm_client, configs):
     """
     Orchestrates the data fetching and agent analysis for a list of tickers.
@@ -1339,7 +1283,7 @@ def run_live_analysis(tickers, llm_client, configs):
         "sentiment": 0., "fund": 0., "valuation_dcf": 0., "valuation_pe": 0.,
         "sec_filings": 0., "sec_summary": 0.,
         "inst_holdings": 0., "analyst": 0.,
-        "vi_signal": 0. # Politician filings removed
+        "vi_signal": 0. # Politician filings removed from weights
     }
 
     for i, t in enumerate(tickers):
@@ -1410,7 +1354,6 @@ def run_live_analysis(tickers, llm_client, configs):
             "ticker_info":ticker_info,
             "news":dedup_news,
             "news_fetch_status_error": news_status_bundle if any(kw in news_status_bundle.lower() for kw in ["error","failed","no news","missing","issue"]) else None,
-            # Removed "politician_trades" as requested
             "value_investing_io_data":fetch_value_investing_io_data(t) if configs["use_value_trades"] else {"error":"VI.io: Skipped."},
             "institutional_holdings":fetch_inst_filings(t) if configs["use_filings"] else [],
             "sec_all_filings_raw":fetch_all_sec_filings(t) if configs["use_filings"] else []
@@ -1423,7 +1366,6 @@ def run_live_analysis(tickers, llm_client, configs):
         # Only add SECSummaryAgent if explicitly enabled in configs AND LLM is available
         if configs["use_filings"] and llm_client and configs.get("use_sec_summary", False):
              agents.append(SECSummaryAgent(llm_client))
-        # Removed PoliticianFilingsAgent
         if configs["use_value_trades"]: agents.append(ValueInvestingIOAgent())
         
         agent_res_list = []
@@ -1466,7 +1408,6 @@ def run_live_analysis(tickers, llm_client, configs):
             "sector_display":ticker_info.get("sector"),
             "ticker_info":ticker_info, # Keep full info for detailed display
             "news_headlines_for_popover":[f"{n.get('publish_time_readable','N/A')} - {n.get('title','N/A')} ({n.get('publisher','N/A')} via {n.get('source_api','Unk')}) [Link]({n.get('link','#')})" + (f" - {n.get('content_snippet',n.get('description',''))[:150]}..." if n.get('content_snippet') or n.get('description') else "") for n in dedup_news[:10]],
-            # Removed "politician_trades_for_popover"
             "news_status_display":news_status_bundle
         }
         
@@ -1615,7 +1556,9 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     }
     return metrics, log_df
 
-# --- Detailed Analysis Display Function ---
+# --------------------------------
+# Detailed Analysis Display Function
+# --------------------------------
 def display_detailed_analysis(res_detail):
     """Displays comprehensive analysis results for a single ticker in a tabbed interface."""
     ticker = res_detail.get("ticker", "N/A"); ticker_info = res_detail.get("ticker_info", {})
@@ -1841,7 +1784,7 @@ def display_detailed_analysis(res_detail):
         st.subheader(f"Simulated Backtest for {res_detail.get('ticker')}")
         sim_bt_data = res_detail.get("simulated_backtest_results", {})
         sim_bt_metrics = sim_bt_data.get("metrics")
-        sim_bt_log_df_raw = sim_bt_data.get("log_df") # This is a list of dicts
+        sim_bt_log_df_raw = sim_bt_data.get("log_df")
 
         if sim_bt_metrics and not (sim_bt_metrics.get("message") or sim_bt_metrics.get("error")):
             st.markdown("This section shows a quick simulated backtest for the last year using the **Price, Momentum, and Volatility** agents with standard weights. This is a simplified simulation for quick insight, not a full backtest.")
@@ -1871,7 +1814,9 @@ def display_detailed_analysis(res_detail):
             st.info("Simulated backtest results not available for this ticker.")
 
 
-# --- Streamlit UI Main App Flow ---
+# --------------------------------
+# Streamlit UI Main App Flow Execution
+# --------------------------------
 llm_client = None
 try:
     # Prioritize st.secrets, then os.environ for API keys
@@ -2057,7 +2002,7 @@ with config_cont:
                         bt_log_df = pd.DataFrame(bt_log_df_raw)
                         if not bt_log_df.empty and 'date' in bt_log_df.columns:
                             bt_log_df['date'] = pd.to_datetime(bt_log_df['date'])
-                            # Ensure 'date' column is timezone-naive to match plotting library expectations if it was originally local time or lost timezone.
+                            # Ensure 'date' is timezone-naive to match expected yfinance index type for plotting
                             # If yfinance df is tz-naive, this is safe.
                             bt_log_df.set_index(bt_log_df['date'].dt.tz_localize(None), inplace=True)
                             
@@ -2116,7 +2061,7 @@ with config_cont:
         
         if tickers_to_analyze:
             portfolio_analysis_configs = {
-                "use_sentiment": True, "use_filings": True, # Politician filings removed
+                "use_sentiment": True, "use_filings": True, 
                 "use_value_trades": True, "use_sec_summary": True 
             }
             # Only re-run analysis if the portfolio name changes or results for this portfolio are not yet cached in session_state
@@ -2393,7 +2338,6 @@ with config_cont:
                 daily_portfolio_values = daily_portfolio_values.fillna(method='ffill').fillna(method='bfill')
 
                 # Ensure the final DataFrame for plotting has an index that's consistent (e.g., tz-naive if plotting expects it)
-                # If Altair handles tz-aware, great. If not, tz_localize(None) here.
                 # For consistency with yfinance output, it's safer to make it tz-naive for plotting if yfinance is tz-naive.
                 daily_portfolio_values_df = pd.DataFrame(daily_portfolio_values, columns=['Portfolio Value'])
                 daily_portfolio_values_df.index = daily_portfolio_values_df.index.tz_localize(None) # Make tz-naive for plotting if needed
