@@ -122,7 +122,7 @@ def fetch_price_history_yf(ticker: str, period: str = "max", interval: str = "1d
 
 # NEW ALPHA VANTAGE PRICE HISTORY FETCHER
 @st.cache_data(ttl=300) # Cache for 5 minutes
-def fetch_price_history(ticker: str, outputsize: str = "full", datatype: str = "json") -> pd.DataFrame:
+def fetch_price_history(ticker: str, outputsize: str = "compact", datatype: str = "json") -> pd.DataFrame:
     """
     Fetches daily adjusted price history from Alpha Vantage.
     outputsize='compact' returns the latest 100 data points.
@@ -1364,7 +1364,7 @@ def run_live_analysis(tickers, llm_client, configs):
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
         
         # --- Use the new fetch_price_history (Alpha Vantage) ---
-        price_history_full = fetch_price_history(t, outputsize="full") # This now calls AV
+        price_history_full = fetch_price_history(t, outputsize="compact") # This now calls AV
         if price_history_full.empty:
             results[t] = {
                 "error": f"Price history unavailable for {t}. This can happen for invalid tickers, delisted stocks, or temporary data provider issues.",
@@ -1479,7 +1479,7 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     s_dt = datetime.strptime(start_date, "%Y-%m-%d"); fetch_s_dt = (s_dt - pd.DateOffset(months=18)).strftime("%Y-%m-%d")
     
     # --- Use the new fetch_price_history (Alpha Vantage) for backtesting ---
-    full_hist = fetch_price_history(ticker, outputsize="full") # This now calls AV
+    full_hist = fetch_price_history(ticker, outputsize="compact") # This now calls AV
     
     if full_hist.empty: return {"error": f"Backtest fail {ticker}: Price history empty."}, pd.DataFrame()
     hist = full_hist[(full_hist.index >= pd.to_datetime(fetch_s_dt)) & (full_hist.index <= pd.to_datetime(end_date))].copy()
@@ -1538,7 +1538,7 @@ def display_detailed_analysis(res_detail):
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
         # Use the new fetch_price_history (Alpha Vantage) for charting
-        price_hist_chart = fetch_price_history(ticker, outputsize="full") # This now calls AV
+        price_hist_chart = fetch_price_history(ticker, outputsize="compact") # This now calls AV
         if not price_hist_chart.empty:
             st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
         else: st.warning("Price chart data not available.")
@@ -2078,7 +2078,7 @@ with config_cont:
             with st.spinner("Pre-fetching historical prices for portfolio value chart..."):
                 for t in all_tickers_in_history:
                     # Use the new Alpha Vantage fetcher for historical prices in virtual trading chart
-                    price_data_for_history[t] = fetch_price_history(t, outputsize="full")
+                    price_data_for_history[t] = fetch_price_history(t, outputsize="compact")
 
             
             if chronological_transactions:
