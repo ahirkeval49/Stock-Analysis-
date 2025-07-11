@@ -1,6 +1,6 @@
 import os
 import streamlit as st
-import yfinance as yf
+import yfinance as yf # Keep yfinance for now for other functions
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
@@ -17,6 +17,9 @@ import altair as alt # Import altair for charting
 import time # Import time for sleeps
 import random # Import random for random delays
 
+# --- NEW ALPHA VANTAGE IMPORT ---
+from alpha_vantage.timeseries import TimeSeries
+from alpha_vantage.fundamentaldata import FundamentalData # Keep for potential future use
 
 # --- Page Config (Must be the first Streamlit command) ---
 st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
@@ -101,8 +104,10 @@ if 'backtest_triggered' not in st.session_state:
 # --------------------------------
 # Data Fetchers
 # --------------------------------
+
+# RENAMED ORIGINAL YFINANCE FUNCTION for backup/comparison
 @st.cache_data(ttl=300) # Cache for 5 minutes
-def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame:
+def fetch_price_history_yf(ticker: str, period: str = "max", interval: str = "1d") -> pd.DataFrame:
     try:
         ticker_obj = yf.Ticker(ticker)
         df = ticker_obj.history(period=period, interval=interval)
@@ -114,6 +119,86 @@ def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") 
     except Exception as e:
         st.error(f"Critical error fetching price history for {ticker}: {e}")
         return pd.DataFrame()
+
+# NEW ALPHA VANTAGE PRICE HISTORY FETCHER
+@st.cache_data(ttl=300) # Cache for 5 minutes
+def fetch_price_history(ticker: str, outputsize: str = "full", datatype: str = "json") -> pd.DataFrame:
+    """
+    Fetches daily adjusted price history from Alpha Vantage.
+    outputsize='compact' returns the latest 100 data points.
+    outputsize='full' returns the full-length daily time series (up to 20 years).
+    """
+    api_key = st.secrets.get("AVAPI_KEY")
+    if not api_key:
+        st.error("Alpha Vantage API Key (AVAPI_KEY) not found in secrets. Cannot fetch price history.")
+        return pd.DataFrame()
+
+    ts = TimeSeries(key=api_key, output_format=datatype)
+    
+    max_retries = 3
+    base_delay = 1.0 # seconds
+    
+    # Introduce a short delay before first attempt to respect global rate limit
+    time.sleep(random.uniform(0.1, 0.5))
+
+    for attempt in range(max_retries):
+        try:
+            # Check if this is the 'demo' key and if the ticker is not IBM
+            if api_key == "demo" and ticker.upper() != "IBM":
+                st.warning("Using 'demo' Alpha Vantage API key, which only works for IBM. Please get your own key for other tickers.")
+                return pd.DataFrame()
+
+            data, meta_data = ts.get_daily_adjusted(symbol=ticker, outputsize=outputsize)
+            
+            # Alpha Vantage returns an 'Information' key for rate limit errors or other info
+            if isinstance(data, dict) and data.get('Information'):
+                info_msg = data['Information']
+                if "Our standard API call frequency is 5 calls per minute and 500 calls per day" in info_msg:
+                    st.error(f"Alpha Vantage Rate Limit Exceeded for {ticker}: {info_msg}. Please wait or upgrade your API key.")
+                    return pd.DataFrame() # Don't retry if it's a confirmed rate limit error
+                else:
+                    st.warning(f"Alpha Vantage Info for {ticker}: {info_msg}")
+                    return pd.DataFrame() # Treat other info messages as data unavailability for now
+            
+            if not data:
+                error_msg = f"No data returned from Alpha Vantage for {ticker}."
+                if attempt < max_retries - 1:
+                    st.warning(f"Attempt {attempt + 1}/{max_retries}: {error_msg}. Retrying...")
+                    time.sleep(base_delay * (2 ** attempt) + random.uniform(0.1, 0.5))
+                    continue
+                else:
+                    st.error(error_msg)
+                    return pd.DataFrame()
+
+            df = pd.DataFrame.from_dict(data, orient='index').astype(float)
+            df.index = pd.to_datetime(df.index)
+            df = df.rename(columns={
+                '1. open': 'Open',
+                '2. high': 'High',
+                '3. low': 'Low',
+                '4. close': 'Close',
+                '5. adjusted close': 'Adj Close',
+                '6. volume': 'Volume',
+                '7. dividend amount': 'Dividends',
+                '8. split coefficient': 'Stock Splits'
+            })
+            df.sort_index(inplace=True) # Ensure chronological order
+            return df[['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume', 'Dividends', 'Stock Splits']] # Match yfinance columns
+        
+        except Exception as e:
+            error_msg = f"Error fetching price history for {ticker} from Alpha Vantage: {e}"
+            if "Our standard API call frequency is 5 calls per minute and 500 calls per day" in str(e):
+                st.error(f"Alpha Vantage Rate Limit Exceeded for {ticker}: {e}. Please wait or upgrade your API key.")
+                return pd.DataFrame() # Don't retry if it's a confirmed rate limit
+            
+            if attempt < max_retries - 1:
+                st.warning(f"Attempt {attempt + 1}/{max_retries}: {error_msg}. Retrying...")
+                time.sleep(base_delay * (2 ** attempt) + random.uniform(0.1, 0.5))
+            else:
+                st.error(error_msg)
+                return pd.DataFrame()
+    return pd.DataFrame() # Should not be reached if retries are handled properly
+
 
 @st.cache_data(ttl=300) # Cache for 5 minutes
 def fetch_ticker_info(ticker: str) -> dict:
@@ -942,7 +1027,7 @@ class SECSummaryAgent:
                 summary = resp
         except Exception as e:
             llm_err = f"LLM SEC summary call failed: {str(e)[:150]}"
-        
+            
         return {
             "ticker": ticker,
             "sec_summary_llm": summary,
@@ -1007,7 +1092,7 @@ class PoliticianFilingsAgent:
             elif sells > buys and sells >= 1: # Smaller sell signal
                 sig = "hold" # Or weak sell
                 politician_confidence = -0.1
-        
+            
         return {"ticker":ticker, "politician_net_trade_value_estimate":net_val, "politician_buy_tx_count":buys, "politician_sell_tx_count":sells, "politician_filings_signal":sig, "politician_data_error":err, "politician_confidence_score": float(politician_confidence)}
 
 class ValueInvestingIOAgent:
@@ -1042,19 +1127,19 @@ class ValueInvestingIOAgent:
 class PortfolioAgent:
     # Adjusted weights to better reflect potential impact
     WEIGHTS = {
-        "price": 1.0,        # Technical signals are often primary
-        "momentum": 0.8,     # Strong indicator for short-to-medium term
-        "volatility": 0.2,   # Risk management, less direct signal
-        "sentiment": 0.7,    # News sentiment can move markets quickly
-        "fund": 0.9,         # Fundamental health is crucial long-term
+        "price": 1.0,         # Technical signals are often primary
+        "momentum": 0.8,      # Strong indicator for short-to-medium term
+        "volatility": 0.2,    # Risk management, less direct signal
+        "sentiment": 0.7,     # News sentiment can move markets quickly
+        "fund": 0.9,          # Fundamental health is crucial long-term
         "valuation_dcf": 0.6, # DCF is a strong theoretical valuation but sensitive to assumptions
         "valuation_pe": 0.4, # PE relative valuation is simpler, widely used
-        "sec_filings": 0.6,  # Insider activity is significant
-        "sec_summary": 0.7,  # LLM summary of major filings can be very impactful
+        "sec_filings": 0.6,   # Insider activity is significant
+        "sec_summary": 0.7,   # LLM summary of major filings can be very impactful
         "inst_holdings": 0.3, # Institutional shifts are slow, but important
-        "analyst": 0.5,      # Analyst ratings are priced in quickly, but good confirmation
+        "analyst": 0.5,       # Analyst ratings are priced in quickly, but good confirmation
         "politician_filings": 0.2, # Interesting, but often less direct impact on stock
-        "vi_signal": 0.8     # Third-party valuation can be a strong independent signal
+        "vi_signal": 0.8      # Third-party valuation can be a strong independent signal
     }
 
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
@@ -1278,8 +1363,8 @@ def run_live_analysis(tickers, llm_client, configs):
         progress_text = f"Analyzing {t}... ({i+1}/{len(tickers)})"
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
         
-        # --- Handle Price History Fetch ---
-        price_history_full = fetch_price_history(t, period="max")
+        # --- Use the new fetch_price_history (Alpha Vantage) ---
+        price_history_full = fetch_price_history(t, period="max") # This now calls AV
         if price_history_full.empty:
             results[t] = {
                 "error": f"Price history unavailable for {t}. This can happen for invalid tickers, delisted stocks, or temporary data provider issues.",
@@ -1287,8 +1372,8 @@ def run_live_analysis(tickers, llm_client, configs):
             }
             continue
 
-        # --- Handle Ticker Info Fetch ---
-        ticker_info = fetch_ticker_info(t)
+        # --- Handle Ticker Info Fetch (still using yfinance for now as per request) ---
+        ticker_info = fetch_ticker_info(t) # This still calls yfinance
         # Check if fetch_ticker_info itself returned an error flag
         if ticker_info.get("_error"):
             results[t] = {"error": ticker_info["_error"], "ticker": t, "final_decision": "error", "composite_score": 0}
@@ -1363,7 +1448,7 @@ def run_live_analysis(tickers, llm_client, configs):
             except Exception as e:
                 err_k, sig_k = name.lower().replace("agent","")+"_error", name.lower().replace("agent","")+"_signal"
                 if name == "SECSummaryAgent":
-                     agent_res_list.append({"sec_summary": "Error generating summary.", "sec_summary_error":f"Agent {name} error: {str(e)[:150]}"})
+                    agent_res_list.append({"sec_summary": "Error generating summary.", "sec_summary_error":f"Agent {name} error: {str(e)[:150]}"})
                 else:
                     agent_res_list.append({sig_k:"error", err_k:f"Agent {name} error: {str(e)[:150]}"}); st.warning(f"Error in {name} for {t}: {e}")
         
@@ -1377,7 +1462,12 @@ def run_live_analysis(tickers, llm_client, configs):
             if isinstance(r_dict,dict): curr_res_dict.update(r_dict)
         curr_res_dict.update(final_dec)
         
-        sim_bt_metrics, sim_bt_log_df = run_backtest(t, (datetime.now() - pd.DateOffset(years=1, days=1)).strftime("%Y-%m-%d"), (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), 10000, llm_client, default_live_backtest_weights)
+        # Ensure backtest start date is within valid range for Alpha Vantage data (max ~20 years)
+        # And ensure the current price from info is used for the simulation too.
+        backtest_end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        backtest_start_date = (datetime.now() - pd.DateOffset(years=1, days=1)).strftime("%Y-%m-%d")
+        
+        sim_bt_metrics, sim_bt_log_df = run_backtest(t, backtest_start_date, backtest_end_date, 10000, llm_client, default_live_backtest_weights)
         curr_res_dict["simulated_backtest_results"] = {"metrics": sim_bt_metrics, "log_df": sim_bt_log_df.to_dict('records') if not sim_bt_log_df.empty else []}
 
         results[t] = curr_res_dict
@@ -1387,11 +1477,14 @@ def run_live_analysis(tickers, llm_client, configs):
 def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_placeholder, backtest_agent_weights):
     st.write(f"Preparing backtest: {ticker} ({start_date} to {end_date})...")
     s_dt = datetime.strptime(start_date, "%Y-%m-%d"); fetch_s_dt = (s_dt - pd.DateOffset(months=18)).strftime("%Y-%m-%d")
-    full_hist = fetch_price_history(ticker, period="max", interval="1d")
+    
+    # --- Use the new fetch_price_history (Alpha Vantage) for backtesting ---
+    full_hist = fetch_price_history(ticker, outputsize="full") # This now calls AV
+    
     if full_hist.empty: return {"error": f"Backtest fail {ticker}: Price history empty."}, pd.DataFrame()
     hist = full_hist[(full_hist.index >= pd.to_datetime(fetch_s_dt)) & (full_hist.index <= pd.to_datetime(end_date))].copy()
     if hist.empty or len(hist[hist.index >= pd.to_datetime(start_date)]) < 2: return {"error": f"Backtest fail {ticker}: Not enough data in range."}, pd.DataFrame()
-    info_bt = fetch_ticker_info(ticker); data_static = {"ticker_info": info_bt}
+    info_bt = fetch_ticker_info(ticker); data_static = {"ticker_info": info_bt} # This still calls yfinance
     p_agent, m_agent, v_agent, port_agent = PriceAgent(), MomentumAgent(), VolatilityAgent(), PortfolioAgent()
     log, cash, shares, port_val = [], initial_capital, 0, initial_capital
     run_dates = hist[hist.index >= pd.to_datetime(start_date)].index
@@ -1444,7 +1537,8 @@ def display_detailed_analysis(res_detail):
 
     with tabs[0]:
         st.subheader("Price Performance & Technical Signals")
-        price_hist_chart = fetch_price_history(ticker, period="1y")
+        # Use the new fetch_price_history (Alpha Vantage) for charting
+        price_hist_chart = fetch_price_history(ticker, outputsize="full") # This now calls AV
         if not price_hist_chart.empty:
             st.line_chart(price_hist_chart["Close"], use_container_width=True, color="#0072F0")
         else: st.warning("Price chart data not available.")
@@ -1889,15 +1983,15 @@ with config_cont:
                     return f'color: {color}; font-weight: bold;'
 
                 st.dataframe(holdings_df.style.applymap(color_ai_decision, subset=['AI Decision']), use_container_width=True, hide_index=True,
-                             column_config={
-                                 "Quantity": st.column_config.NumberColumn(format="%.4f"),
-                                 "Avg. Cost": st.column_config.NumberColumn(format="$%.2f"),
-                                 "Current Price": st.column_config.NumberColumn(format="$%.2f"),
-                                 "Market Value": st.column_config.NumberColumn(format="$%.2f"),
-                                 "Unrealized P&L": st.column_config.NumberColumn(format="$%.2f", help="Unrealized Profit & Loss"),
-                                 "P&L (%)": st.column_config.ProgressColumn(format="%.2f%%", min_value=-100, max_value=100),
-                                 "Composite Score": st.column_config.NumberColumn(format="%.2f", help="Aggregated AI score (-1.0 to 1.0)")
-                             })
+                                 column_config={
+                                     "Quantity": st.column_config.NumberColumn(format="%.4f"),
+                                     "Avg. Cost": st.column_config.NumberColumn(format="$%.2f"),
+                                     "Current Price": st.column_config.NumberColumn(format="$%.2f"),
+                                     "Market Value": st.column_config.NumberColumn(format="$%.2f"),
+                                     "Unrealized P&L": st.column_config.NumberColumn(format="$%.2f", help="Unrealized Profit & Loss"),
+                                     "P&L (%)": st.column_config.ProgressColumn(format="%.2f%%", min_value=-100, max_value=100),
+                                     "Composite Score": st.column_config.NumberColumn(format="%.2f", help="Aggregated AI score (-1.0 to 1.0)")
+                                 })
             else:
                 st.info("This portfolio currently has no stock holdings. Use the 'Add Stock' section below.")
 
@@ -1983,7 +2077,8 @@ with config_cont:
             price_data_for_history = {}
             with st.spinner("Pre-fetching historical prices for portfolio value chart..."):
                 for t in all_tickers_in_history:
-                    price_data_for_history[t] = fetch_price_history(t, period="max")
+                    # Use the new Alpha Vantage fetcher for historical prices in virtual trading chart
+                    price_data_for_history[t] = fetch_price_history(t, outputsize="full")
 
             
             if chronological_transactions:
@@ -2071,7 +2166,8 @@ with config_cont:
             if st.session_state.virtual_portfolio['holdings']:
                 with st.spinner("Fetching latest prices for dashboard..."):
                     for holding in st.session_state.virtual_portfolio['holdings']:
-                        info = fetch_ticker_info(holding['ticker'])
+                        # --- Current price for dashboard still uses yfinance. We will update this later. ---
+                        info = fetch_ticker_info(holding['ticker']) # This calls yfinance for info
                         price = info.get("currentPrice")
                         if price is None and not price_data_for_history.get(holding['ticker'], pd.DataFrame()).empty:
                             price = price_data_for_history[holding['ticker']].iloc[-1].get("Close")
