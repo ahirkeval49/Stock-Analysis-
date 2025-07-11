@@ -11,11 +11,9 @@ import requests
 from bs4 import BeautifulSoup
 import re
 from urllib.parse import urljoin, urlparse
-from newsapi import NewsApiClient
-import json
-import altair as alt
 import time
 import random
+from newsapi import NewsApiClient # Ensure this is imported if used
 
 # --- Page Config (Must be the first Streamlit command) ---
 st.set_page_config(page_title="AI Hedge Fund Simulator", layout="wide")
@@ -130,7 +128,8 @@ def fetch_price_history(ticker: str, period: str = "max", interval: str = "1d") 
         if df.empty:
             st.warning(f"No price history returned from yfinance for {ticker} (period={period}). This might be an invalid ticker or data issue.")
             return pd.DataFrame()
-        df.index = pd.to_datetime(df.index).tz_localize(None) # Remove timezone info for consistency
+        # Remove timezone info to match typical pandas indexing for dates
+        df.index = pd.to_datetime(df.index).tz_localize(None) 
         return df
     except Exception as e:
         st.error(f"Critical error fetching price history for {ticker}: {e}")
@@ -331,7 +330,19 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                 # Libraries like `sec-api.io` or custom scraping logic would be needed.
                 document_content_for_llm = ""
                 if form in ['10-K', '10-Q', '8-K']:
-                    document_content_for_llm = f"Content for {form} on {date_str}. (Automated scraping and parsing of document content for LLM summary is a complex task requiring specific logic for each form type or external APIs like sec-api.io. This is currently a placeholder for integration.)"
+                    # This is a simplified placeholder. In a real scenario, you'd fetch the document:
+                    # try:
+                    #     doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}"
+                    #     doc_response = requests.get(doc_url, headers={'User-Agent': SEC_USER_AGENT}, timeout=10)
+                    #     if doc_response.status_code == 200:
+                    #         # Basic text extraction, might need more advanced parsing for cleaner text
+                    #         soup_doc = BeautifulSoup(doc_response.content, 'html.parser')
+                    #         document_content_for_llm = soup_doc.get_text(separator=' ', strip=True)[:2000] # Limit content length
+                    #     else:
+                    #         document_content_for_llm = f"Could not fetch content from {doc_name} (Status: {doc_response.status_code})."
+                    # except Exception as e:
+                    #     document_content_for_llm = f"Error fetching content from {doc_name}: {e}"
+                    document_content_for_llm = f"Content for {form} filed on {date_str}. (Actual content extraction from SEC documents is complex and omitted for demo. This acts as a placeholder for LLM.)"
                 
                 if form == '4' and doc_name.lower().endswith(('.xml', '.xsd')):
                     if xml_fetches >= max_xml_fetches: continue # Respect limit
@@ -372,7 +383,7 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
                                     filings_list.append({"is_form4_transaction": True, "ticker": ticker_symbol, "filing_date": date_str, "transaction_date": tx_date, "reporting_owner": owner_name, "owner_relationship": owner_rel, "transaction_code": tx_code, "acq_disp_code": ad_code, "shares": shares, "price_per_share": price, "link_to_filing": idx_link})
                     except Exception: # Broad catch for parsing issues in individual Form 4s
                         continue
-                elif len([f for f in filings_list if not f.get("is_form4_transaction")]) < max_other_filings: # Limit other filings too
+                elif len(filings_list) < max_other_filings: # Limit other filings too
                     filings_list.append({"is_form4_transaction": False, "ticker": ticker_symbol, "filing_date": date_str, "form_type": form, "document_link": f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_no_dashless}/{doc_name}", "summary_link": idx_link, "document_content_for_llm": document_content_for_llm})
             
             if not filings_list and xml_fetches > 0: return [{"error": f"SEC: {xml_fetches} Form 4s for {ticker_symbol}, but no transactions parsed or other issues."}]
@@ -386,45 +397,20 @@ def fetch_all_sec_filings(ticker_symbol: str, lookback_days: int = 365) -> list[
     filings_list.sort(key=lambda x: x.get('filing_date', '1900-01-01'), reverse=True)
     return filings_list
 
-@st.cache_data(ttl=6*3600)
+@st.cache_data(ttl=6*3600) # Cache for 6 hours
 def fetch_inst_filings(ticker: str) -> list[dict]:
     """Fetches institutional holder data for a given ticker using yfinance."""
     try:
         df_holders = yf.Ticker(ticker).institutional_holders
         if df_holders is not None and not df_holders.empty:
-            # Ensure columns exist before trying to convert them
+            # Ensure columns exist before trying to convert them and handle missing data
             if 'Shares' in df_holders.columns: df_holders['Shares'] = pd.to_numeric(df_holders['Shares'], errors='coerce').fillna(0)
             if '% Out' in df_holders.columns: df_holders['% Out'] = pd.to_numeric(df_holders['% Out'], errors='coerce').fillna(0.0)
             if 'Date Reported' in df_holders.columns: df_holders['Date Reported'] = df_holders['Date Reported'].astype(str)
+            if 'Value' in df_holders.columns: df_holders['Value'] = pd.to_numeric(df_holders['Value'], errors='coerce').fillna(0) # Also get Value
             return df_holders.to_dict("records")
         return [{"error": f"No yfinance institutional holder data for {ticker}."}]
     except Exception as e: return [{"error": f"yfinance institutional holders fetch failed for {ticker}: {e}"}]
-
-@st.cache_data(ttl=4 * 3600)
-def fetch_value_investing_io_data(ticker: str) -> dict:
-    """Scrapes Peter Lynch Fair Value from ValueInvesting.io (experimental)."""
-    url = f"https://valueinvesting.io/{ticker.upper()}/valuation/fair-value"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36'}
-    try:
-        response = requests.get(url, headers=headers, timeout=15); response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser'); target_text = None
-        for p in soup.find_all('p'):
-            text = p.get_text(strip=True)
-            if ticker.upper() in text and "Fair Value" in text and ("Peter Lynch" in text or "based on" in text or "valuation model" in text):
-                target_text = text; break
-        if not target_text: return {"error": f"VI.io: Peter Lynch Fair Value paragraph not found for {ticker}."}
-        pattern = re.compile(r"As of (?P<date>[\d]{4}-[\d]{2}-[\d]{2}), the Fair Value of .*?\(.*?" + re.escape(ticker.upper()) + r".*?\) is (?P<fair_value>[\d\.]+) USD\.?" + r"(?:.*?With the current market price of (?P<market_price>[\d\.]+) USD, the upside of .*? is (?P<upside_percent>[-+]?\d+\.?\d*)%\.?)?")
-        match = pattern.search(target_text)
-        if match:
-            data = match.groupdict()
-            return {"ticker": ticker, "vi_valuation_date": data.get("date"), "vi_fair_value": float(data.get("fair_value")) if data.get("fair_value") else None, "vi_site_market_price": float(data.get("market_price")) if data.get("market_price") else None, "vi_upside_percent": float(data.get("upside_percent")) if data.get("upside_percent") else None, "vi_full_text": target_text, "vi_data_source_url": url, "error": None}
-        else:
-            fv_match = re.search(r"Fair Value.*?is ([\d\.]+) USD", target_text)
-            if fv_match: return {"ticker": ticker, "vi_valuation_date": "N/A (generic)", "vi_fair_value": float(fv_match.group(1)) if fv_match.group(1) else None, "vi_site_market_price": None, "vi_upside_percent": None, "vi_full_text": target_text, "vi_data_source_url": url, "error": None, "note": "Generic parse."}
-            return {"error": f"VI.io: Could not parse details for {ticker} from: '{target_text[:200]}...'"}
-    except requests.exceptions.HTTPError as http_err: return {"error": f"VI.io: HTTP error for {ticker} ({http_err.response.status_code if http_err.response else 'Unknown'}): {url}"}
-    except requests.exceptions.RequestException as req_err: return {"error": f"VI.io: Request error for {ticker}: {req_err}"}
-    except Exception as e: return {"error": f"VI.io: Unexpected error for {ticker}: {e}"}
 
 # Removed fetch_politician_trades as requested
 
@@ -432,20 +418,22 @@ def fetch_value_investing_io_data(ticker: str) -> dict:
 class ModelClient:
     """Manages interaction with various LLM providers."""
     def __init__(self, api_key: str, provider: str = "openai"):
-        self.api_key, self.provider = api_key, provider
+        self.api_key = api_key
+        self.provider = provider
         models = {"openai": "gpt-4o", "deepseek": "deepseek-reasoner"}
-        if not api_key: raise ValueError("API key required for LLM.")
+        if not self.api_key: raise ValueError("API key required for LLM.")
         self.model_name = models.get(provider)
         if not self.model_name: raise ValueError(f"Unsupported LLM provider: {provider}")
-        if provider == "deepseek": self.client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
-        elif provider == "openai": self.client = OpenAI(api_key=api_key)
+        if provider == "deepseek": self.client = OpenAI(api_key=self.api_key, base_url="https://api.deepseek.com/v1")
+        elif provider == "openai": self.client = OpenAI(api_key=self.api_key)
 
     def generate(self, prompt: str) -> str:
         try:
             stream = self.client.chat.completions.create(model=self.model_name, messages=[{"role": "user", "content": prompt}], stream=True)
             response_content = "".join(c.choices[0].delta.content for c in stream if c.choices and c.choices[0].delta and c.choices[0].delta.content)
             return response_content
-        except Exception as e: raise Exception(f"LLM Error ({self.provider}, {self.model_name}): {e}")
+        except Exception as e:
+            raise Exception(f"LLM Error ({self.provider}, {self.model_name}): {e}")
 
 class PriceAgent:
     """Analyzes price action using SMAs, RSI, and Bollinger Bands."""
@@ -570,7 +558,7 @@ class MomentumAgent:
         df = price_data_slice.copy()
 
         if 'Close' not in df.columns or not pd.api.types.is_numeric_dtype(df['Close']):
-            error_msg = "Price data is missing 'Close' column or not numeric for momentum calculation."
+            error_msg = "Price data is missing 'Close' column or not numeric for momentum."
             return {
                 "ticker": ticker, "momentum_signal": "hold",
                 "momentum_1m": np.nan, "momentum_12m": np.nan,
@@ -992,6 +980,7 @@ class SECSummaryAgent:
             return {"ticker": ticker, "sec_summary": "No relevant non-Form 4 filings with content found for summary.", "sec_summary_error": None}
 
         # Sort filings to prioritize 8-K, then 10-Q, then 10-K, and then by most recent date
+        # Use .get with a default for keys to prevent KeyError during sorting if a key is unexpectedly missing
         sorted_filings = sorted(
             relevant_filings,
             key=lambda x: (
@@ -1055,9 +1044,10 @@ class InstitutionalHoldingsAgent:
             err = holdings[0]["error"]
             return {"ticker":ticker, "inst_num_holders":0, "inst_total_shares_held":0, "inst_total_pct_out":0.0, "inst_holdings_signal":"hold", "inst_holdings_error":err, "inst_top_holders":[]}
         
-        num_h, total_s, total_pct, top_h = 0,0,0.0,[]
+        num_h, total_s, total_pct, top_h_raw = 0,0,0.0,[]
         if holdings:
-            valid_h = [d for d d in holdings if isinstance(d,dict) and "error" not in d]
+            # Fix: Corrected syntax error from 'for d d in holdings' to 'for d in holdings'
+            valid_h = [d for d in holdings if isinstance(d,dict) and "error" not in d]
             if valid_h:
                 num_h = len(valid_h)
                 try:
@@ -1067,7 +1057,7 @@ class InstitutionalHoldingsAgent:
                     for d in valid_h:
                         d['Shares'] = pd.to_numeric(d.get('Shares'), errors='coerce').fillna(0)
                     # Get top 10 holders by shares for display
-                    top_h = sorted(valid_h, key=lambda x: x.get('Shares',0), reverse=True)[:10]
+                    top_h_raw = sorted(valid_h, key=lambda x: x.get('Shares',0), reverse=True)[:10]
                 except Exception as e:
                     err = f"Error processing institutional holdings data: {e}"
             elif not err:
@@ -1086,7 +1076,7 @@ class InstitutionalHoldingsAgent:
             elif total_pct < 0.05 and num_h > 0: inst_confidence_score = -0.8 # Very low interest
             elif total_pct < 0.10 and num_h > 0: inst_confidence_score = -0.5
         
-        return {"ticker":ticker, "inst_num_holders":num_h, "inst_total_shares_held":int(total_s), "inst_total_pct_out":float(total_pct), "inst_holdings_signal":sig, "inst_holdings_error":err, "inst_top_holders":top_h, "inst_confidence_score": float(inst_confidence_score)}
+        return {"ticker":ticker, "inst_num_holders":num_h, "inst_total_shares_held":int(total_s), "inst_total_pct_out":float(total_pct), "inst_holdings_signal":sig, "inst_holdings_error":err, "inst_top_holders":top_h_raw, "inst_confidence_score": float(inst_confidence_score)}
 
 # Removed PoliticianFilingsAgent as requested
 
@@ -1127,7 +1117,7 @@ class PortfolioAgent:
         "sentiment": 0.7, "fund": 0.9, "valuation_dcf": 0.6, "valuation_pe": 0.4,
         "sec_filings": 0.6, "sec_summary": 0.7,
         "inst_holdings": 0.3, "analyst": 0.5,
-        "vi_signal": 0.8 # Politician filings removed
+        "vi_signal": 0.8 
     }
 
     def run(self, ticker: str, signals: list[dict], agent_weights: dict = None) -> dict:
@@ -1135,17 +1125,16 @@ class PortfolioAgent:
         for s_dict in signals:
             if isinstance(s_dict, dict): agg_s.update(s_dict)
         
-        # Mapping signals to their corresponding weights and confidence scores (if available)
         s_map = {
             "price_signal": ("price", "price_confidence_score"),
             "momentum_signal": ("momentum", "momentum_confidence_score"),
             "volatility_signal": ("volatility", "volatility_confidence_score"),
             "sentiment_signal": ("sentiment", "sentiment_confidence_score"),
-            "fund_signal": ("fund", None), # No direct confidence score in current FundamentalsAgent output
+            "fund_signal": ("fund", None),
             "dcf_signal": ("valuation_dcf", None),
             "relative_pe_signal": ("valuation_pe", None),
             "sec_filings_signal": ("sec_filings", None),
-            "sec_summary_llm": ("sec_summary", None), # Infer score from summary text later or use default contribution
+            "sec_summary_llm": ("sec_summary", None),
             "inst_holdings_signal": ("inst_holdings", "inst_confidence_score"),
             "analyst_signal": ("analyst", None),
             "vi_signal": ("vi_signal", "vi_confidence_score")
@@ -1155,29 +1144,24 @@ class PortfolioAgent:
             s_val = agg_s.get(s_key)
             w = curr_w.get(w_key, 0)
             
-            # Special handling for SEC Summary if it's a text summary, or use default signal value
             if s_key == "sec_summary_llm" and s_val and w > 0:
-                # If LLM summary generation had an error, treat it neutrally
                 if agg_s.get("sec_summary_error"):
                     raw_score = 0
-                # Basic sentiment analysis of the summary text (can be improved by more sophisticated NLP)
                 elif "negative" in s_val.lower() and "no significant events" not in s_val.lower():
                     raw_score = -0.5
                 elif "positive" in s_val.lower() and "no significant events" not in s_val.lower():
                     raw_score = 0.5
-                else: # Default small positive if summary exists but no strong sentiment words
+                else:
                     raw_score = 0.1
                 total_score += raw_score * w
                 sum_w += w
             elif s_val and w > 0 and s_val in ["buy", "hold", "sell"]:
                 raw_score = {"buy":1, "hold":0, "sell":-1}.get(s_val,0)
                 
-                # Incorporate confidence score from agents if available
                 if conf_key and pd.notna(agg_s.get(conf_key)):
                     agent_confidence = agg_s.get(conf_key)
-                    # Weight the raw signal by its own agent's confidence
                     total_score += (raw_score * agent_confidence) * w
-                    sum_w += w * agent_confidence # Sum weights by effective confidence
+                    sum_w += w * agent_confidence
                 else:
                     total_score += raw_score * w
                     sum_w += w
@@ -1225,7 +1209,6 @@ class AITraderAgent:
         info = analysis.get("ticker_info", {})
         market_cap = info.get("marketCap", 0)
         beta = info.get("beta", 1.0)
-        # Define "safe" as Mega-cap (>$200B) and low beta (<1.0)
         return isinstance(market_cap, (int, float)) and market_cap > 200e9 and isinstance(beta, (int, float)) and beta < 1.0
 
     def run(self, portfolio_state: dict, analysis_results: dict):
@@ -1356,7 +1339,7 @@ def run_live_analysis(tickers, llm_client, configs):
         "sentiment": 0., "fund": 0., "valuation_dcf": 0., "valuation_pe": 0.,
         "sec_filings": 0., "sec_summary": 0.,
         "inst_holdings": 0., "analyst": 0.,
-        "politician_filings": 0., "vi_signal": 0.
+        "vi_signal": 0. # Politician filings removed
     }
 
     for i, t in enumerate(tickers):
@@ -1427,7 +1410,7 @@ def run_live_analysis(tickers, llm_client, configs):
             "ticker_info":ticker_info,
             "news":dedup_news,
             "news_fetch_status_error": news_status_bundle if any(kw in news_status_bundle.lower() for kw in ["error","failed","no news","missing","issue"]) else None,
-            # Removed "politician_trades"
+            # Removed "politician_trades" as requested
             "value_investing_io_data":fetch_value_investing_io_data(t) if configs["use_value_trades"] else {"error":"VI.io: Skipped."},
             "institutional_holdings":fetch_inst_filings(t) if configs["use_filings"] else [],
             "sec_all_filings_raw":fetch_all_sec_filings(t) if configs["use_filings"] else []
@@ -1578,6 +1561,8 @@ def run_backtest(ticker, start_date, end_date, initial_capital, llm_client_place
     
     log_df = pd.DataFrame(log)
     if not log_df.empty:
+        # Ensure setting index with timezone-naive dates for consistency with yfinance output
+        log_df.index = pd.to_datetime(log_df['date']).dt.tz_localize(None)
         log_df.set_index("date", inplace=True)
     
     # Check again if log_df is empty or too short after processing, before calculating metrics
@@ -1650,6 +1635,7 @@ def display_detailed_analysis(res_detail):
         with col1:
             st.subheader("Technical Indicators"); price_signal = str(res_detail.get('price_signal', 'hold')).upper()
             st.metric(label=f"Price Signal (SMA/RSI)", value=price_signal)
+            # Use np.nan and .2f formatting for potentially missing values
             st.markdown(f"""
                 <div style="font-size: 14px;">
                     <li><b>50-Day SMA:</b> ${res_detail.get('sma50', np.nan):,.2f}</li>
@@ -1773,13 +1759,13 @@ def display_detailed_analysis(res_detail):
                     for tx in form4_txns:
                         tx_type_display = "Bought" if tx.get("transaction_code") == "P" else "Sold"
                         price_display = f" @ ${tx.get('price_per_share'):,.2f}" if tx.get('price_per_share') else ""
-                        st.write(f"**{tx.get('transaction_date')}**: {tx.get('reporting_owner', 'N/A')} ({tx.get('owner_relationship', 'N/A')}) {tx_type_display} {tx.get('shares', 0):,.0f} shares{price_display} - [Link]({tx.get('link_to_filing', '#')})")
+                        st.write(f"- **{tx.get('transaction_date', 'N/A')}**: {tx.get('reporting_owner', 'N/A')} ({tx.get('owner_relationship', 'N/A')}) {tx_type_display} {tx.get('shares', 0):,.0f} shares{price_display} - [Link]({tx.get('link_to_filing', '#')})")
                 else:
                     st.info("No recent Form 4 insider transactions found.")
             with st.expander("View Other Recent SEC Filings (Metadata only)"):
                 other_filings_meta = [f for f in res_detail.get('sec_other_recent_filings', []) if f.get("form_type") not in ['10-K', '10-Q', '8-K']]
                 if other_filings_meta:
-                    for f in other_filings_meta: st.write(f"**{f.get('filing_date', 'N/A')}**: Form {f.get('form_type', 'N/A')} - [Link]({f.get('summary_link', '#')})")
+                    for f in other_filings_meta: st.write(f"- **{f.get('filing_date', 'N/A')}**: Form {f.get('form_type', 'N/A')} - [Link]({f.get('summary_link', '#')})")
                 else: st.info("No other relevant SEC filings metadata found.")
 
         with file_col2:
@@ -1794,6 +1780,7 @@ def display_detailed_analysis(res_detail):
                 </div>
             """, unsafe_allow_html=True)
             
+            # Display top 10 holders explicitly
             holders = res_detail.get('inst_top_holders', [])
             if holders:
                 holders_df = pd.DataFrame(holders)
@@ -1819,14 +1806,16 @@ def display_detailed_analysis(res_detail):
                         st.altair_chart(chart, use_container_width=True)
                         st.markdown("**Top 10 Institutional Holders:**")
                         for holder_data in top_n_holders.to_dict('records'):
-                            st.write(f"- {holder_data.get('Holder', 'N/A')}: {holder_data.get('Shares', 0):,.0f} shares ({holder_data.get('% Out', 0):.2%}) as of {holder_data.get('Date Reported', 'N/A')}")
+                            st.write(f"- **{holder_data.get('Holder', 'N/A')}**: {holder_data.get('Shares', 0):,.0f} shares ({holder_data.get('% Out', 0):.2%}) as of {holder_data.get('Date Reported', 'N/A')}")
                     except Exception as chart_err:
-                        st.error(f"Error rendering institutional holdings chart for {ticker}: {chart_err}")
+                        st.error(f"Error rendering institutional holdings chart for {ticker}: {chart_err}. Displaying raw data.")
                         st.json(top_n_holders.to_dict('records')) # Show raw data if chart fails
                 else:
                     st.info(f"Not enough valid data points for institutional holdings chart for {ticker}.")
             else:
                 st.info("No institutional holder data available.")
+
+        # Removed Politician Trading Activity section
 
     with tabs[4]: # All Signals
         st.subheader("All Agent Signals at a Glance")
@@ -1864,15 +1853,16 @@ def display_detailed_analysis(res_detail):
                     sim_bt_log_df = pd.DataFrame(sim_bt_log_df_raw)
                     if not sim_bt_log_df.empty and 'date' in sim_bt_log_df.columns:
                         sim_bt_log_df['date'] = pd.to_datetime(sim_bt_log_df['date'])
-                        # Ensure 'date' is timezone-naive to match expected index type for plotting
+                        # Ensure 'date' is timezone-naive to match expected yfinance index type for plotting
                         sim_bt_log_df.set_index(sim_bt_log_df['date'].dt.tz_localize(None), inplace=True)
                         
                         st.subheader("Portfolio Value Over Time (Simulated)"); st.line_chart(sim_bt_log_df["portfolio_value"])
                         st.subheader("Drawdown Over Time (Simulated)"); st.area_chart(sim_bt_log_df["drawdown"].fillna(0))
                     else:
-                        st.warning("Simulated backtest log data is empty or missing 'date' column for charting.")
+                        st.warning("Simulated backtest log data is empty or missing 'date' column for charting. Cannot display charts.")
                 except Exception as e:
-                    st.error(f"Error processing simulated backtest log data for charting: {e}")
+                    st.error(f"Error processing simulated backtest log data for charting: {e}. Raw data might be corrupted.")
+                    st.json(sim_bt_log_df_raw) # Display raw data for debugging
             else:
                 st.info("No log data available for simulated backtest.")
         elif sim_bt_metrics:
@@ -1884,29 +1874,27 @@ def display_detailed_analysis(res_detail):
 # --- Streamlit UI Main App Flow ---
 llm_client = None
 try:
-    ds_key = st.secrets.get("DEEPSEEK_API_KEY")
-    oa_key = st.secrets.get("OPENAI_API_KEY")
-    
-    if not ds_key: ds_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not oa_key: oa_key = os.environ.get("OPENAI_API_KEY")
+    # Prioritize st.secrets, then os.environ for API keys
+    ds_key = st.secrets.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    oa_key = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
 
     if ds_key:
         llm_client = ModelClient(api_key=ds_key, provider="deepseek")
-        st.sidebar.caption("✅ LLM: DeepSeek")
+        st.sidebar.caption("✅ LLM: DeepSeek (via DeepSeek API)")
     elif oa_key:
         llm_client = ModelClient(api_key=oa_key, provider="openai")
-        st.sidebar.caption("✅ LLM: OpenAI")
+        st.sidebar.caption("✅ LLM: OpenAI (via OpenAI API)")
     else:
-        st.sidebar.warning("LLM API key missing. Sentiment/Summary disabled.")
+        st.sidebar.warning("LLM API key missing. Sentiment/Summary/AI Trader features are disabled.")
 except ValueError as e:
-    st.sidebar.error(f"LLM Init Error: {e}")
+    st.sidebar.error(f"LLM Initialization Error: {e}")
     llm_client = None
 except Exception as e:
-    st.sidebar.error(f"LLM Unexpected Init Error: {e}")
+    st.sidebar.error(f"Unexpected LLM Initialization Error: {e}")
     llm_client = None
 
 st.title("🚀 AI Hedge Fund Simulator")
-st.header("⚙️ Configuration");
+st.header("⚙️ Configuration")
 config_cont = st.container(border=True)
 
 # Radio buttons for selecting app mode
@@ -1937,7 +1925,7 @@ with config_cont:
             use_sent_live = st.checkbox("News Sentiment & Summary (LLM)", value=bool(llm_client), disabled=not llm_client, key="live_sent_cb_main", help="Uses LLM to analyze news. Requires NewsAPI key and LLM API key.")
             use_filings_live = st.checkbox("SEC & Inst. Filings", value=True, key="live_sec_cb_main", help="Fetches insider trades (Form 4) and institutional holdings. Enables SEC Summary if LLM is active.")
         with feat_cols[1]:
-            # Removed Politician Filings checkbox
+            # Removed Politician Filings checkbox and related logic
             use_valtrades_live = st.checkbox("ValueInvesting.io (Exp.)", value=False, key="live_vt_cb_main", help="Scrapes Peter Lynch fair value from ValueInvesting.io. Experimental, may be slow or break.")
             # New checkbox for LLM SEC summary, dependent on LLM and filings
             use_sec_summary_live = st.checkbox("SEC Filings Summary (LLM)", value=bool(llm_client) and use_filings_live, disabled=not (llm_client and use_filings_live), key="live_sec_summary_cb", help="Uses LLM to summarize recent 10-K, 10-Q, 8-K filings. Requires LLM and 'SEC & Inst. Filings' to be enabled.")
@@ -1950,7 +1938,6 @@ with config_cont:
                 live_configs = {
                     "use_sentiment":use_sent_live,
                     "use_filings":use_filings_live,
-                    # Removed "use_politician_filings"
                     "use_value_trades":use_valtrades_live,
                     "use_sec_summary":use_sec_summary_live
                 }
@@ -2038,8 +2025,7 @@ with config_cont:
                 "sentiment":0.,"fund":0.,"valuation_dcf":0.,"valuation_pe":0.,
                 "sec_filings":0.,"sec_summary":0., 
                 "inst_holdings":0.,"analyst":0.,
-                # Removed "politician_filings" key
-                "vi_signal":0.
+                "vi_signal":0. # Politician filings removed
             }
             st.session_state.bt_capital = bt_capital # Store capital in session state for backtest
 
@@ -2078,7 +2064,7 @@ with config_cont:
                             st.subheader("Portfolio Value Over Time"); st.line_chart(bt_log_df["portfolio_value"])
                             st.subheader("Drawdown Over Time"); st.area_chart(bt_log_df["drawdown"].fillna(0))
                         else:
-                            st.warning("Backtest log data is empty or missing 'date' column for charting. Cannot display charts.")
+                            st.warning("Simulated backtest log data is empty or missing 'date' column for charting. Cannot display charts.")
                     except Exception as e:
                         st.error(f"Error processing backtest log data for charting: {e}. Raw data might be corrupted.")
                         st.json(bt_log_df_raw) # Display raw data for debugging
@@ -2300,7 +2286,6 @@ with config_cont:
 
     elif st.session_state.app_mode == "🤖 Virtual Trading":
         st.header("📈 Virtual Portfolio Dashboard")
-        # Container for dashboard overview
         with st.container(border=True):
             holdings_df_data = []
             total_holdings_value, total_pnl, initial_investment = 0.0, 0.0, 0.001 # Initial investment to prevent div by zero
@@ -2313,15 +2298,18 @@ with config_cont:
             price_data_for_history = {}
             with st.spinner("Pre-fetching historical prices for portfolio value chart (this may take a moment for many transactions)..."):
                 for t in all_tickers_in_history:
-                    price_data_for_history[t] = fetch_price_history(t, period="max") # Fetch max period from yfinance
+                    # yfinance's history method returns timezone-naive DatetimeIndex, so we ensure our operations align.
+                    price_data_for_history[t] = fetch_price_history(t, period="max") 
 
             daily_portfolio_values_df = pd.DataFrame() # Initialize empty DataFrame for history chart
 
             if chronological_transactions:
                 # Determine the date range for the portfolio value history
-                # Ensure all dates are timezone-aware if comparing to timezone.utc dates
+                # Use current time as timezone-aware reference for consistency in date range generation
                 now_utc = datetime.now(timezone.utc)
-                earliest_tx_date_str = chronological_transactions[0]['date'].split(" ")[0] # Assuming 'YYYY-MM-DD HH:MM:SS' format
+                # Parse transaction date and make it timezone-aware (matching how `now_utc` is created)
+                # Safely get first transaction date, default to today if no transactions
+                earliest_tx_date_str = chronological_transactions[0]['date'].split(" ")[0] if chronological_transactions else now_utc.strftime("%Y-%m-%d")
                 earliest_tx_date = datetime.strptime(earliest_tx_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
                 
                 # Start recording portfolio value a bit before the first transaction
@@ -2329,6 +2317,7 @@ with config_cont:
                 if earliest_data_point < datetime(1990, 1, 1, tzinfo=timezone.utc): # Prevent extremely old dates
                     earliest_data_point = datetime(1990, 1, 1, tzinfo=timezone.utc)
 
+                # Create a date range with UTC timezone
                 full_date_range = pd.date_range(start=earliest_data_point, end=now_utc, freq='D', tz=timezone.utc)
                 
                 daily_portfolio_values = pd.Series(index=full_date_range, dtype=float)
@@ -2336,30 +2325,30 @@ with config_cont:
                 daily_portfolio_values[full_date_range[0]] = get_default_virtual_portfolio()["cash"]
 
                 current_holdings_for_chart = {} # Keep track of holdings over time for history calculation
-                current_cash_for_chart = get_default_virtual_portfolio()["cash"]
-                last_date_processed = full_date_range[0]
+                current_cash_for_portfolio_calc = get_default_virtual_portfolio()["cash"] # Use a separate variable for calculations
+                last_date_processed_for_chart = full_date_range[0]
 
                 for tx in chronological_transactions:
                     tx_date_naive = datetime.strptime(tx['date'].split(" ")[0], "%Y-%m-%d")
-                    tx_date = tx_date_naive.replace(tzinfo=timezone.utc) # Make transaction date timezone-aware
+                    tx_date_aware = tx_date_naive.replace(tzinfo=timezone.utc) # Make transaction date timezone-aware for iteration
                     
                     tx_quantity = float(tx['quantity'])
                     tx_price = float(tx['price'].replace('$', ''))
                     tx_type = tx['type']
 
                     # Fill in portfolio value for days between last processed date and current transaction date
-                    for day in pd.date_range(start=last_date_processed + timedelta(days=1), end=tx_date, freq='D', tz=timezone.utc):
-                        portfolio_val_on_day = current_cash_for_chart
+                    for day_in_range_aware in pd.date_range(start=last_date_processed_for_chart + timedelta(days=1), end=tx_date_aware, freq='D', tz=timezone.utc):
+                        portfolio_val_on_day = current_cash_for_portfolio_calc
                         for ticker_chart, qty_chart in current_holdings_for_chart.items():
                             day_price_series = price_data_for_history.get(ticker_chart, pd.DataFrame())
                             day_price = None
                             if not day_price_series.empty:
                                 try:
-                                    # Ensure comparison with timezone-naive index for yfinance data
-                                    day_price = day_price_series.loc[day.date()].get("Close")
+                                    # Access yfinance DataFrame (timezone-naive index) using naive date
+                                    day_price = day_price_series.loc[day_in_range_aware.date()].get("Close")
                                 except KeyError:
-                                    # Fallback to nearest day if exact date not found
-                                    nearest_idx = day_price_series.index.asof(day.date())
+                                    # Fallback to nearest day if exact date not found, use naive date for .asof()
+                                    nearest_idx = day_price_series.index.asof(day_in_range_aware.date())
                                     if nearest_idx is not pd.NaT:
                                         day_price = day_price_series.loc[nearest_idx].get("Close")
 
@@ -2368,50 +2357,56 @@ with config_cont:
                             # else: if price not found, that holding is not valued for that day.
 
                         if pd.notna(portfolio_val_on_day):
-                            daily_portfolio_values.loc[day] = portfolio_val_on_day
+                            daily_portfolio_values.loc[day_in_range_aware] = portfolio_val_on_day
                     
-                    last_date_processed = tx_date
+                    last_date_processed_for_chart = tx_date_aware # Update last processed date after filling gaps
 
                     # Apply the transaction
                     if tx_type == 'BUY':
                         current_holdings_for_chart[tx['ticker']] = current_holdings_for_chart.get(tx['ticker'], 0) + tx_quantity
-                        current_cash_for_chart -= tx_quantity * tx_price
+                        current_cash_for_portfolio_calc -= tx_quantity * tx_price
                     elif tx_type == 'SELL':
                         current_holdings_for_chart[tx['ticker']] = current_holdings_for_chart.get(tx['ticker'], 0) - tx_quantity
                         if current_holdings_for_chart[tx['ticker']] <= 0.0001: # Remove if quantity is near zero after sale
                             del current_holdings_for_chart[tx['ticker']]
-                        current_cash_for_chart += tx_quantity * tx_price
+                        current_cash_for_portfolio_calc += tx_quantity * tx_price
                     
                     # Update portfolio value on the transaction day itself (after applying transaction)
-                    portfolio_val_on_tx_day = current_cash_for_chart
+                    portfolio_val_on_tx_day = current_cash_for_portfolio_calc
                     for ticker_chart, qty_chart in current_holdings_for_chart.items():
                         tx_day_price_series = price_data_for_history.get(ticker_chart, pd.DataFrame())
                         tx_day_price = None
                         if not tx_day_price_series.empty:
                             try:
-                                tx_day_price = tx_day_price_series.loc[tx_date.date()].get("Close")
+                                # Access yfinance DataFrame (timezone-naive index) using naive date
+                                tx_day_price = tx_day_price_series.loc[tx_date_aware.date()].get("Close")
                             except KeyError:
-                                nearest_idx = tx_day_price_series.index.asof(tx_date.date())
+                                nearest_idx = tx_day_price_series.index.asof(tx_date_aware.date())
                                 if nearest_idx is not pd.NaT:
                                     tx_day_price = tx_day_price_series.loc[nearest_idx].get("Close")
                         if tx_day_price is not None and pd.notna(tx_day_price):
                             portfolio_val_on_tx_day += qty_chart * tx_day_price
                     if pd.notna(portfolio_val_on_tx_day):
-                        daily_portfolio_values.loc[tx_date] = portfolio_val_on_tx_day
+                        daily_portfolio_values.loc[tx_date_aware] = portfolio_val_on_tx_day
                 
                 # Fill any remaining days up to today with the last known value
                 daily_portfolio_values = daily_portfolio_values.fillna(method='ffill').fillna(method='bfill')
 
-                # Ensure the final DataFrame index is also timezone-aware for consistency
+                # Ensure the final DataFrame for plotting has an index that's consistent (e.g., tz-naive if plotting expects it)
+                # If Altair handles tz-aware, great. If not, tz_localize(None) here.
+                # For consistency with yfinance output, it's safer to make it tz-naive for plotting if yfinance is tz-naive.
                 daily_portfolio_values_df = pd.DataFrame(daily_portfolio_values, columns=['Portfolio Value'])
+                daily_portfolio_values_df.index = daily_portfolio_values_df.index.tz_localize(None) # Make tz-naive for plotting if needed
                 daily_portfolio_values_df.index.name = 'Date'
 
             else: # If no transactions, show a flat portfolio value for a short period
+                # Ensure default range is also timezone-aware when created, then tz-localize(None) for plotting
                 daily_portfolio_values_df = pd.DataFrame({
                     'Date': [datetime.now(timezone.utc) - timedelta(days=7), datetime.now(timezone.utc)],
                     'Portfolio Value': [get_default_virtual_portfolio()["cash"], get_default_virtual_portfolio()["cash"]]
                 }).set_index('Date')
-                daily_portfolio_values_df.index = daily_portfolio_values_df.index.tz_localize(timezone.utc)
+                daily_portfolio_values_df.index = daily_portfolio_values_df.index.tz_localize(None)
+                daily_portfolio_values_df.index.name = 'Date'
 
 
             # Display current holdings and overall metrics
@@ -2425,7 +2420,7 @@ with config_cont:
                             price = price_data_for_history[holding['ticker']].iloc[-1].get("Close")
                         
                         if price is None:
-                            st.warning(f"Could not get live price for {holding['ticker']} in virtual portfolio. Displaying based on average cost.")
+                            st.warning(f"Could not get live price for {holding['ticker']} in virtual portfolio. Displaying based on average cost for now.")
                             current_value = holding['avg_price'] * holding['quantity'] # Use avg cost as fallback for display
                             pnl = 0 # Cannot calculate P&L without live price
                         else:
