@@ -695,7 +695,7 @@ class SentimentAgent:
         content_for_llm = []
         co_name = data.get("ticker_info", {}).get('longName', ticker)
         
-        MAX_NEWS_ARTICLES_FOR_LLM = 10 
+        MAX_NEWS_ARTICLES_FOR_LLM = 20 
 
         for item in valid_news[:MAX_NEWS_ARTICLES_FOR_LLM]:
             title = item.get('title', '').strip()
