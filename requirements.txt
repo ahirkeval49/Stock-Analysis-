@@ -9,6 +9,7 @@ numpy
 yfinance
 sec-edgar-downloader
 altair
+alpha_vantage
 # HTTP & scraping
 requests
 beautifulsoup4
