@@ -1364,7 +1364,7 @@ def run_live_analysis(tickers, llm_client, configs):
         progress_bar.progress((i + 1) / len(tickers), text=progress_text)
         
         # --- Use the new fetch_price_history (Alpha Vantage) ---
-        price_history_full = fetch_price_history(t, period="max") # This now calls AV
+        price_history_full = fetch_price_history(t, outputsize="full") # This now calls AV
         if price_history_full.empty:
             results[t] = {
                 "error": f"Price history unavailable for {t}. This can happen for invalid tickers, delisted stocks, or temporary data provider issues.",
