@@ -4,6 +4,7 @@ python-dotenv
 python-dateutil
 
 # Data & finance
+google.generativeai
 requests
 plotly
 google-genai
