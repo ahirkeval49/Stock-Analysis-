@@ -4,17 +4,18 @@ import requests
 import plotly.graph_objects as go
 import pandas_ta as ta
 import time
+import numpy as np
 from datetime import datetime
 from google import genai
 
 # ==========================================
 # 1. CONFIGURATION & SETUP
 # ==========================================
-st.set_page_config(layout="wide", page_title="AiHedge", page_icon="📈")
+st.set_page_config(layout="wide", page_title="Project Atlas", page_icon="📈")
 
 # API Rate Limit Configuration
-# Free tier allows 5 calls per minute. We force a 12s pause to be safe.
-API_CALL_DELAY = 12 
+# Free tier allows 5 calls per minute. We force a small pause to be safe.
+API_CALL_DELAY = 2 
 
 # Custom CSS for "Bloomberg-Lite" Aesthetic
 st.markdown("""
@@ -31,7 +32,7 @@ st.markdown("""
 
 
 # ==========================================
-# 2. KEY MANAGER (formerly auth.py)
+# 2. KEY MANAGER (Smart Failover)
 # ==========================================
 class KeyManager:
     def __init__(self, keys):
@@ -39,21 +40,28 @@ class KeyManager:
         # Initialize usage state in session if not present
         if 'api_usage' not in st.session_state:
             st.session_state.api_usage = {key: 0 for key in keys}
+            st.session_state.key_status = {key: "active" for key in keys} # Track active/exhausted
             st.session_state.last_reset = datetime.now().date()
             
     def _check_reset(self):
         # Reset if new day (UTC check simplified)
         if datetime.now().date() > st.session_state.last_reset:
             st.session_state.api_usage = {key: 0 for key in self.keys}
+            st.session_state.key_status = {key: "active" for key in self.keys}
             st.session_state.last_reset = datetime.now().date()
 
     def get_active_key(self):
         self._check_reset()
-        # Check all keys to see if any are under the limit (25 calls)
+        # Find first key that is active and under limit
         for key in self.keys:
-            if st.session_state.api_usage[key] < 25: 
+            if st.session_state.key_status[key] == "active":
                 return key
-        return None # All keys exhausted
+        return None 
+
+    def mark_key_as_exhausted(self, key):
+        """Called when API actually returns a limit error."""
+        st.session_state.key_status[key] = "exhausted"
+        print(f"Key {key[:4]}... exhausted. Switching to next key.")
 
     def log_request(self, key):
         if key in st.session_state.api_usage:
@@ -62,56 +70,85 @@ class KeyManager:
 def get_key_manager():
     # Helper to initialize KeyManager from secrets
     try:
-        # UPDATED: Now includes your 3rd key
         keys = [
             st.secrets["AV_API_KEY"], 
-            st.secrets["AV_API_KEY1"], 
-            st.secrets["AV_API_KEY2"]  # Added M9254PYJTCJET3E0
+            st.secrets["AV_API_KEY1"],
+            st.secrets.get("AV_API_KEY2", st.secrets["AV_API_KEY"]) # Fallback if key 3 missing
         ]
         return KeyManager(keys)
     except FileNotFoundError:
         st.error("Secrets file not found. Please set up .streamlit/secrets.toml")
         st.stop()
-    except KeyError:
-        st.error("Missing a key in secrets.toml. Make sure AV_API_KEY, AV_API_KEY1, and AV_API_KEY2 are all defined.")
-        st.stop()
 
 
 # ==========================================
-# 3. DATA FETCHER (formerly data_fetcher.py)
+# 3. MOCK DATA GENERATOR (Final Fallback)
 # ==========================================
-def safe_api_call(url):
-    """Wrapper to handle rate limits and errors gracefully."""
-    time.sleep(API_CALL_DELAY) # Enforce speed limit
-    try:
-        response = requests.get(url)
-        data = response.json()
+def get_mock_price_data(symbol):
+    """Generates fake data so app doesn't crash when API is down."""
+    st.warning(f"⚠️ API Limit Reached (or Error). Showing MOCK DATA for {symbol}.")
+    dates = pd.date_range(end=datetime.now(), periods=100)
+    base_price = 150.0
+    prices = base_price + np.cumsum(np.random.randn(100))
+    data = {
+        'open': prices, 'high': prices + 2, 'low': prices - 2,
+        'close': prices + np.random.randn(100),
+        'volume': np.random.randint(1000000, 5000000, 100)
+    }
+    return pd.DataFrame(data, index=dates).sort_index()
+
+
+# ==========================================
+# 4. ROBUST DATA FETCHER (With Auto-Retry)
+# ==========================================
+def safe_api_call(url_builder_func):
+    """
+    Wrapper to handle rate limits with automatic retries across keys.
+    url_builder_func: A lambda that takes an api_key and returns the URL.
+    """
+    km = get_key_manager()
+    
+    # Try up to 3 times (once per key)
+    for _ in range(len(km.keys)):
+        api_key = km.get_active_key()
+        if not api_key:
+            break # No keys left
+
+        # Construct URL with the current active key
+        url = url_builder_func(api_key)
         
-        if "Note" in data:
-            return None, "Rate Limit Hit (5 calls/min or Daily Limit exhausted)."
-        if "Information" in data:
-            return None, "Daily Limit Reached."
+        try:
+            time.sleep(API_CALL_DELAY) # Respect speed limit
+            response = requests.get(url)
+            data = response.json()
             
-        return data, None
-    except Exception as e:
-        return None, f"Connection Error: {e}"
+            # CHECK FOR ERRORS
+            if "Note" in data or "Information" in data:
+                # Limit reached -> Kill this key and loop to try next one
+                km.mark_key_as_exhausted(api_key)
+                continue 
+            
+            # If success, log it and return
+            km.log_request(api_key)
+            return data, None
+            
+        except Exception as e:
+            return None, f"Connection Error: {e}"
+            
+    return None, "Daily Limit Reached on ALL keys."
 
 @st.cache_data(ttl=3600)
 def fetch_price_history(symbol):
-    km = get_key_manager()
-    api_key = km.get_active_key()
-    if not api_key: return None, "No API Keys available."
+    # Lambda allows us to inject different keys on retry
+    url_builder = lambda key: f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&outputsize=full&apikey={key}"
+    
+    data, error = safe_api_call(url_builder)
+    
+    # Fallback to Mock Data if all keys fail
+    if error or not data or not data.get("Time Series (Daily)"):
+        return get_mock_price_data(symbol), "Showing Mock Data"
 
-    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&outputsize=full&apikey={api_key}"
-    
-    data, error = safe_api_call(url)
-    if error: return None, error
-    
     ts_data = data.get("Time Series (Daily)")
-    if not ts_data: return None, "No price data found."
-
-    km.log_request(api_key)
-    
     df = pd.DataFrame.from_dict(ts_data, orient='index')
     df = df.astype(float)
     df = df.rename(columns={
@@ -123,33 +160,19 @@ def fetch_price_history(symbol):
 
 @st.cache_data(ttl=2592000) # Cache for 30 days
 def fetch_fundamentals(symbol, statement_type="OVERVIEW"):
-    km = get_key_manager()
-    api_key = km.get_active_key()
-    if not api_key: return {}
-
-    url = f"https://www.alphavantage.co/query?function={statement_type}&symbol={symbol}&apikey={api_key}"
-    data, error = safe_api_call(url)
-    
-    if error or not data: return {}
-    km.log_request(api_key)
-    return data
+    url_builder = lambda key: f"https://www.alphavantage.co/query?function={statement_type}&symbol={symbol}&apikey={key}"
+    data, error = safe_api_call(url_builder)
+    return data if not error else {}
 
 @st.cache_data(ttl=12000) # Cache for ~3 hours
 def fetch_news(symbol):
-    km = get_key_manager()
-    api_key = km.get_active_key()
-    if not api_key: return {}
-    
-    url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={symbol}&limit=10&apikey={api_key}"
-    data, error = safe_api_call(url)
-    
-    if error or not data: return {}
-    km.log_request(api_key)
-    return data
+    url_builder = lambda key: f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={symbol}&limit=10&apikey={key}"
+    data, error = safe_api_call(url_builder)
+    return data if not error else {}
 
 
 # ==========================================
-# 4. ANALYTICS ENGINES (Technicals & DCF)
+# 5. ANALYTICS ENGINES
 # ==========================================
 def calculate_technicals(df):
     if df is None or df.empty: return df
@@ -161,19 +184,20 @@ def calculate_technicals(df):
 def calculate_dcf(cash_flow_data, overview_data):
     try:
         if not cash_flow_data or not overview_data: return 0.0
-        
         reports = cash_flow_data.get('annualReports', [])
         if not reports: return 0.0
-            
+        
+        # Simple DCF Logic
         latest_report = reports[0]
         op_cash = float(latest_report.get('operatingCashflow', 0))
         capex = float(latest_report.get('capitalExpenditures', 0))
         fcf = op_cash - capex
+        shares_outstanding = float(overview_data.get('SharesOutstanding', 1))
         
+        # Projection
         growth_rate = 0.05
         discount_rate = 0.10
         terminal_growth = 0.025
-        shares_outstanding = float(overview_data.get('SharesOutstanding', 1))
         
         future_fcf = []
         projected_fcf = fcf
@@ -190,22 +214,11 @@ def calculate_dcf(cash_flow_data, overview_data):
     except:
         return 0.0
 
-
-# ==========================================
-# 5. GEMINI BRAIN (formerly gemini_brain.py)
-# ==========================================
 def generate_agent_analysis(agent_role, data_context, prompt_instruction):
     try:
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-        full_prompt = f"""
-        ROLE: {agent_role}
-        DATA CONTEXT: {data_context}
-        INSTRUCTION: {prompt_instruction}
-        FORMAT: Provide a concise analysis in Markdown. Use bullet points.
-        """
-        response = client.models.generate_content(
-            model="gemini-2.0-flash", contents=full_prompt
-        )
+        full_prompt = f"ROLE: {agent_role}\nDATA: {data_context}\nTASK: {prompt_instruction}"
+        response = client.models.generate_content(model="gemini-2.0-flash", contents=full_prompt)
         return response.text
     except Exception as e:
         return f"Agent Error: {str(e)}"
@@ -214,7 +227,7 @@ def generate_agent_analysis(agent_role, data_context, prompt_instruction):
 # ==========================================
 # 6. MAIN APP LOGIC
 # ==========================================
-st.sidebar.title("AiHedge")
+st.sidebar.title("Project Atlas 🌐")
 ticker = st.sidebar.text_input("Ticker Symbol", value="AAPL").upper()
 run_analysis = st.sidebar.button("Run Analysis")
 
@@ -223,10 +236,7 @@ if run_analysis:
     with st.spinner(f"Fetching Price Action for {ticker}..."):
         df, msg = fetch_price_history(ticker)
         
-        if df is None or df.empty:
-            st.error(msg)
-            st.stop()
-            
+        # Calculate Technicals locally
         df = calculate_technicals(df)
         current_price = df['close'].iloc[-1]
         
