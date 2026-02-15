@@ -102,7 +102,7 @@ class ModelClient:
         try:
             # Using Gemini 2.0 Flash for speed and large context window
             response = self.client.models.generate_content(
-                model="gemini-2.0-flash", 
+                model="gemini-2.5-flash", 
                 contents=prompt
             )
             return response.text
