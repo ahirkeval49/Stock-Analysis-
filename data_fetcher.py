@@ -9,7 +9,9 @@ def get_key_manager():
     keys = [st.secrets["AV_API_KEY"], st.secrets["AV_API_KEY1"]]
     return KeyManager(keys)
 
-@st.cache_data(ttl=3600) # Cache price for 1 hour
+# In data_fetcher.py
+
+@st.cache_data(ttl=3600)
 def fetch_price_history(symbol):
     km = get_key_manager()
     api_key = km.get_active_key()
@@ -17,23 +19,30 @@ def fetch_price_history(symbol):
     if not api_key:
         return None, "API Limit Reached for all keys. Try again tomorrow."
 
-    # Fetch full history once, then cache it
     url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&outputsize=full&apikey={api_key}"
     try:
         response = requests.get(url)
         data = response.json()
         
-        # Check for API Note/Error (Rate Limits)
+        # --- IMPROVED ERROR HANDLING ---
+        # Check for standard API errors
         if "Note" in data:
-            km.log_request(api_key) # Log the failed attempt to trigger rotation
+            km.log_request(api_key)
             return None, "Rate Limit Hit (Note from API)"
+        if "Information" in data: # Added this check
+            km.log_request(api_key)
+            return None, "Rate Limit Hit (Daily Limit)"
         if "Error Message" in data:
             return None, "Invalid Symbol"
+        
+        # Check if the expected key actually exists
+        ts_data = data.get("Time Series (Daily)")
+        if not ts_data:
+            return None, f"No price data found for {symbol}. (API Response: {str(data)[:100]})"
             
-        km.log_request(api_key) # Log success
+        km.log_request(api_key)
         
         # Parse Data
-        ts_data = data.get("Time Series (Daily)", {})
         df = pd.DataFrame.from_dict(ts_data, orient='index')
         df = df.astype(float)
         df = df.rename(columns={
