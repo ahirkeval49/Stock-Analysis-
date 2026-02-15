@@ -38,6 +38,7 @@ if 'analysis_cache' not in st.session_state: st.session_state.analysis_cache = {
 # UTILITIES
 # --------------------------------
 def format_large_number(num):
+    if not isinstance(num, (int, float)): return "N/A"
     if num >= 1e12: return f"${num/1e12:.2f}T"
     if num >= 1e9: return f"${num/1e9:.2f}B"
     if num >= 1e6: return f"${num/1e6:.2f}M"
@@ -159,7 +160,7 @@ class FundamentalExpert:
 class TechnicalExpert:
     def run(self, ticker, data):
         hist = data["history"]
-        if hist.empty: return "No Data"
+        if hist.empty: return {"signal": "HOLD", "summary": "No Data"}
         
         # Calculate Indicators Manually
         df = hist.copy()
@@ -222,10 +223,13 @@ class MasterPortfolioManager:
     def __init__(self, client): self.client = client
     
     def run(self, ticker, fund_analysis, tech_analysis, inst_analysis, news_data):
-        # Format News
+        # Format News Safely
         news_summary = ""
-        for n in news_data[:3]:
-            news_summary += f"- {n['title']} (Source: {n['publisher']})\n"
+        # --- FIXED: Added .get() to prevent KeyError ---
+        for n in news_data[:5]:
+            title = n.get('title', 'Unknown Title')
+            publisher = n.get('publisher', 'Unknown Source')
+            news_summary += f"- {title} (Source: {publisher})\n"
             
         prompt = f"""
         You are the Chief Investment Officer. Synthesize these reports for {ticker} into a final investment decision.
@@ -234,8 +238,8 @@ class MasterPortfolioManager:
         {fund_analysis}
         
         2. TECHNICAL DATA:
-        Signal: {tech_analysis['signal']}
-        Data: {tech_analysis['summary']}
+        Signal: {tech_analysis.get('signal', 'HOLD')}
+        Data: {tech_analysis.get('summary', 'No Data')}
         
         3. INSTITUTIONAL/ANALYST REPORT:
         {inst_analysis}
@@ -343,9 +347,14 @@ def main():
     m1, m2, m3, m4, m5 = st.columns(5)
     
     current_price = info.get('currentPrice', data["history"]['Close'].iloc[-1])
-    prev_close = info.get('previousClose', data["history"]['Close'].iloc[-2])
+    # Safe previous close check
+    if len(data["history"]) > 1:
+        prev_close = info.get('previousClose', data["history"]['Close'].iloc[-2])
+    else:
+        prev_close = current_price
+        
     delta = current_price - prev_close
-    delta_pct = (delta / prev_close) * 100
+    delta_pct = (delta / prev_close) * 100 if prev_close != 0 else 0
     
     m1.metric("Price", f"${current_price:.2f}", f"{delta:.2f} ({delta_pct:.2f}%)")
     m2.metric("Market Cap", format_large_number(info.get('marketCap', 0)))
@@ -373,7 +382,7 @@ def main():
 
     with tab_chart:
         st.plotly_chart(create_chart(ticker, data["history"], chart_type), use_container_width=True)
-        st.info(f"Technical Indicator Summary: {tech_report['summary']}")
+        st.info(f"Technical Indicator Summary: {tech_report.get('summary', 'No summary')}")
 
     with tab_fund:
         col1, col2 = st.columns([2, 1])
@@ -405,13 +414,21 @@ def main():
 
     with tab_news:
         st.subheader("Latest Market News")
+        # --- FIXED: Added safety checks for keys ---
         for news_item in data["news"]:
+            title = news_item.get('title', 'No Title')
+            link = news_item.get('link', '#')
+            publisher = news_item.get('publisher', 'Unknown')
+            
+            # Safe timestamp conversion
+            ts = news_item.get('providerPublishTime', 0)
+            date_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M') if ts else "N/A"
+            
             with st.container(border=True):
                 col_img, col_txt = st.columns([1, 4])
                 with col_txt:
-                    st.markdown(f"### [{news_item['title']}]({news_item['link']})")
-                    st.caption(f"Publisher: {news_item['publisher']} • {datetime.fromtimestamp(news_item['providerPublishTime']).strftime('%Y-%m-%d %H:%M')}")
-                    # Try to show related tickers if available
+                    st.markdown(f"### [{title}]({link})")
+                    st.caption(f"Publisher: {publisher} • {date_str}")
                     if 'relatedTickers' in news_item:
                         st.code(f"Related: {', '.join(news_item['relatedTickers'])}")
 
