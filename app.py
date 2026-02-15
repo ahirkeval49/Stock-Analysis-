@@ -10,7 +10,7 @@ from google import genai
 # ==========================================
 # 1. CONFIGURATION & SETUP
 # ==========================================
-st.set_page_config(layout="wide", page_title="Project Atlas", page_icon="📈")
+st.set_page_config(layout="wide", page_title="AiHedge", page_icon="📈")
 
 # API Rate Limit Configuration
 # Free tier allows 5 calls per minute. We force a 12s pause to be safe.
@@ -206,7 +206,7 @@ def generate_agent_analysis(agent_role, data_context, prompt_instruction):
 # ==========================================
 # 6. MAIN APP LOGIC
 # ==========================================
-st.sidebar.title("Project Atlas 🌐")
+st.sidebar.title("AiHedge")
 ticker = st.sidebar.text_input("Ticker Symbol", value="AAPL").upper()
 run_analysis = st.sidebar.button("Run Analysis")
 
