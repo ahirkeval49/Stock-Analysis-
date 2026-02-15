@@ -23,7 +23,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- Sidebar ---
-st.sidebar.title("Project Atlas 🌐")
+st.sidebar.title("AI Hedge")
 ticker = st.sidebar.text_input("Ticker Symbol", value="AAPL").upper()
 run_analysis = st.sidebar.button("Run Analysis")
 
