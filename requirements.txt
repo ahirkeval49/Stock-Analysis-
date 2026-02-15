@@ -4,6 +4,8 @@ python-dotenv
 python-dateutil
 
 # Data & finance
+plotly
+google-genai
 pandas
 numpy
 yfinance
