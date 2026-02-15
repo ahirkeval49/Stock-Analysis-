@@ -1,4 +1,4 @@
-import streamlit as st
+eimport streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 from data_fetcher import fetch_price_history, fetch_fundamentals, fetch_news
@@ -23,8 +23,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- Sidebar ---
-st.sidebar.title("Project Atlas 🌐")
-ticker = st.sidebar.text_input("Ticker Symbol", value="AAPL").upper()
+st.sidebar.title("AI Hedge")
+ticker = st.sidebar.text_input("Ticker Symbol", value="").upper()
 run_analysis = st.sidebar.button("Run Deep Analysis")
 
 if run_analysis:
