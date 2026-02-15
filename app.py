@@ -62,10 +62,18 @@ class KeyManager:
 def get_key_manager():
     # Helper to initialize KeyManager from secrets
     try:
-        keys = [st.secrets["AV_API_KEY"], st.secrets["AV_API_KEY1"]]
+        # UPDATED: Now includes your 3rd key
+        keys = [
+            st.secrets["AV_API_KEY"], 
+            st.secrets["AV_API_KEY1"], 
+            st.secrets["AV_API_KEY2"]  # Added M9254PYJTCJET3E0
+        ]
         return KeyManager(keys)
     except FileNotFoundError:
         st.error("Secrets file not found. Please set up .streamlit/secrets.toml")
+        st.stop()
+    except KeyError:
+        st.error("Missing a key in secrets.toml. Make sure AV_API_KEY, AV_API_KEY1, and AV_API_KEY2 are all defined.")
         st.stop()
 
 
