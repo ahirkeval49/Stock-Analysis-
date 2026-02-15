@@ -13,6 +13,7 @@ import time
 import random
 from newsapi import NewsApiClient
 import altair as alt
+import json
 
 # --- Page Config (Must be the first Streamlit command) ---
 st.set_page_config(page_title="AI Hedge Fund Simulator (Gemini Powered)", layout="wide", initial_sidebar_state="expanded")
@@ -66,7 +67,6 @@ st.markdown("""
 # -----------------------------------------------------------------------------
 # SESSION STATE INITIALIZATION
 # -----------------------------------------------------------------------------
-import json
 
 def _get_initial_portfolios():
     if os.path.exists(PORTFOLIOS_FILE):
@@ -146,7 +146,6 @@ def fetch_ticker_info(ticker: str) -> dict:
         ticker_obj = yf.Ticker(ticker)
         info = ticker_obj.info
         if not info or 'regularMarketPrice' not in info:
-             # fast fail retry logic could go here, simplified for speed
              pass
         return info
     except Exception: return {}
@@ -161,7 +160,6 @@ def fetch_financial_statements(ticker: str):
         bal = t.balance_sheet
         
         # Convert to a simpler dict format for LLM consumption
-        # We only take the most recent year to save tokens and latency
         inc_recent = inc.iloc[:, 0].to_dict() if not inc.empty else {}
         bal_recent = bal.iloc[:, 0].to_dict() if not bal.empty else {}
         
@@ -172,7 +170,6 @@ def fetch_financial_statements(ticker: str):
 @st.cache_data(ttl=300)
 def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
     try:
-        company_name = ticker_info_data.get('longName', ticker)
         ticker_obj = yf.Ticker(ticker)
         raw_news = ticker_obj.news
         enriched = []
@@ -182,7 +179,7 @@ def fetch_enriched_news(ticker: str, ticker_info_data: dict) -> list[dict]:
                 "link": n.get('link'),
                 "publisher": n.get('publisher'),
                 "publish_time_readable": datetime.fromtimestamp(n.get('providerPublishTime', 0)).strftime('%Y-%m-%d'),
-                "content_snippet": n.get('relatedTickers') # yfinance often hides summaries, we rely on title mostly
+                "content_snippet": n.get('relatedTickers') 
             })
         return enriched
     except Exception: return []
@@ -197,8 +194,11 @@ class ModelClient:
         if not self.api_key: raise ValueError("API key required for LLM.")
         
         genai.configure(api_key=self.api_key)
-        # Using gemini-1.5-flash for lowest latency and high efficiency
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        # Fallback logic for model selection
+        try:
+            self.model = genai.GenerativeModel('gemini-1.5-flash')
+        except:
+            self.model = genai.GenerativeModel('gemini-pro')
 
     def generate(self, prompt: str) -> str:
         try:
@@ -224,7 +224,6 @@ class FinancialsAgent:
         inc = fin_data.get("income_statement", {})
         bal = fin_data.get("balance_sheet", {})
         
-        # Calculate key ratios manually first (Speed > LLM)
         try:
             total_assets = bal.get("Total Assets", 1)
             total_liab = bal.get("Total Liabilities Net Minority Interest", 0)
@@ -235,7 +234,6 @@ class FinancialsAgent:
             debt_to_equity = total_liab / equity if equity else 0
             net_margin = net_income / revenue if revenue else 0
             
-            # Prepare succinct context for Gemini
             context = f"""
             Company: {ticker}
             Net Income: {net_income}
@@ -276,9 +274,6 @@ class FinancialsAgent:
         except Exception as e:
             return {"ticker": ticker, "financial_signal": "hold", "financial_summary": f"Error calculating metrics: {e}"}
 
-# [Previous Agents: Price, Momentum, Volatility, Sentiment, Fundamentals, Valuation, AnalystRating]
-# Keeping them mostly the same but adding Tooltip/Widget support in the Display function later.
-
 class PriceAgent:
     def run(self, ticker: str, price_data_slice: pd.DataFrame) -> dict:
         if price_data_slice.empty or len(price_data_slice) < 200:
@@ -310,7 +305,7 @@ class MomentumAgent:
 class SentimentAgent:
     def __init__(self, client): self.client = client
     def run(self, ticker: str, data: dict) -> dict:
-        news = data.get("news", [])[:5] # Limit to 5 for latency
+        news = data.get("news", [])[:5] 
         if not news: return {"ticker": ticker, "sentiment_signal": "hold", "sentiment_score": 0}
         
         txt = "\n".join([f"- {n.get('title')}" for n in news])
@@ -324,13 +319,15 @@ class SentimentAgent:
             resp = self.client.generate(prompt)
             match = re.search(r"([-+]?\d*\.\d+)|([-+]?\d+)", resp)
             score = float(match.group(0)) if match else 0
+            # Normalize and clamp score
+            score = max(-1.0, min(1.0, score))
+            
             sig = "buy" if score > 0.3 else ("sell" if score < -0.3 else "hold")
             return {"ticker": ticker, "sentiment_signal": sig, "sentiment_score": score, "sentiment_confidence_score": abs(score)}
         except: return {"ticker": ticker, "sentiment_signal": "hold", "sentiment_score": 0}
 
 class PortfolioAgent:
     def run(self, ticker: str, signals: list) -> dict:
-        # Simple weighted voting
         score = 0
         weights = {"price": 1.0, "momentum": 0.8, "sentiment": 0.7, "financial": 1.2}
         
@@ -354,7 +351,6 @@ def run_live_analysis(tickers, llm_client):
     for i, t in enumerate(tickers):
         progress_bar.progress((i + 1) / len(tickers), text=f"Analyzing {t}...")
         
-        # Parallel data fetch simulation (sequential but cached)
         ph = fetch_price_history(t)
         info = fetch_ticker_info(t)
         news = fetch_enriched_news(t, info)
@@ -367,7 +363,6 @@ def run_live_analysis(tickers, llm_client):
             "financials": financials
         }
         
-        # Run Agents
         p_res = PriceAgent().run(t, ph)
         m_res = MomentumAgent().run(t, ph)
         s_res = SentimentAgent(llm_client).run(t, data_bundle)
@@ -376,7 +371,6 @@ def run_live_analysis(tickers, llm_client):
         signals = [p_res, m_res, s_res, f_res]
         final = PortfolioAgent().run(t, signals)
         
-        # Combine
         combined = {**p_res, **m_res, **s_res, **f_res, **final}
         combined["ticker_info"] = info
         combined["current_price"] = info.get("currentPrice", ph["Close"].iloc[-1] if not ph.empty else 0)
@@ -396,7 +390,6 @@ def display_detailed_analysis(res):
     
     st.header(f"{t} - {info.get('longName', t)}")
     
-    # Top Level Cards
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Final Decision", res.get("final_decision", "HOLD").upper(), 
@@ -446,7 +439,13 @@ def display_detailed_analysis(res):
     with tabs[2]:
         st.subheader("News Sentiment")
         s_score = res.get("sentiment_score", 0)
-        st.progress((s_score + 1) / 2, text=f"Sentiment Score: {s_score:.2f} (-1.0 to 1.0)")
+        
+        # --- FIX: CLAMP PROGRESS BAR VALUE ---
+        # Ensure the value passed to st.progress is strictly between 0.0 and 1.0
+        normalized_score = (s_score + 1) / 2
+        safe_progress = max(0.0, min(1.0, normalized_score))
+        
+        st.progress(safe_progress, text=f"Sentiment Score: {s_score:.2f} (-1.0 to 1.0)")
         
         for n in res.get("news", [])[:3]:
             with st.container(border=True):
@@ -491,10 +490,10 @@ if mode == "Live Analysis":
             st.dataframe(df_summary[cols].style.applymap(lambda x: f'color: {get_signal_color(x)}', subset=['final_decision']), use_container_width=True)
             
             selected = st.selectbox("Select Ticker for Deep Dive", df_summary["ticker"].tolist())
-            display_detailed_analysis(st.session_state.live_output[selected])
+            if selected:
+                display_detailed_analysis(st.session_state.live_output[selected])
 
 elif mode == "Virtual Portfolio":
     st.title("💼 Virtual Portfolio")
-    # (Portfolio logic kept simple for brevity, using the existing data structures)
     st.metric("Cash Balance", f"${st.session_state.virtual_portfolio['cash']:,.2f}")
     st.info("Virtual trading logic can be connected to the signals generated in Live Analysis.")
