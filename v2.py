@@ -3,13 +3,10 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from google import genai
-from google.genai import types
 from dotenv import load_dotenv
-import requests
 import re
-import altair as alt
 import json
 
 # --- Page Config ---
@@ -28,8 +25,6 @@ st.markdown("""
 # SESSION STATE INITIALIZATION
 # -----------------------------------------------------------------------------
 if 'live_output' not in st.session_state: st.session_state.live_output = {}
-if 'virtual_portfolio' not in st.session_state: 
-    st.session_state.virtual_portfolio = { "cash": 10000.0, "holdings": [], "history": [] }
 
 # --------------------------------
 # Utility Functions
@@ -46,6 +41,7 @@ def fetch_market_data(ticker: str):
     """Fetches Price, Info, and Financials in one go."""
     try:
         t = yf.Ticker(ticker)
+        # Fetch minimal history for speed
         hist = t.history(period="1y")
         info = t.info
         
@@ -78,16 +74,14 @@ def fetch_market_data(ticker: str):
         return {"error": str(e)}
 
 # --------------------------------
-# Gemini 2.0 Client (The Fix)
+# Gemini 2.0 Client
 # --------------------------------
 class ModelClient:
     def __init__(self, api_key: str):
-        # Uses the NEW Google GenAI SDK
         self.client = genai.Client(api_key=api_key)
 
     def generate(self, prompt: str) -> str:
         try:
-            # Using Gemini 2.0 Flash for speed
             response = self.client.models.generate_content(
                 model="gemini-2.0-flash", 
                 contents=prompt
@@ -184,13 +178,10 @@ class SentimentAgent:
         """
         resp = self.client.generate(prompt)
         
-        # --- FIX: ROBUST PARSING ---
         try:
-            # Extract first float found
             match = re.search(r"[-+]?\d*\.\d+|\d+", resp)
             score = float(match.group()) if match else 0.0
-            # Safety Clamp
-            score = max(-1.0, min(1.0, score))
+            score = max(-1.0, min(1.0, score)) # Safety clamp
         except:
             score = 0.0
             
@@ -220,7 +211,7 @@ def run_analysis(tickers, client):
         score = 0
         score += 1 if tech["price_signal"] == "BUY" else -1 if tech["price_signal"] == "SELL" else 0
         score += 1 if fund["financial_signal"] == "BUY" else -1 if fund["financial_signal"] == "SELL" else 0
-        score += sent["sentiment_score"] * 2 # Weight sentiment higher
+        score += sent["sentiment_score"] * 2 
         
         decision = "BUY" if score > 0.5 else "SELL" if score < -0.5 else "HOLD"
         
@@ -249,6 +240,12 @@ st.title("⚡ AI Hedge Fund (Gemini 2.0)")
 with st.container(border=True):
     col1, col2 = st.columns([3, 1])
     tickers = col1.text_input("Tickers", "AAPL, NVDA, TSLA, AMD")
+    
+    # Button to Clear Cache and Reset (Fixes Stale Data Issues)
+    if st.sidebar.button("⚠️ Clear Cache / Reset"):
+        st.session_state.live_output = {}
+        st.rerun()
+
     if col2.button("Run Analysis", type="primary", use_container_width=True):
         t_list = [x.strip().upper() for x in tickers.split(",")]
         st.session_state.live_output = run_analysis(t_list, client)
@@ -262,14 +259,13 @@ if st.session_state.live_output:
     for t, res in st.session_state.live_output.items():
         data.append({
             "Ticker": t,
-            "Price": f"${res['current_price']:.2f}",
-            "Decision": res['final_decision'],
-            "Score": f"{res['composite_score']:.2f}",
-            "Sentiment": f"{res['sentiment_score']:.2f}"
+            "Price": f"${res.get('current_price', 0):.2f}",
+            "Decision": res.get('final_decision', 'HOLD'),
+            "Score": f"{res.get('composite_score', 0):.2f}",
+            "Sentiment": f"{res.get('sentiment_score', 0):.2f}"
         })
     
     df = pd.DataFrame(data)
-    # Using 'map' instead of deprecated 'applymap'
     st.dataframe(
         df.style.map(lambda x: f'color: {get_signal_color(x)}', subset=['Decision']), 
         use_container_width=True
@@ -278,43 +274,46 @@ if st.session_state.live_output:
     # Detailed Tabs
     selected = st.selectbox("Deep Dive", list(st.session_state.live_output.keys()))
     res = st.session_state.live_output[selected]
-    info = res["info"]
+    
+    # --- ROBUST DATA ACCESS (Fixes KeyError) ---
+    # Tries 'info' first (new code), falls back to 'ticker_info' (old code), or empty dict
+    info = res.get("info", res.get("ticker_info", {}))
     
     st.markdown("---")
     st.header(f"{selected} • {info.get('longName', selected)}")
     
     # KPIs
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Action", res["final_decision"], delta=f"Score: {res['composite_score']:.2f}")
-    k2.metric("Net Margin", f"{res['net_margin']:.2%}")
-    k3.metric("Debt/Equity", f"{res['de_ratio']:.2f}", delta_color="inverse")
-    k4.metric("Momentum (1Y)", f"{res['momentum_12m']:.2%}")
+    k1.metric("Action", res.get("final_decision", "HOLD"), delta=f"Score: {res.get('composite_score', 0):.2f}")
+    k2.metric("Net Margin", f"{res.get('net_margin', 0):.2%}")
+    k3.metric("Debt/Equity", f"{res.get('de_ratio', 0):.2f}", delta_color="inverse")
+    k4.metric("Momentum (1Y)", f"{res.get('momentum_12m', 0):.2%}")
     
     # Charts & AI
     c1, c2 = st.columns([2, 1])
     
     with c1:
         st.subheader("Analysis")
-        # --- FIX: PROGRESS BAR CLAMP ---
-        # Ensures value is ALWAYS between 0.0 and 1.0
-        raw_sent = res['sentiment_score']
+        
+        # Safe Progress Bar
+        raw_sent = res.get('sentiment_score', 0)
         norm_sent = (raw_sent + 1) / 2
         safe_sent = max(0.0, min(1.0, norm_sent))
         
         st.write(f"**Sentiment Analysis ({raw_sent:.2f})**")
         st.progress(safe_sent)
         
-        st.info(f"**Financial AI:** {res['financial_summary']}")
+        st.info(f"**Financial AI:** {res.get('financial_summary', 'No summary available.')}")
         
         st.write("**Recent Headlines**")
-        for n in res['news'][:3]:
-            st.markdown(f"- [{n['title']}]({n['link']}) *({n['time']})*")
+        for n in res.get('news', [])[:3]:
+            st.markdown(f"- [{n.get('title')}]({n.get('link')}) *({n.get('time')})*")
             
     with c2:
         st.subheader("Raw Data")
         st.json({
-            "SMA50": res["sma50"],
-            "SMA200": res["sma200"],
+            "SMA50": res.get("sma50"),
+            "SMA200": res.get("sma200"),
             "Market Cap": info.get("marketCap"),
             "Beta": info.get("beta")
         })
