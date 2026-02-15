@@ -51,6 +51,13 @@ st.markdown("""
         border-radius: 8px;
         margin-bottom: 20px;
     }
+    .news-summary-box {
+        background-color: #FFFBEB;
+        border-left: 5px solid #F59E0B;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 15px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -66,11 +73,6 @@ def format_large_number(num):
     if num >= 1e9: return f"${num/1e9:.2f}B"
     if num >= 1e6: return f"${num/1e6:.2f}M"
     return f"${num:,.0f}"
-
-def get_signal_color(text):
-    if "BUY" in text.upper(): return "#10B981" # Green
-    if "SELL" in text.upper(): return "#EF4444" # Red
-    return "#F59E0B" # Orange
 
 # --------------------------------
 # DATA FETCHING (MAXIMUM DEPTH)
@@ -89,17 +91,20 @@ def fetch_data(ticker, period="1y"):
         bal = t.balance_sheet
         cash = t.cashflow
         q_inc = t.quarterly_income_stmt
+        q_bal = t.quarterly_balance_sheet
+        q_cash = t.quarterly_cashflow
         
         # 3. Ownership & Insiders
         inst_holders = t.institutional_holders
-        major_holders = t.major_holders
+        mutual_holders = t.mutualfund_holders
         insider_tx = t.insider_transactions
+        major_holders = t.major_holders
         
-        # 4. Analyst Data
+        # 4. Analyst & Calendar
         recs = t.recommendations
-        upgrades = t.upgrades_downgrades
+        calendar = t.calendar
         
-        # 5. NewsAPI
+        # 5. NewsAPI (Fetch 15 to ensure we have 10 good ones)
         news = []
         newsapi_key = st.secrets.get("NEWSAPI_KEY")
         if newsapi_key:
@@ -108,21 +113,52 @@ def fetch_data(ticker, period="1y"):
                 query = info.get('longName', ticker)
                 # News from last 14 days
                 start = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
-                resp = napi.get_everything(q=query, from_param=start, language='en', sort_by='relevancy', page_size=7)
+                resp = napi.get_everything(q=query, from_param=start, language='en', sort_by='relevancy', page_size=15)
                 if resp['status'] == 'ok': news = resp['articles']
             except: pass
         
-        if not news: # Fallback
-            news = [{"title": n['title'], "source": {"name": n['publisher']}, "url": n['link']} for n in t.news]
+        if not news: # Fallback to yfinance news if NewsAPI fails
+            news = [{"title": n.get('title'), "source": {"name": n.get('publisher')}, "url": n.get('link'), "description": "No description"} for n in t.news]
 
         return {
             "history": hist, "info": info, "news": news,
-            "financials": {"inc": inc, "bal": bal, "cash": cash, "q_inc": q_inc},
-            "ownership": {"inst": inst_holders, "major": major_holders, "insider": insider_tx},
-            "analysts": {"recs": recs, "upgrades": upgrades}
+            "financials": {"inc": inc, "bal": bal, "cash": cash, "q_inc": q_inc, "q_bal": q_bal, "q_cash": q_cash},
+            "ownership": {"inst": inst_holders, "mutual": mutual_holders, "insider": insider_tx, "major": major_holders},
+            "analysts": {"recs": recs, "calendar": calendar}
         }
     except Exception as e:
         return {"error": str(e)}
+
+# --------------------------------
+# TECHNICAL CALCULATOR (Helper)
+# --------------------------------
+def calculate_technicals(df):
+    if df.empty: return df
+    
+    # Moving Averages
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
+    
+    # RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # MACD
+    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = ema12 - ema26
+    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    
+    # Bollinger Bands
+    df['BB_Mid'] = df['Close'].rolling(window=20).mean()
+    df['BB_Std'] = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['BB_Mid'] + (2 * df['BB_Std'])
+    df['BB_Lower'] = df['BB_Mid'] - (2 * df['BB_Std'])
+    
+    return df
 
 # --------------------------------
 # AI AGENTS
@@ -135,60 +171,51 @@ class ModelClient:
 
 # --- Agent 1: The Technical Analyst ---
 def run_technical_agent(client, ticker, hist):
-    latest = hist.iloc[-1]
-    
-    # Simple Technicals
-    sma50 = hist['Close'].rolling(50).mean().iloc[-1]
-    sma200 = hist['Close'].rolling(200).mean().iloc[-1]
-    
-    # RSI Calculation
-    delta = hist['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs)).iloc[-1]
+    df = calculate_technicals(hist.copy())
+    latest = df.iloc[-1]
     
     prompt = f"""
-    Act as a Technical Analyst. Analyze {ticker}.
+    Act as a Technical Analyst. Analyze {ticker} using these indicators:
     Price: {latest['Close']:.2f}
-    SMA50: {sma50:.2f} | SMA200: {sma200:.2f}
-    RSI: {rsi:.2f}
-    Volume: {latest['Volume']}
+    SMA50: {latest['SMA_50']:.2f} | SMA200: {latest['SMA_200']:.2f}
+    RSI (14): {latest['RSI']:.2f}
+    MACD: {latest['MACD']:.2f} (Signal: {latest['Signal_Line']:.2f})
+    Bollinger Bands: Upper {latest['BB_Upper']:.2f} | Lower {latest['BB_Lower']:.2f}
+    
+    Determine trend strength and support/resistance levels.
     
     Output strictly:
     SIGNAL: [BUY/SELL/HOLD]
-    REASON: [Max 15 words summary]
+    ANALYSIS: [Max 30 words summary]
     """
     return client.generate(prompt)
 
 # --- Agent 2: The Financial Statement Expert ---
 def run_financial_agent(client, ticker, fin):
-    inc = fin['inc']
-    bal = fin['bal']
-    cash = fin['cash']
-    
-    # Prepare Data Context (Last 2 Years)
+    # Prepare Data Context (Last 2 Years + Recent Quarter)
     try:
-        inc_txt = inc.iloc[:, :2].to_string() if not inc.empty else "N/A"
-        bal_txt = bal.iloc[:, :2].to_string() if not bal.empty else "N/A"
-        cash_txt = cash.iloc[:, :2].to_string() if not cash.empty else "N/A"
-    except: inc_txt = bal_txt = cash_txt = "N/A"
+        inc_txt = fin['inc'].iloc[:, :2].to_string() if not fin['inc'].empty else "N/A"
+        q_inc_txt = fin['q_inc'].iloc[:, :2].to_string() if not fin['q_inc'].empty else "N/A"
+        bal_txt = fin['bal'].iloc[:, :2].to_string() if not fin['bal'].empty else "N/A"
+        cash_txt = fin['cash'].iloc[:, :2].to_string() if not fin['cash'].empty else "N/A"
+    except: inc_txt = q_inc_txt = bal_txt = cash_txt = "N/A"
     
     prompt = f"""
-    Act as a Forensic Accountant. Analyze {ticker}.
+    Act as a CFA Charterholder. Analyze {ticker} financials.
     
-    INCOME STATEMENT: {inc_txt}
+    ANNUAL INCOME STATEMENT: {inc_txt}
+    QUARTERLY INCOME (Trend): {q_inc_txt}
     BALANCE SHEET: {bal_txt}
     CASH FLOW: {cash_txt}
     
     Task:
-    1. Check Margins (Gross, Operating).
-    2. Check Debt levels.
-    3. Check Cash Flow quality.
+    1. Assess Revenue Growth & Margin Trends.
+    2. Evaluate Solvency (Debt/Equity) and Liquidity.
+    3. Analyze Quality of Earnings (Cash Flow vs Net Income).
     
     Output strictly:
     SIGNAL: [BUY/SELL/HOLD]
-    REASON: [Max 15 words summary]
+    ANALYSIS: [Max 40 words summary]
     """
     return client.generate(prompt)
 
@@ -196,47 +223,76 @@ def run_financial_agent(client, ticker, fin):
 def run_ownership_agent(client, ticker, own):
     insider = own['insider']
     inst = own['inst']
+    mutual = own['mutual']
     
     insider_txt = insider.head(5).to_string() if insider is not None and not insider.empty else "No Insider Data"
     inst_txt = inst.head(5).to_string() if inst is not None and not inst.empty else "No Institutional Data"
+    mutual_txt = mutual.head(5).to_string() if mutual is not None and not mutual.empty else "No Mutual Fund Data"
     
     prompt = f"""
-    Act as an Insider Trading Analyst. Analyze {ticker}.
+    Act as an Institutional Flow Analyst. Analyze {ticker}.
     
-    RECENT INSIDER TRANSACTIONS:
+    RECENT INSIDER TRADES:
     {insider_txt}
     
-    INSTITUTIONAL HOLDERS:
+    TOP INSTITUTIONS:
     {inst_txt}
     
-    Task: Are insiders buying or selling? Is smart money entering?
+    TOP MUTUAL FUNDS:
+    {mutual_txt}
+    
+    Task: Detect accumulation or distribution. Are insiders dumping stock? Are big funds buying?
     
     Output strictly:
     SIGNAL: [BUY/SELL/HOLD]
-    REASON: [Max 15 words summary]
+    ANALYSIS: [Max 30 words summary]
     """
     return client.generate(prompt)
 
-# --- Agent 4: The Master Strategist ---
-def run_master_agent(client, ticker, info, tech, fund, own, news):
-    news_sum = "\n".join([f"- {n['title']}" for n in news[:3]])
+# --- Agent 4: The News & Sentiment Analyst ---
+def run_news_agent(client, ticker, news_data):
+    # Process top 10 articles
+    articles_text = ""
+    for i, n in enumerate(news_data[:10]):
+        title = n.get('title', 'No Title')
+        desc = n.get('description', 'No Description')
+        source = n.get('source', {}).get('name', 'Unknown')
+        articles_text += f"{i+1}. {title} ({source}): {desc}\n"
     
     prompt = f"""
-    You are the Chief Investment Officer. Consolidate these reports for {ticker}.
+    Act as a Sentiment Analyst. Read these 10 recent articles about {ticker}:
+    
+    {articles_text}
+    
+    Task:
+    1. Summarize the dominant narrative (Bullish/Bearish/Neutral).
+    2. Identify specific catalysts (Earnings, Lawsuits, Product Launches).
+    
+    Output strictly:
+    SENTIMENT_SCORE: [0-10, where 10 is Euphoric]
+    SUMMARY: [3-4 bullet points summarizing the news]
+    """
+    return client.generate(prompt)
+
+# --- Agent 5: The Master Strategist ---
+def run_master_agent(client, ticker, info, tech, fund, own, news_analysis):
+    prompt = f"""
+    You are the Chief Investment Officer (CIO) of Titan Capital. 
+    Synthesize these expert reports for {ticker} into a final investment memo.
     
     1. TECHNICAL REPORT: {tech}
     2. FINANCIAL REPORT: {fund}
     3. OWNERSHIP REPORT: {own}
-    4. NEWS: {news_sum}
-    5. VALUATION: PE {info.get('trailingPE')}, PEG {info.get('pegRatio')}
+    4. NEWS SENTIMENT: {news_analysis}
+    5. VALUATION: PE {info.get('trailingPE')}, Market Cap {info.get('marketCap')}
     
-    Task: Write a final investment memo.
+    Task: Write a final verdict.
     
     Output Format:
     **VERDICT:** [STRONG BUY / BUY / HOLD / SELL / STRONG SELL]
     **CONFIDENCE:** [0-100]%
-    **THESIS:** [3-4 sentence explanation]
-    **RISK:** [1 key risk]
+    **THESIS:** [3-4 sentence detailed explanation]
+    **KEY RISKS:** [1-2 sentences]
     """
     return client.generate(prompt)
 
@@ -270,20 +326,23 @@ def main():
             # Run Agents if not cached
             if not st.session_state.get('ai_results'):
                 with st.status("Council of Experts Working...", expanded=True) as status:
-                    st.write("📈 Technical Agent analyzing charts...")
+                    st.write("📈 Technical Agent calculating indicators (RSI, MACD)...")
                     tech_res = run_technical_agent(client, ticker_input, data['history'])
                     
-                    st.write("💰 Financial Agent auditing books...")
+                    st.write("💰 Financial Agent auditing annual & quarterly books...")
                     fund_res = run_financial_agent(client, ticker_input, data['financials'])
                     
-                    st.write("🕵️ Insider Agent tracking trades...")
+                    st.write("🕵️ Insider Agent tracking institutional flows...")
                     own_res = run_ownership_agent(client, ticker_input, data['ownership'])
                     
-                    st.write("🧠 Master Strategist synthesizing...")
-                    master_res = run_master_agent(client, ticker_input, data['info'], tech_res, fund_res, own_res, data['news'])
+                    st.write("📰 News Agent reading top 10 articles...")
+                    news_res = run_news_agent(client, ticker_input, data['news'])
+                    
+                    st.write("🧠 Master Strategist synthesizing final verdict...")
+                    master_res = run_master_agent(client, ticker_input, data['info'], tech_res, fund_res, own_res, news_res)
                     
                     st.session_state.ai_results = {
-                        "tech": tech_res, "fund": fund_res, "own": own_res, "master": master_res
+                        "tech": tech_res, "fund": fund_res, "own": own_res, "news": news_res, "master": master_res
                     }
                     status.update(label="Analysis Complete", state="complete", expanded=False)
                 st.session_state.last_ticker = ticker_input
@@ -333,7 +392,7 @@ def main():
                     st.rerun()
 
         # 5. Deep Dive Tabs
-        tab_fund, tab_tech, tab_own, tab_news = st.tabs(["📊 Financials", "📈 Technicals", "🕵️ Insiders & Inst.", "📰 News"])
+        tab_fund, tab_tech, tab_own, tab_news = st.tabs(["📊 Financials", "📈 Technicals", "🕵️ Insiders & Inst.", "📰 News Analyst"])
 
         with tab_fund:
             st.subheader("Financial Statement Analysis")
@@ -370,12 +429,20 @@ def main():
                 else: st.warning("No Institutional Data Found")
 
         with tab_news:
-            st.subheader("Global News Wire")
-            for n in data['news']:
+            st.subheader("News & Sentiment Analysis")
+            
+            # Display AI Summary
+            st.markdown('<div class="news-summary-box">', unsafe_allow_html=True)
+            st.markdown(f"**AI News Analyst Summary:**\n\n{res['news']}")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown("### Source Articles")
+            for n in data['news'][:10]: # Limit to top 10 for display
                 with st.container(border=True):
                     src = n.get('source', {}).get('name', n.get('publisher', 'Unknown'))
-                    st.markdown(f"**{src}** • [{n['title']}]({n.get('url', n.get('link'))})")
+                    title = n.get('title', 'No Title')
+                    url = n.get('url', n.get('link', '#'))
+                    st.markdown(f"**{src}** • [{title}]({url})")
 
 if __name__ == "__main__":
     main()
-    
