@@ -74,7 +74,7 @@ def fetch_market_data(ticker: str):
         return {"error": str(e)}
 
 # --------------------------------
-# Gemini 2.0 Client
+# Gemini 3.0 Client
 # --------------------------------
 class ModelClient:
     def __init__(self, api_key: str):
@@ -83,7 +83,7 @@ class ModelClient:
     def generate(self, prompt: str) -> str:
         try:
             response = self.client.models.generate_content(
-                model="gemini-2.0-flash", 
+                model="gemini-3-flash-preview", 
                 contents=prompt
             )
             return response.text
