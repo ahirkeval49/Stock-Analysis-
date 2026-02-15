@@ -4,8 +4,11 @@ python-dotenv
 python-dateutil
 
 # Data & finance
+requests
 plotly
 google-genai
+pandas_ta
+streamlit-shadcn-ui
 pandas
 numpy
 yfinance
@@ -13,7 +16,6 @@ sec-edgar-downloader
 altair
 alpha_vantage
 # HTTP & scraping
-requests
 beautifulsoup4
 praw
 
