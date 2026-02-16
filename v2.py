@@ -166,7 +166,7 @@ def calculate_technicals(df):
 class ModelClient:
     def __init__(self, api_key): self.client = genai.Client(api_key=api_key)
     def generate(self, prompt):
-        try: return self.client.models.generate_content(model="gemini-3-pro-preview"", contents=prompt).text
+        try: return self.client.models.generate_content(model="gemini-3-pro-preview", contents=prompt).text
         except Exception as e: return f"AI Error: {e}"
 
 # --- Agent 1: The Technical Analyst ---
